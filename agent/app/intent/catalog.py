@@ -1,6 +1,6 @@
 """Intent taxonomy and few-shot corpus for the three-layer router.
 
-The 16 user-facing intents cover the AutoHunt chat surface. ``unsafe`` and
+The capability-oriented intents cover the AutoHunt chat surface. ``unsafe`` and
 ``none`` are meta-labels used by the safety layer and the small model only —
 they never surface as user-facing intents.
 
@@ -23,6 +23,16 @@ class IntentSpec:
 
 
 INTENT_SPECS: dict[str, IntentSpec] = {
+    "compound_request": IntentSpec("compound_request", "多目标任务", True, True,
+        "包含多个独立目标，交给完整目标/参数/依赖规划，不可按单标签执行"),
+    "learning_plan": IntentSpec("learning_plan", "生成成长计划", True, True,
+        "依据有效 JD 显式生成或更新学习/成长计划"),
+    "mock_delivery": IntentSpec("mock_delivery", "模拟站投递", True, True,
+        "按明确范围启动或停止本地模拟站有限投递队列，不支持真实站"),
+    "search_conditions": IntentSpec("search_conditions", "调整会话搜索条件", True, False,
+        "只更新当前会话槽位，不隐式改变长期偏好"),
+    "job_detail": IntentSpec("job_detail", "查看职位详情", False, False,
+        "消解已展示结果的序号、名称和指代，只读完整 JD 与可点击链接"),
     "search_jobs": IntentSpec(
         "search_jobs", "搜索职位", True, True,
         "按关键词/城市/方向/薪资启动 BOSS 职位搜索",
@@ -123,6 +133,13 @@ DEFAULT_DIRECT_INTENTS = frozenset({
 # Few-shot corpus (text, intent_id). Rendered into the small-model prompt.
 # ---------------------------------------------------------------------------
 FEWSHOT_EXAMPLES: tuple[tuple[str, str], ...] = (
+    ("先找15个工作，匹配90分以上投递，低于90分的生成成长计划", "compound_request"),
+    ("先查看简历，再优化项目描述", "compound_request"),
+    ("详细了解第8个，同时看看职位统计", "compound_request"),
+    ("根据最近JD更新成长计划", "learning_plan"),
+    ("匹配90分以上自动投递", "mock_delivery"),
+    ("城市换成武汉，数量改为15个", "search_conditions"),
+    ("我想详细了解第8个", "job_detail"),
     # search_jobs
     ("搜索深圳的算法工程师岗位", "search_jobs"),
     ("帮我找一下上海 30K 以上的后端开发", "search_jobs"),

@@ -7,7 +7,8 @@ import type { useAgentRuntime } from "@/lib/use-agent-runtime";
 
 const labels: Record<string, string> = { queued: "排队中", running: "执行中", waiting_user: "等待接管",
   waiting_confirmation: "等待审核", cancelling: "正在停止", completed: "完成", cancelled: "已停止",
-  waiting_reply: "等待回复",
+  waiting_reply: "等待回复", pending: "等待前置步骤", claimed: "已领取，执行中", waiting_external: "等待搜索完成",
+  skipped: "前置失败，未执行", blocked: "条件或授权不足",
   interrupted: "已中断", timed_out: "超时", failed: "失败", outcome_indeterminate: "待核验" };
 
 function Steps({ run }: { run: AgentRun }) {
@@ -32,7 +33,7 @@ function Steps({ run }: { run: AgentRun }) {
     <summary>执行步骤</summary>
     {error && <p>{error}</p>}
     <ol>{events.map((event) => <li key={event.seq}>
-      {String(event.data.detail ?? (event.kind === "tool_started" ? `调用 ${event.data.tool}` : event.kind === "tool_finished" ? `${event.data.tool} · ${event.data.status}` : event.kind === "response" ? "已返回回复" : event.kind === "browser_summary" ? `搜索摘要：发现 ${event.data.discovered}，保存 ${event.data.stored}` : event.kind === "browser" ? "浏览器状态已更新" : event.kind))}
+      {String(event.data.detail || (event.kind === "request_plan" ? `已规划 ${(event.data.steps as unknown[] | undefined)?.length ?? 0} 个步骤` : event.kind === "plan_step" ? `${event.data.step_id} · ${event.data.tool} · ${labels[String(event.data.status)] ?? event.data.status}` : event.kind === "tool_started" ? `调用 ${event.data.tool}` : event.kind === "tool_finished" ? `${event.data.tool} · ${event.data.status}` : event.kind === "response" ? "已返回回复" : event.kind === "browser_summary" ? `搜索摘要：发现 ${event.data.discovered}，保存 ${event.data.stored}` : event.kind === "browser" ? "浏览器状态已更新" : event.kind))}
     </li>)}</ol>
   </details>;
 }
@@ -66,6 +67,9 @@ export function RuntimePanel({ runtime, notice, showSession = true }: { runtime:
         <div><strong>{run.kind === "learning_plan" ? "学习计划" : run.kind === "delivery" ? "简历投递" : run.kind === "browser" ? "职位搜索" : run.kind === "job_analysis" ? "职位分析" : "Agent 任务"}</strong><span>{labels[run.status] ?? run.status}</span></div>
         <small>{new Date(run.created_at).toLocaleString("zh-CN")} · {run.id.slice(0, 8)}</small>
         <p role="status">{runtime.progress[run.id] ?? run.error ?? "步骤已保存"}</p>
+        {!!run.plan_steps?.length && <ol>{run.plan_steps.map((step) => <li key={step.id}>
+          {step.tool} · {labels[step.status] ?? step.status}{step.depends_on.length > 0 && ` · 依赖 ${step.depends_on.join("、")}`}
+        </li>)}</ol>}
         {typeof run.result?.message === "string" && <details><summary>查看回复</summary><p>{run.result.message}</p></details>}
         <div className="runtime-actions">
           {!terminalRun(run.status) && <button className="button secondary compact" onClick={() => void runtime.control(run, "cancel").catch((error) => notice(error.message))}>停止任务</button>}

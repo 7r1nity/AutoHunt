@@ -493,18 +493,27 @@ class AutoHuntAgent:
             document = self.resume_workspace.read_document() if self.resume_workspace else None
             save_search_state(prepare_search_state(None, self.candidate_state.read(), document.version if document else None))
             return ChatResponse(message="已重置临时上下文与会话搜索条件；简历、长期偏好和历史记录保留。已启动的浏览器任务不会被删除，如需中断请发送「停止搜索」。", lane=AgentLane.CANDIDATE)
-        # Plan dependent actions BEFORE any single-intent quick path can consume
-        # the request. The planner is read-only; missing slots never start search.
-        from ..workflow.compound import needs_plan, pending_request, is_slot_reply
+        # Fast paths are allowed only for fully consumed single goals. Everything
+        # else shares one complete-goal planner, not domain-specific branch guards.
+        from ..workflow.planning import live_request, pending_slot_answer, shortcut_safe, revoked
         from ..growth.requests import resume_stamp
         stamp = resume_stamp(self.resume_workspace.read_document(), self.candidate_state) if self.resume_workspace else ""
-        pending = pending_request(context.dialogue or {}, stamp)
-        if needs_plan(message) or pending and is_slot_reply(message):
-            return await self._handle_compound(message, stamp, pending)
-        if pending and CONFIRM.fullmatch(stripped):
-            return ChatResponse(message="原请求仍缺少明确参数：" + "；".join(pending["missing"]) + "。确认本身不能补齐这些数值，尚未执行。", lane=AgentLane.APPLICATION)
-        if parse_search_message(message).authorized or REJECT.fullmatch(stripped) or re.search(r"停止搜索|暂停搜索|退出当前任务", message):
+        pending = live_request(context.dialogue or {}, stamp)
+        if pending and any(revoked(step["tool"], [pending["original"], message]) for step in pending.get("steps", [])):
+            # Persist withdrawn authority even if the model subsequently returns
+            # invalid JSON. A later slot answer cannot resurrect the old action.
+            pending = {**pending, "answers": [*pending.get("answers", []), message][-4:]}
+            dialogue_change("instruction", request=pending)
+        if pending and pending_slot_answer(message, pending) and not REJECT.fullmatch(stripped):
+            return await self._handle_planned(message, previous=pending)
+        search_action = parse_search_message(message)
+        if search_action.authorized or REJECT.fullmatch(stripped) or search_action.action in {"stop", "pause"}:
             dialogue_change("workflow", request=None)
+            dialogue_change("instruction", request=None)
+            if REJECT.fullmatch(stripped) or search_action.authorized or search_action.action == "stop":
+                dialogue_change("task", kind="plan_id", id="", status="superseded", bind=True)
+        if not shortcut_safe(message):
+            return await self._handle_routed(message) if self.router else await self._handle_planned(message)
         if CONFIRM.fullmatch(stripped) or REJECT.fullmatch(stripped):
             return await self._resolve_context_confirmation(stripped)
         from .action_language import explicit_mock_delivery
@@ -515,15 +524,11 @@ class AutoHuntAgent:
                 return ChatResponse(message=str(exc), lane=AgentLane.APPLICATION)
             tool = "mock_delivery_cancel" if re.search(r"(?:停止|取消|关闭|暂停|不要再)自动投递", message) else "mock_delivery_start" if delivery_scope else None
             if tool:
+                if tool == "mock_delivery_cancel":
+                    dialogue_change("task", kind="plan_id", id="", status="cancelled", bind=True)
                 outcome = await self.tool_registry.execute(tool, delivery_scope or {}, user_message=message, state=ToolLoopState())
                 return ChatResponse(message=outcome.content["message"] if outcome.status == "ok" else str(outcome.content),
                     lane=AgentLane.APPLICATION, tool_events=[ToolEvent(tool=tool, status=outcome.status, detail=str(outcome.content)[:300])])
-        from ..growth.requests import continued_plan_scope, resume_stamp
-        if self.tool_registry and self.tool_registry.learning_plans and (
-            self._learning_plan_command(message) or continued_plan_scope(context.dialogue or {}, message,
-                resume_stamp(self.resume_workspace.read_document(), self.candidate_state)) is not None
-        ):
-            return await self._handle_plain(message)
         from .job_followups import job_followup_request
         detail_request = job_followup_request(stripped, context.dialogue or {})
         if detail_request and self.tool_registry:
@@ -558,7 +563,7 @@ class AutoHuntAgent:
             simple_dry_run = re.sub(r"(?i)^(?:dry[ -]run|试运行)\s*", "", message).strip()
             if _fast_search_hint(simple_dry_run) is None:
                 if self.tool_registry is not None and hasattr(self.llm, "generate_with_tools"):
-                    return await self._handle_tool_loop(message)
+                    return await self._handle_planned(message)
                 return ChatResponse(message="试运行条件尚未完整解析，没有启动浏览器。请明确岗位、城市、数量和月薪条件。", lane=AgentLane.APPLICATION)
             hint = _fast_search_hint(simple_dry_run) or _search_command(message) or {}
             state = self.candidate_state.read()
@@ -573,52 +578,38 @@ class AutoHuntAgent:
             response = await self._handle_plain(message)
         return response
 
-    async def _handle_compound(self, message: str, stamp: str, previous: dict | None) -> ChatResponse:
-        from ..workflow.compound import extract_plan
+    async def _handle_planned(self, message: str, *, previous: dict | None = None) -> ChatResponse:
+        from ..workflow.planning import plan_request
+        from ..workflow.execution import begin
+        from ..growth.requests import resume_stamp
         context = active_run()
         if not self.tool_registry:
             return ChatResponse(message="工作流执行器尚未配置，没有启动搜索或后续动作。", lane=AgentLane.APPLICATION)
-        # A fresh search command replaces, rather than appends to, an unanswered
-        # request; an actual slot answer continues the original authorization.
-        if previous and parse_search_message(message).authorized:
-            previous = None
-        emit("progress", detail="正在拆解搜索条件和后续动作；尚未执行")
+        stamp = resume_stamp(self.resume_workspace.read_document(), self.candidate_state)
+        emit("progress", detail="正在识别全部目标、核对参数与执行依赖；尚未执行")
         try:
-            plan = await extract_plan(self.llm, message, previous=previous,
-                conditions=context.search_state or {}, stamp=stamp, turn=(context.dialogue or {}).get("turn", 0))
+            if self.router and not self.router.llm_available():
+                raise RuntimeError("主模型熔断保护生效，请稍后重试")
+            plan = await plan_request(self.llm, self.tool_registry, message, previous=previous,
+                dialogue=compact_state(context.dialogue or {}), conditions=context.search_state or {}, stamp=stamp)
+            if self.router:
+                self.router.record_llm_success()
         except (ValueError, RuntimeError, asyncio.TimeoutError) as exc:
-            return ChatResponse(message=f"未启动任务：{str(exc) or '规划超时'}。请明确搜索条件及后续动作范围。", lane=AgentLane.APPLICATION)
-        dialogue_change("workflow", request=plan)
-        if plan["missing"]:
-            args = plan["search"]
-            remembered = f"已保留目标 {args['result_limit']} 个" if args.get("result_limit") else "已保留搜索请求"
-            if args.get("locations"):
-                remembered += f"、城市 {'、'.join(args['locations'])}"
-            return ChatResponse(message=f"{remembered}；执行顺序为先搜索，再处理本次结果。请一次补充："
-                + "；".join(plan["missing"]) + "。没有启动搜索、投递或生成计划；补充后会继续此请求。", lane=AgentLane.APPLICATION)
-        outcome = await self.tool_registry.execute("job_search_start", plan["search"],
-            user_message=plan["search_quote"], state=ToolLoopState(explicit_search_intent=True))
-        if outcome.status != "ok":
-            dialogue_change("workflow", request={**plan, "status": "blocked"})
-            return ChatResponse(message=f"搜索未启动：{outcome.content}。后续动作没有执行，请处理后重新发起请求。", lane=AgentLane.APPLICATION)
-        plan.update(status="searching", browser_id=outcome.content["id"])
-        dialogue_change("workflow", request=plan)
-        emit("workflow_bound", browser_id=outcome.content["id"], workflow=plan)
-        actual = outcome.content.get("search_conditions", {})
-        message_text = "已启动搜索：" + " · ".join(actual.get("queries") or [])
-        if actual.get("locations"):
-            message_text += "；城市：" + "、".join(actual["locations"])
-        if actual.get("result_limit"):
-            message_text += f"；目标 {actual['result_limit']} 个"
-        if actual.get("salary_min"):
-            message_text += f"；月薪下限 ≥{actual['salary_min']} 元"
-        descriptions = [f"匹配分 ≥{action['scope']['min_score']} 的模拟站职位加入有限投递队列（回复后发送，不等于已投递）"
-            if action["kind"] == "delivery" else f"按匹配分范围 {action['scope']} 分析劣势并保存成长计划" for action in plan["actions"]]
-        if descriptions:
-            message_text += "。本次搜索成功完成后：" + "；".join(descriptions)
-        message_text += "。仅使用本次结果；验证需人工接管，失败、停止或简历变更不会继续后续动作。"
-        return ChatResponse(message=message_text, lane=AgentLane.APPLICATION,
-            tool_events=[ToolEvent(tool="job_search_start", status="ok", detail="复合请求已绑定到搜索任务")])
+            if self.router:
+                if isinstance(exc, asyncio.TimeoutError):
+                    self.router.record_llm_failure()
+                self.router.record_final(message, "plan_rejected")
+            return ChatResponse(message=f"没有执行任务：{str(exc) or '规划超时'}。原始请求保留，不会自动重试。", lane=AgentLane.APPLICATION)
+        except Exception as exc:
+            if self.router:
+                self.router.record_llm_failure()
+            return ChatResponse(message=f"任务规划暂不可用（{type(exc).__name__}），没有执行任何动作。", lane=AgentLane.APPLICATION)
+        emit("request_plan", plan_id=plan["id"], goals=plan["goals"], steps=[
+            {key: step[key] for key in ("id", "tool", "depends_on", "effect")} for step in plan["steps"]], questions=plan["questions"])
+        if self.router:
+            self.router.record_final(message, "plan_clarifying" if plan["questions"] else
+                "+".join(dict.fromkeys(step["tool"] for step in plan["steps"])) or "answer")
+        return await begin(plan, self.tool_registry)
 
     async def _resolve_context_confirmation(self, message: str) -> ChatResponse:
         context = active_run()
@@ -699,6 +690,10 @@ class AutoHuntAgent:
                 tool_events=[ToolEvent(tool="intent_router", status="clarify", detail=outcome.intent)],
             )
         if outcome.decision == "direct":
+            if outcome.layer == "small_model":
+                # Classification has no proof of complete slots/goal coverage.
+                # Even a high-confidence label cannot discard other instructions.
+                return await self._handle_planned(message)
             try:
                 response = await self._handle_direct_intent(outcome, message)
                 self.router.record_final(message, outcome.intent)
@@ -707,6 +702,9 @@ class AutoHuntAgent:
                 # A handler failure must never break the chat: degrade to the
                 # LLM path and record the failure for drift/debug monitoring.
                 self.router.record_final(message, f"handler_error:{type(exc).__name__}")
+                if outcome.intent in {"search_jobs", "pause_search", "resume_search", "stop_search"}:
+                    return ChatResponse(message="浏览器操作结果未确认，请查看任务状态；不会转入模型再次执行。", lane=AgentLane.APPLICATION,
+                        tool_events=[ToolEvent(tool="browser_control", status="outcome_indeterminate", detail=type(exc).__name__)])
         return await self._handle_plain(message)
 
     async def _handle_clarify_choice(self, message: str) -> ChatResponse:
@@ -897,12 +895,12 @@ class AutoHuntAgent:
         if browser is None:
             raise _DirectHandlerUnavailable(intent)
         scoped_browser(browser)
-        if intent == "pause_search":
-            view = await browser.pause()
-        elif intent == "resume_search":
-            view = await browser.resume()
-        else:
-            view = await browser.stop()
+        tool = {"pause_search": "browser_task_pause", "resume_search": "browser_task_resume", "stop_search": "browser_task_stop"}[intent]
+        outcome = await self.tool_registry.execute(tool, {}, user_message=active_run().user_message, state=ToolLoopState())
+        if outcome.status != "ok":
+            return ChatResponse(message=str(outcome.content), lane=AgentLane.APPLICATION,
+                tool_events=[ToolEvent(tool=tool, status=outcome.status, detail=str(outcome.content)[:300])])
+        view = self.tool_registry.browser.current()
         verb = {"pause_search": "已暂停", "resume_search": "已继续", "stop_search": "已中断"}[intent]
         if intent == "stop_search":
             message = (
@@ -943,14 +941,12 @@ class AutoHuntAgent:
 
     async def _handle_plain(self, message: str) -> ChatResponse:
         from ..growth.requests import continued_plan_scope, resume_stamp
-        from .composite import composite_request
+        from ..workflow.planning import shortcut_safe
         continued = continued_plan_scope((active_run().dialogue or {}) if active_run() else {}, message,
             resume_stamp(self.resume_workspace.read_document(), self.candidate_state)) if self.resume_workspace else None
-        # A composite request must be decomposed; the growth branch would consume
-        # the whole message as a plan focus and silently drop the search in it.
-        if composite_request(message) and (self._learning_plan_command(message) or continued is not None):
-            return await self._handle_tool_loop(message)
-        if self.learning_plans is not None and (self._learning_plan_command(message) or continued is not None):
+        # Only the bounded continuation of a previously executed single plan
+        # request uses this compatibility fast path. New goals use the planner.
+        if self.learning_plans is not None and continued is not None and shortcut_safe(message):
             if self.tool_registry is not None:
                 outcome = await self.tool_registry.execute(
                     "learning_plan_generate", {"focus": message[:400]},
@@ -975,7 +971,7 @@ class AutoHuntAgent:
                 lane=AgentLane.GROWTH,
                 tool_events=[ToolEvent(tool="learning_plan_generate", status="ok", detail=f"生成 {len(gaps)} 项计划，依据 {plan['jobs_analyzed']} 份 JD")],
             )
-        if self.tool_registry is None or not hasattr(self.llm, "generate_with_tools"):
+        if self.tool_registry is None:
             return await self._handle_legacy(message)
         parsed_search = parse_search_message(message)
         search_hint = parsed_search.hint()
@@ -1001,7 +997,7 @@ class AutoHuntAgent:
             response = (
                 await self._start_search_without_llm(message, search_hint)
                 if fast_search
-                else await self._handle_tool_loop(message)
+                else await self._handle_planned(message)
             )
         except Exception as exc:
             # A native-tool provider failure is ambiguous. Do not fall back

@@ -87,6 +87,7 @@ class DialogueState(Strict):
     selected_job: JobSelection | None = None
     learning_request: dict[str, Any] | None = None
     workflow_request: dict[str, Any] | None = None
+    instruction_request: dict[str, Any] | None = None
 
 
 def topic_for(message: str, previous: str = "general") -> str:
@@ -125,6 +126,10 @@ def apply_operation(saved: dict | None, operation: dict, *, clock: float | None 
     source = str(operation.get("source", ""))[:128]
     if op == "workflow":
         state.workflow_request = copy.deepcopy(operation.get("request"))
+        state.revision += 1
+        return state.model_dump(mode="json")
+    if op == "instruction":
+        state.instruction_request = copy.deepcopy(operation.get("request"))
         state.revision += 1
         return state.model_dump(mode="json")
     for item in state.pending:
@@ -207,6 +212,7 @@ def apply_operation(saved: dict | None, operation: dict, *, clock: float | None 
     elif op == "learning_request":
         state.learning_request = {"message": str(operation["message"])[:600],
             "resume_stamp": operation["resume_stamp"], "scope": operation.get("scope", {}),
+            "task_id": operation.get("task_id"),
             "source": source, "turn": state.turn, "expires_at": now + 600}
         state.active_intent = "learning"
     elif op == "learning_consume":
@@ -278,7 +284,8 @@ def apply_operation(saved: dict | None, operation: dict, *, clock: float | None 
     elif op == "reset":
         # Clear dialogue scope only, not resume, preference, board, raw history or external jobs.
         refusals = [item for item in state.trace if item["kind"] == "rejection"][-3:]
-        state = DialogueState(revision=state.revision, turn=state.turn, tasks=state.tasks,
+        tasks = {key: value for key, value in state.tasks.items() if key != "plan_id"}
+        state = DialogueState(revision=state.revision, turn=state.turn, tasks=tasks,
                               last_activity=now, history_epoch=now, summary=refusals)
         trace(state, "reset", source)
     else:
@@ -397,6 +404,7 @@ def compact_state(saved: dict) -> dict:
                   for item in state.snapshots[-2:] if item.displayed and item.topic == state.active_intent],
         "tasks": state.tasks, "selected_job": state.selected_job.model_dump() if state.selected_job else None,
         "learning_request": state.learning_request,
+        "instruction": state.instruction_request,
         "workflow": ({key: state.workflow_request.get(key) for key in
             ("id", "status", "search", "missing", "actions", "expires_at")} if state.workflow_request else None),
         "trace": [{**item, "recency_weight": round(0.8 ** (state.turn-item["turn"]), 3)}

@@ -1,6 +1,6 @@
 # AutoHunt：当前架构与能力清单
 
-2026-10-03 更新：会话隔离、持久化运行队列、SSE、取消、执行预算和检查点恢复已接入，详见 [会话与统一运行层](agent-runtime.md)。下文旧编排说明按本次更新调整。
+2026-10-08 更新：完整单目标走规则快路径；其他请求采用全部目标规划、参数/授权校验及持久化依赖执行。Review 与边界见 [意图识别与任务编排](intent-orchestration-review.md)，运行层见 [会话与统一运行层](agent-runtime.md)。
 
 更新于 2026-09-18。本文描述当前代码，不把设计中的模块视为已经实现。定位为**本地、单用户、有人类接管的求职 Agent MVP**；不是无人值守的多租户招聘机器人。
 
@@ -13,9 +13,13 @@ flowchart TB
   HTTP --> Runtime[AgentRuntime / 会话隔离 / 运行与事件持久化]
   Runtime --> Main[AutoHuntAgent]
   Main --> Router[规则路由 → 可选小模型 → 主模型回退]
-  Main --> Loop[原生工具调用循环 / 最多 8 次 / 副作用策略]
-  Loop <--> LLM[LLMManager / Mock 或 DeepSeek / 出口脱敏]
-  Loop --> Registry[内部 AgentToolRegistry]
+  Router --> Fast[完整单目标规则处理]
+  Router --> Planner[主模型无工具完整目标规划]
+  Planner <--> LLM[LLMManager / DeepSeek / 出口脱敏]
+  Planner --> Runner[参数与授权校验 / 最多8步依赖图 / claim检查点]
+  Fast --> Registry[内部 AgentToolRegistry]
+  Runner --> Registry
+  Runner --> Runtime
   Registry --> State[候选人档案 / 偏好 / 简历提案]
   Registry --> Jobs[职位库 / 匹配 / 统计]
   Registry --> Search[BrowserAutomationService]
@@ -41,20 +45,20 @@ flowchart TB
 
 | 模块 | 当前实现 | 限制 / 尚未实现 |
 |---|---|---|
-| 对话与意图 | 规则快路径、可选小模型分类、原生工具循环；多会话隔离、历史持久化、SSE、停止与运行记录 | 本地单用户；模型使用最近 8 条消息，未增加长期会话摘要 |
+| 对话与意图 | 完整单目标规则快路径、可选小模型分类提示、主模型完整目标规划、持久化依赖执行；会话 DST、缺槽补充、稳定对象引用、SSE 与取消 | 本地单用户；没有持久自动化回归覆盖，未证明所有自然语言准确率；旧原生循环仅兼容恢复 |
 | 模型配置 | Mock、DeepSeek Provider、前端 BYOK、凭据加密保存、连接测试 | 本次未验证真实模型质量、价格或供应商可用性；不等于支持任意模型 |
 | 简历上传 | PDF/DOCX/TXT 解析、原文件加密、完整简历按提取原文导入；画像分析旁路运行 | 没有扫描件 OCR；文本抽取不等于复刻 PDF 原版式 |
 | 项目材料 | 课程/报告/代码/安全 ZIP 解析，文档分类，中文项目证据生成 | LLM 事实质量需要人工复核；不运行上传代码 |
 | 简历编辑 | 结构化主简历、版本历史、修改提案、逐项接受/拒绝、手工编辑、浏览器打印 PDF | 职位定制版尚无完整创建/选择/投递闭环；历史版本存在不等于已有恢复 UI |
 | 原文 + 新项目 | 原文保留，新确认项目作为补充经历保存、展示和编辑 | 补充经历目前仍使用 Markdown 编辑；保留分隔标题 |
-| 偏好 | 最多 5 个关键词、城市/目标岗位/排除词等字段、来源/版本/置信度、编译 prompt_context | 搜索确认路径会持久化关键词；临时搜索条件与长期偏好尚未完全解耦 |
+| 偏好 | 主简历派生方向、显式长期偏好、持久化会话搜索条件分离；字段来源/版本、编译 prompt_context | 模型不能把临时搜索条件隐式写为长期偏好；简历识别质量仍需核对 |
 | 搜索 | 模拟站、BOSS DOM 适配；搜索/城市筛选/抽取、暂停/继续/中断、任务证据；SearchRun 和逐阶段漏斗持久化 | 真实 BOSS 当前版本未实站验收；验证码不自动解决；进程重启后搜索安全停止而非自动续跑；不是任意网址通用 Agent |
 | 匹配 | 批量卡片初筛、JD 规则兜底/LLM 匹配、有限并发分析 | 不是校准后的录用概率；未知技能/卡片抽取漏召回仍需评估 |
 | 职位与看板 | 标准化、去重、SQLite 保存、分阶段看板、检索结果和回复 | 不是生产级多租户数据库；统计不同页面使用不同时间范围 |
 | 投递 | 模拟站直接申请和“先沟通→明确回复→发送简历”；预览绑定简历 ID/版本/哈希、职位/目标 URL 和动作；授权消费与 DeliveryRun 创建事务化；执行使用 run 固化的目标 URL；结果核验 | **真实 BOSS 投递未开放**；模拟文件消息不代表真实 PDF 附件上传成功 |
 | 回复监测 | 当前投递 Worker 定时检查回复并保存到看板；等待状态和 checkpoint 持久化，重启后按 run_id 可显式恢复 | 多职位公平轮询队列尚未实现；重启后不会无人值守自动接管浏览器 |
 | 安全 | Token、限流、审计、加密、工具策略、OS 浏览器锁、未知结果停止重试 | 文件能力沙箱不等于容器隔离；不能直接公网部署 |
-| 成长计划 | 可通过对话分析建议、上传成果生成简历提案 | 持久化计划/执行验证/自动更新闭环未实现；已移除假进度 |
+| 成长计划 | 显式生成持久化计划、JD 引用核验、真实完成证据、技能/项目补充 Diff；复合请求等待对应搜索终态 | 人工完成声明不是独立能力认证；写入简历仍须接受提案 |
 | 任务并发 | AgentRuntime 持久化队列，2 个执行槽；每会话串行 | 无独立 Subagent；浏览器仍使用串行锁 |
 
 ## 3. 核心模块边界
@@ -62,8 +66,8 @@ flowchart TB
 - `frontend/app/page.tsx`：界面、表单、上传、轮询和结果展示。仍是大组件，后续按领域拆分。
 - `frontend/app/api/agent/*`：转发给 FastAPI；服务 Token 不应进入浏览器代码。
 - `agent/app/api/application.py`：API 路由与生命周期。`core/dependencies.py` 装配单例。
-- `core/main_agent.py`：意图到操作的编排。`intent/` 管理规则/小模型/熔断/路由日志；旧回退分支仍被调用，不能当死代码直接删除。
-- `core/agent_tools.py`：原生工具 schema、权限策略、执行与 observation。模型没有自由 shell、任意路径或任意 URL 权限。
+- `core/main_agent.py`：统一请求入口与完整规则快路；`intent/` 管理规则/小模型/熔断/路由日志。`workflow/planning.py` 规划和校验全部目标；`workflow/execution.py` 管理依赖、claim、等待与结果。旧回退仅兼容历史运行/缺少注册表的调用方。
+- `core/agent_tools.py`：唯一内部工具 schema、权限策略、执行与 observation。模型没有自由 shell、任意路径或任意 URL 权限；步骤授权是代码安装的内部上下文，不是模型参数。
 - `browser/`：搜索、站点识别、页面绑定、生命周期证据。`delivery/`：有外部写入的投递状态机；两者共用锁。
 - `jobs/`：职位记录、评分、预览授权和统计。`memory/`：候选人材料、主简历与偏好。
 
@@ -82,7 +86,7 @@ flowchart TB
 
 MCP 不暴露开始搜索、继续/停止浏览器、简历提案批准、真实提交、shell 和读取 API Key。偏好工具只生成待确认 patch，不直接保存。
 
-内部 AgentToolRegistry 的 11 个工具：`job_results_read`、`job_stats_read`、`job_search_start`、`preference_read`、`preference_update`、`resume_document_read`、`resume_propose_patch`、`browser_task_read`、`browser_task_resume`、`browser_task_stop`、`memory_read`。提交权限没有交给模型任意调用。
+内部 AgentToolRegistry 还包括会话/DST/历史/引用、条件更新、本地审核与浏览器暂停等工具；配置成长计划与模拟投递服务时才提供相应能力。以注册表实际 schema 为准，不维护固定工具数。无工具规划器不开放嵌套待办创建；提交权限没有交给模型任意调用。
 
 ## 5. Middleware 与安全策略
 

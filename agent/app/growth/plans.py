@@ -95,7 +95,7 @@ def is_explicit_plan_request(message: str) -> bool:
     compact = re.sub(r"\s+", "", message)
     if not positive_action(message):
         return False
-    return bool(re.search(r"(?:生成|制定|创建|规划|做一份|给我一份|帮我做|帮我写).{0,16}(?:学习计划|成长计划|提升计划|行动方案|学习方案)", compact))
+    return bool(re.search(r"(?:生成|制定|创建|规划|更新|补充|做一份|给我一份|帮我做|帮我写).{0,16}(?:学习计划|成长计划|提升计划|行动方案|学习方案)", compact))
 
 
 class LearningPlanService:

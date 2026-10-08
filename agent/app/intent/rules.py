@@ -250,6 +250,11 @@ class RuleEngine:
         for rule, compiled in self._compiled:
             if negated and rule.intent in ACTION_INTENTS:
                 continue
+            if rule.intent in {"pause_search", "resume_search", "stop_search"}:
+                from ..workflow.planning import command_grounded
+                tool = {"pause_search": "browser_task_pause", "resume_search": "browser_task_resume", "stop_search": "browser_task_stop"}[rule.intent]
+                if not command_grounded(tool, text, [text]):
+                    continue  # Normalization must not erase quotation/question polarity.
             subject = security if rule.category == "P0" else normalized
             if rule.intent == "list_jobs" and parsed_search.action == "results":
                 self._hit(rule.id)

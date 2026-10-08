@@ -22,6 +22,9 @@ class RunContext:
     retrieve_history: Callable[[str, int], list[dict]] | None = None
     enforce_task_scope: bool = False
     user_message: str = ""
+    # Only the validated plan runner may install a single-step authority. Model
+    # tool arguments and historical messages cannot populate this field.
+    action_authority: dict | None = None
 
 
 current_run: ContextVar[RunContext | None] = ContextVar("autohunt_run", default=None)

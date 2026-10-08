@@ -715,9 +715,12 @@ class ResumeWorkspaceStore:
             operations=operations,
         )
 
-    def propose_update(self, instruction: str) -> ResumeProposalView | None:
+    def propose_update(self, instruction: str, *, target_entry_id: str | None = None) -> ResumeProposalView | None:
         document = self.read_document()
-        target = self._find_target(document, instruction)
+        target = (next((entry for entry in document.entries if entry.id == target_entry_id), None)
+                  if target_entry_id is not None else self._find_target(document, instruction))
+        if target_entry_id is not None and target is None:
+            raise ValueError("引用的简历条目已不存在，请重新查看简历")
         operations: list[ResumePatchOperation] = []
 
         if target and re.search(r"(删除|移除|去掉).{0,10}(项目|经历)|(删除|移除).{0,6}" + re.escape(target.title), instruction):

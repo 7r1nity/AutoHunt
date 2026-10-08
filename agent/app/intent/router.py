@@ -12,6 +12,7 @@ Safety posture:
 from __future__ import annotations
 
 import asyncio
+import math
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -123,6 +124,12 @@ class IntentRouter:
 
         # --- Layer 0: rules -------------------------------------------------
         match = self.rule_engine.match(message)
+        from ..workflow.planning import shortcut_safe
+        if (not match or match.category != "P0") and not shortcut_safe(message):
+            outcome = RouteOutcome("llm", "compound_request", "rule:complete_goal_required")
+            self._record(outcome, qhash, started)
+            self._last_decision[qhash] = outcome
+            return outcome
         if match is not None:
             outcome = RouteOutcome(
                 decision="blocked" if match.category == "P0" else self._decision_for(match.intent),
@@ -197,8 +204,8 @@ class IntentRouter:
         if spec is None:
             intent = "none"
             spec = INTENT_SPECS["none"]
-        confidence = min(max(decision.confidence, 0.0), 1.0)
-        margin = max(decision.margin, 0.0)
+        confidence = min(max(decision.confidence, 0.0), 1.0) if math.isfinite(decision.confidence) else 0.0
+        margin = min(max(decision.margin, 0.0), 1.0) if math.isfinite(decision.margin) else 0.0
         thresholds = self.thresholds
 
         if spec.side_effect:
@@ -213,7 +220,7 @@ class IntentRouter:
                 return RouteOutcome(self._decision_for(intent), intent, "small_model", confidence, margin)
             return RouteOutcome("llm", intent, "small_model", confidence, margin)
 
-        if confidence >= thresholds.direct_confidence:
+        if decision.confidence_source != "reported" and confidence >= thresholds.direct_confidence and margin >= thresholds.clarify_margin:
             return RouteOutcome(self._decision_for(intent), intent, "small_model", confidence, margin)
         # Weak classification is not a reason to ask the user a routing question.
         # The main model receives DST and tools, reasons about intent/slots, and

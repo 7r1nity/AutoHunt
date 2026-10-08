@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
@@ -95,6 +96,18 @@ class AgentToolPolicy:
         state.seen_calls.add(digest)
         if spec.effect in self.READ_EFFECTS:
             return True, "只读工具"
+        context = active_run()
+        authority = context.action_authority if context else None
+        if authority:
+            from ..workflow.planning import command_grounded
+            from ..growth.requests import resume_stamp
+            if (authority.get("tool") != spec.name or authority.get("arguments") != arguments
+                    or authority.get("command") != user_message
+                    or authority.get("expires_at", 0) < time.time()
+                    or authority.get("resume_stamp") != resume_stamp(authority["resumes"].read_document(), authority["candidate"])
+                    or not command_grounded(spec.name, user_message, authority["sources"])):
+                return False, "工作流步骤授权已失效或参数不一致"
+            return True, "当前用户授权的有限工作流步骤；仍需参数、引用与执行器校验"
         if spec.name == "context_action_propose":
             return (active_run() is not None, "只创建待确认动作，不构成执行授权")
         if spec.name == "job_review_selection":
@@ -145,11 +158,10 @@ class AgentToolPolicy:
             continuation = continued_plan_scope(context.dialogue or {}, user_message, arguments.pop("_resume_stamp", "")) if context else None
             if not is_explicit_plan_request(user_message) and continuation is None:
                 return False, "生成持久化学习计划需要用户明确发出命令"
-        elif spec.name in {"browser_task_resume", "browser_task_stop"}:
-            required = "继续" if spec.name.endswith("resume") else "停止"
-            extra = ("确认登录", "登录完成", "恢复搜索", "恢复任务", "接着搜索", "接着跑") if spec.name.endswith("resume") else ("中断", "取消", "结束搜索", "别搜了")
-            if required not in compact and not any(term in compact for term in extra):
-                return False, f"浏览器操作需要用户明确表达{required}"
+        elif spec.name in {"browser_task_resume", "browser_task_stop", "browser_task_pause"}:
+            from ..workflow.planning import command_grounded
+            if not command_grounded(spec.name, user_message, [user_message]):
+                return False, "浏览器控制需要本轮明确正向指令，询问或引用不授权"
         if spec.effect == "external":
             state.external_effect_started = True
         return True, "通过安全策略"
@@ -200,8 +212,8 @@ class AgentToolRegistry:
                 obj({"topic": {"type": "string", "enum": ["search", "resume", "learning", "applications"]},
                     "question": {"type": "string", "minLength": 2, "maxLength": 1000},
                     "missing_slots": {"type": "array", "items": {"type": "string", "enum": ["queries", "locations", "result_limit", "salary_min", "entry_id", "instruction", "focus", "job_id"]}, "maxItems": 8}}, ["topic", "question", "missing_slots"]), "session", self._question_ask),
-            AgentToolSpec("job_review_selection", "按本轮明确审核命令审核已展示职位；只保存本地审核标记，不授权沟通或投递。先解析引用并绑定 snapshot_id。",
-                obj({"snapshot_id": {"type": "string"}, "selector": {"type": "string", "maxLength": 120}}, ["snapshot_id", "selector"]), "write", self._review_selection),
+            AgentToolSpec("job_review_selection", "按本轮明确审核命令审核已展示职位；只保存本地审核标记，不授权沟通或投递。执行器绑定最近已展示快照；可省略 snapshot_id，不接受任意库ID或未展示对象。",
+                obj({"snapshot_id": {"type": "string"}, "selector": {"type": "string", "maxLength": 120}}, ["selector"]), "write", self._review_selection),
             AgentToolSpec("job_detail_read", "按已展示职位简表的稳定序号或名称读取完整 JD 与原始链接；只读，不重新搜索，不投递。",
                 obj({"selector": {"type": "string", "maxLength": 120}, "snapshot_id": {"type": "string"},
                     "view": {"type": "string", "enum": ["brief", "detail", "link"]}}, ["selector"]), "read", self._job_detail_read),
@@ -289,6 +301,11 @@ class AgentToolRegistry:
                 self._browser_read,
             ),
             AgentToolSpec(
+                "browser_task_pause",
+                "按用户明确请求暂停本会话的浏览器搜索，不暂停其他会话。",
+                obj({}), "external", self._browser_pause,
+            ),
+            AgentToolSpec(
                 "browser_task_resume",
                 "用户已完成登录、验证码或 MFA 后恢复当前浏览器任务。",
                 obj({}),
@@ -342,13 +359,15 @@ class AgentToolRegistry:
         spec = self._tools.get(name)
         if spec is None:
             return AgentToolOutcome(name, "denied", "工具不在允许列表中", "unknown")
-        if name == "mock_delivery_start":
+        context = active_run()
+        planned = bool(context and context.action_authority and context.action_authority.get("tool") == name)
+        if name == "mock_delivery_start" and not planned:
             from .action_language import explicit_mock_delivery
             try:
                 arguments = explicit_mock_delivery(user_message) or arguments
             except ValueError as exc:
                 return AgentToolOutcome(name, "error", str(exc), spec.effect)
-        if name == "learning_plan_generate":
+        if name == "learning_plan_generate" and not planned:
             from .action_language import score_scope
             from ..growth.requests import continued_plan_scope, resume_stamp
             stamp = resume_stamp(self.resume_workspace.read_document(), self.candidate_state)
@@ -363,7 +382,7 @@ class AgentToolRegistry:
             focus = user_message if is_explicit_plan_request(user_message) else (
                 f"{request['message']}；范围更新：{user_message}" if request and scope is not None else user_message)
             arguments = {"focus": focus[:400], **(scope or {}), "_resume_stamp": stamp}
-        if name == "job_search_start":
+        if name == "job_search_start" and not planned:
             parsed = parse_search_message(user_message)
             if parsed.authorized:
                 explicit = {key: value for key, value in parsed.fields.items()
@@ -371,7 +390,8 @@ class AgentToolRegistry:
                 if explicit.get("queries"):
                     explicit["query"] = explicit["queries"][0]
                 arguments = {**arguments, **explicit_search_constraints(user_message), **explicit}
-        if name == "search_state_update":
+        exact_patch = None
+        if name == "search_state_update" and not planned:
             from .search_contract import simple_search_patch
             from .main_agent import _KNOWN_CITIES
             from ..runtime.dialogue import slot_answer_patch
@@ -407,7 +427,7 @@ class AgentToolRegistry:
                     not supplied or any(normalize(role) not in normalize(user_message) for role in supplied)
                 ):
                     raise MissingSearchInput(missing_search_message(bool(candidate.profile.resume_id)))
-            if name == "search_state_update" and not exact_patch:
+            if name == "search_state_update" and not exact_patch and not planned:
                 mentions = {
                     "queries": bool(re.search(r"关键词|岗位|职位|方向|工作|简历", user_message)) or any(str(item) in user_message for item in arguments.get("queries") or []),
                     "locations": bool(re.search(r"城市|地点", user_message)) or any(str(item) in user_message for item in arguments.get("locations") or []),
@@ -446,12 +466,20 @@ class AgentToolRegistry:
             emit("tool_finished", tool=name, status="error", detail=str(exc))
             return AgentToolOutcome(name, "error", str(exc), spec.effect)
         except Exception as exc:
-            status = "outcome_indeterminate" if spec.effect == "external" else "error"
+            status = "outcome_indeterminate" if spec.effect in {"external", "write"} else "error"
             emit("tool_finished", tool=name, status=status, detail=str(exc))
             dialogue_change("tool", tool=name, status=status, detail=str(exc))
             return AgentToolOutcome(name, status, str(exc), spec.effect)
 
     async def _job_results(self, args: dict[str, Any]) -> Any:
+        context = active_run()
+        task_id = (context.action_authority or {}).get("evidence_task_id") if context else None
+        if task_id:
+            items = self.jobs.search_report(task_id).get("jobs", [])
+            items = [item for item in items if not args.get("stage") or item["stage"] == args["stage"]][:int(args.get("limit", 30))]
+            snapshot = dialogue_change("snapshot", topic="applications", kind="job", version=task_id, displayed=False,
+                items=[{key: item[key] for key in ("id", "title", "company", "stage", "content_hash")} for item in items]) if items else None
+            return {"snapshot_id": snapshot["snapshots"][-1]["id"] if snapshot else None, "count": len(items), "jobs": items}
         jobs = self.jobs.list_jobs(stage=args.get("stage"), limit=int(args.get("limit", 10)))
         snapshot = dialogue_change("snapshot", topic="applications", kind="job", displayed=False,
             items=[{"id": item.id, "title": item.role, "company": item.company, "stage": item.stage,
@@ -463,6 +491,13 @@ class AgentToolRegistry:
         }
 
     async def _job_stats(self, _args: dict[str, Any]) -> Any:
+        context = active_run()
+        task_id = (context.action_authority or {}).get("evidence_task_id") if context else None
+        if task_id:
+            report = self.jobs.search_report(task_id)
+            return {"task_id": task_id, **{key: report[key] for key in (
+                "covered_jobs", "qualified_jobs", "salary_distribution", "employment_distribution",
+                "benefit_distribution", "jd_overview", "salary_overview", "constraints")}}
         profile = self.candidate_state.read().profile
         return {
             "automation": self.jobs.stats().model_dump(mode="json"),
@@ -563,20 +598,27 @@ class AgentToolRegistry:
         if self.learning_plans is None:
             raise ValueError("学习计划工具未启用")
         scope = {key: args[key] for key in ("min_score", "max_score") if key in args}
+        authority = active_run().action_authority if active_run() else None
+        task_id = authority.get("evidence_task_id") if authority else None
+        previous = (active_run().dialogue or {}).get("learning_request") if active_run() else None
+        if not authority and previous:
+            from ..growth.requests import continued_plan_scope, resume_stamp
+            if continued_plan_scope(active_run().dialogue or {}, active_run().user_message,
+                    resume_stamp(self.resume_workspace.read_document(), self.candidate_state)) is not None:
+                task_id = previous.get("task_id")
         if scope:
             candidate = self.candidate_state.read().profile
             if not candidate.resume_id:
                 raise ValueError("请先上传并启用一份主简历")
-            eligible = self.jobs.jobs_for_resume_analysis(candidate.resume_id, limit=20, **scope) if candidate.resume_id else []
+            eligible = self.jobs.jobs_for_resume_analysis(candidate.resume_id, limit=20, task_id=task_id, **scope) if candidate.resume_id else []
             if not any(len(str(job["description"] or "").strip()) >= 40 for job in eligible):
                 from ..growth.requests import resume_stamp
-                previous = (active_run().dialogue or {}).get("learning_request") if active_run() else None
                 user_message = active_run().user_message if active_run() else args.get("focus", "")
                 dialogue_change("learning_request", message=previous["message"] if previous and not is_explicit_plan_request(user_message) else user_message,
-                    resume_stamp=resume_stamp(self.resume_workspace.read_document(), self.candidate_state), scope=scope)
+                    resume_stamp=resume_stamp(self.resume_workspace.read_document(), self.candidate_state), scope=scope, task_id=task_id)
                 raise MissingPlanScope("此分数范围内没有当前简历的有效 JD，没有生成计划。请调整范围，例如「那就90分以下的」；原生成请求保留，不需要重复说生成学习计划。")
         dialogue_change("learning_consume")  # Consumed before the model call: failures never replay.
-        result = await self.learning_plans.generate(str(args.get("focus") or "")[:400], **scope)
+        result = await self.learning_plans.generate(str(args.get("focus") or "")[:400], task_id=task_id, **scope)
         if result.get("id"):
             dialogue_change("snapshot", topic="learning", kind="plan", displayed=False,
                 items=[{"id": result["id"], "title": result.get("title", "学习计划")}])
@@ -586,7 +628,8 @@ class AgentToolRegistry:
         context = active_run()
         if context is None:
             raise ValueError("自动投递需要当前会话")
-        return await self.mock_workflow.queue_deliveries(min_score=args["min_score"], session_id=context.session_id)
+        task_id = (context.action_authority or {}).get("evidence_task_id")
+        return await self.mock_workflow.queue_deliveries(min_score=args["min_score"], session_id=context.session_id, task_id=task_id)
 
     async def _mock_delivery_cancel(self, _args: dict) -> dict:
         context = active_run()
@@ -601,21 +644,25 @@ class AgentToolRegistry:
 
     async def _resume_read(self, _args: dict[str, Any]) -> Any:
         document = self.resume_workspace.read_document()
+        snapshot = None
         if document.entries:
-            dialogue_change("snapshot", topic="resume", kind="resume_entry", version=str(document.version), displayed=False,
+            snapshot = dialogue_change("snapshot", topic="resume", kind="resume_entry", version=str(document.version), displayed=False,
                 items=[{"id": item.id, "title": item.title} for item in document.entries[:30]])
-        return document.model_dump(mode="json")
+        return {**document.model_dump(mode="json"), "snapshot_id": snapshot["snapshots"][-1]["id"] if snapshot else None}
 
     async def _resume_patch(self, args: dict[str, Any]) -> Any:
         context = active_run()
         message = context.user_message if context else ""
+        target_id = None
         selector = re.search(r"第[一二三四五六七八九十\d]+个", message)
         if selector or "这个项目" in message or "那个项目" in message:
             resolved = await self._reference_resolve({"kind": "resume_entry", "selector": selector[0] if selector else "这个"})
-            title = resolved["items"][0]["title"]
-            if title not in args["instruction"]:
-                raise ValueError("修改指代的项目必须绑定到已展示条目的实际标题；请先解析引用")
-        proposal = self.resume_workspace.propose_update(str(args["instruction"]))
+            if len(resolved["items"]) != 1:
+                raise ValueError("请明确需要修改的一个简历条目")
+            target_id = resolved["items"][0]["id"]
+        # Resolve inside the executor: models may not replace an ordinal with an
+        # invented title, and same-name entries must remain distinct by stable ID.
+        proposal = self.resume_workspace.propose_update(str(args["instruction"]), target_entry_id=target_id)
         if proposal is None:
             return {"proposal": None, "summary": "没有生成可验证的修改，请明确项目和字段。"}
         return {
@@ -633,6 +680,10 @@ class AgentToolRegistry:
     async def _browser_resume(self, _args: dict[str, Any]) -> Any:
         scoped_browser(self.browser)
         return (await self.browser.resume()).model_dump(mode="json")
+
+    async def _browser_pause(self, _args: dict[str, Any]) -> Any:
+        scoped_browser(self.browser)
+        return (await self.browser.pause()).model_dump(mode="json")
 
     async def _browser_stop(self, _args: dict[str, Any]) -> Any:
         scoped_browser(self.browser)

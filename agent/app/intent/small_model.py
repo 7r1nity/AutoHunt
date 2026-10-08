@@ -8,10 +8,10 @@ provisioned.
 Confidence strategy:
 - Preferred: ``logprobs`` + ``top_logprobs`` — the margin between the top-1 and
   top-2 tokens is a far more reliable confidence signal than a model-reported
-  number. ``parse_logprobs_decision`` is pure and unit-tested.
+  number. ``parse_logprobs_decision`` is a pure parser.
 - Fallback (provider rejects logprobs): a plain single-label answer; the
   decision then carries ``confidence_source="reported"`` and the router treats
-  it conservatively (side-effect intents always clarify).
+  it conservatively (unmeasured confidence always falls back to the main model).
 """
 
 from __future__ import annotations
@@ -26,6 +26,8 @@ from ..core.security import redact_text
 SYSTEM_PROMPT = (
     "你是 AutoHunt 的意图分类器。只输出一个意图标签（英文标识），不要输出任何解释或标点。"
     "可选标签：" + "、".join(sorted(INTENT_LABELS)) + "。拿不准时输出 none。"
+    "一句含多个独立目标（搜索后投递、读简历并修改、查看详情并统计等）输出 compound_request，不能只挑一个。"
+    "仅分类，不抽取参数或授予工具执行权限。"
 )
 
 # Normalized id → intent id, so split tokens ("search", "_jobs") still resolve.
@@ -146,12 +148,16 @@ class SmallModelClient:
                 if entries:
                     try:
                         intent, confidence, margin, alternatives = parse_logprobs_decision(entries)
-                        return SmallModelDecision(intent, confidence, margin, alternatives, "logprobs")
+                        label = self._parse_label(response)
+                        if label == intent:
+                            return SmallModelDecision(intent, confidence, margin, alternatives, "logprobs")
                     except ValueError:
                         pass  # split tokens → fall through to label parsing
             intent = self._parse_label(response)
             if intent is not None:
-                return SmallModelDecision(intent, 1.0, 0.0, (), "reported")
+                # No logprobs is missing confidence, not certainty. A label-only
+                # response always proceeds to parameter/goal reasoning.
+                return SmallModelDecision(intent, 0.0, 0.0, (), "reported")
             last_error = SmallModelError("unparseable intent label")
         raise SmallModelError(f"small model gave no usable decision: {last_error}") from last_error
 

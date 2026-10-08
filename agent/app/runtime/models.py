@@ -27,6 +27,8 @@ def public_run(run: dict) -> dict:
         "checkpoint_phase": (run["checkpoint"] or {}).get("phase"),
         "browser_id": (run["checkpoint"] or {}).get("browser_id"),
         "delivery_id": (run["checkpoint"] or {}).get("delivery_id"),
+        "plan_steps": [{key: step.get(key) for key in ("id", "tool", "depends_on", "status", "detail")}
+                       for step in ((run["checkpoint"] or {}).get("plan") or {}).get("steps", [])],
         "can_resume": bool(run["status"] in {"waiting_user", "waiting_reply"} or (
             run["status"] in {"interrupted", "timed_out", "failed"} and not run["mutation_started"] and (
                 run["kind"] == "learning_plan" or (run["checkpoint"] or {}).get("phase") == "tool_loop"))),

@@ -33,7 +33,7 @@ class AgentRuntime:
                 self.finish(run["id"], "outcome_indeterminate" if run["mutation_started"] else "cancelled", "取消请求已恢复")
             elif run["status"] == "queued":
                 self.schedule(run["id"])
-            elif run["result"] is not None or (run["checkpoint"] or {}).get("browser_id") or (run["checkpoint"] or {}).get("delivery_id") or run["status"] == "waiting_confirmation":
+            elif run["result"] is not None or (run["checkpoint"] or {}).get("phase") == "action_plan" or (run["checkpoint"] or {}).get("browser_id") or (run["checkpoint"] or {}).get("delivery_id") or run["status"] == "waiting_confirmation":
                 if run["kind"] == "chat" and run["result"]:
                     self.jobs.add_conversation_message("assistant", run["result"].get("message", ""), response=run["result"],
                                                        conversation_id=run["session_id"], run_id=run["id"])
@@ -97,7 +97,10 @@ class AgentRuntime:
         if kind == "tool_finished" and data.get("tool") == "job_search_start" and data.get("status") == "ok":
             browser_id = (data.get("result") or {}).get("id")
             if browser_id:
-                self.store.update(run_id, checkpoint={"browser_id": browser_id})
+                self.store.update(run_id, checkpoint={**(self.store.get(run_id)["checkpoint"] or {}), "browser_id": browser_id})
+        if kind == "plan_state":
+            saved = self.store.get(run_id)["checkpoint"] or {}
+            self.store.update(run_id, checkpoint={**saved, "phase": "action_plan", "plan": data["plan"]})
         if kind == "workflow_bound":
             saved = self.store.get(run_id)["checkpoint"] or {}
             if saved.get("browser_id") == data.get("browser_id"):
@@ -171,7 +174,10 @@ class AgentRuntime:
                         from ..core.action_language import plan_scope_answer
                         plan_followup = bool((context.dialogue or {}).get("learning_request")
                             and plan_scope_answer(run["payload"].get("message", "")))
-                        budget = self.plan_timeout if run["kind"] == "learning_plan" or is_explicit_plan_request(run["payload"].get("message", "")) or plan_followup else self.chat_timeout
+                        budget = self.plan_timeout if run["kind"] == "learning_plan" else (
+                            self.plan_timeout + 35 if is_explicit_plan_request(run["payload"].get("message", ""))
+                            or plan_followup or ((context.dialogue or {}).get("instruction_request") or {}).get("status") == "clarifying"
+                            else self.chat_timeout)
                         async with asyncio.timeout(budget):
                             if run["kind"] == "learning_plan":
                                 self.store.event(run_id, "progress", {"detail": "正在核对 JD 证据并生成计划"})
@@ -249,6 +255,9 @@ class AgentRuntime:
         run = self.store.get(run_id)
         if run["status"] in TERMINAL:
             return
+        if (run["checkpoint"] or {}).get("phase") == "action_plan":
+            await self.watch_plan(run_id)
+            return
         if (run["checkpoint"] or {}).get("delivery_id"):
             await self.watch_delivery(run_id)
             return
@@ -283,6 +292,76 @@ class AgentRuntime:
                 self.browser_summary(run_id, browser)
                 await self.complete_workflow(run_id, browser)
                 self.finish(run_id, status, browser.detail)
+                return
+            await asyncio.sleep(1)
+
+    async def watch_plan(self, run_id: str):
+        """Observe asynchronous dependencies without holding model/session slots."""
+        from ..workflow.execution import advance, DONE, persist, render_step
+        run = self.store.get(run_id)
+        plan = copy.deepcopy(run["checkpoint"]["plan"])
+        if plan["questions"]:
+            self.finish(run_id, "completed", "参数尚待补充，没有执行动作")
+            return
+        previous = {}
+        while True:
+            run = self.store.get(run_id)
+            if run["cancel_requested"]:
+                return
+            changed = any(step["status"] == "claimed" for step in plan["steps"])
+            waiting = False
+            for step in plan["steps"]:
+                if step["status"] == "waiting_external":
+                    browser = self.jobs.get_task(step["task_id"])
+                    if previous.get(step["id"]) != str(browser.status):
+                        previous[step["id"]] = str(browser.status)
+                        status = "waiting_user" if browser.status in {"waiting_for_user", "paused"} else "running"
+                        self.store.update(run_id, status=status)
+                        self.store.event(run_id, "browser", {"task": browser.model_dump(mode="json"), "status": status})
+                    if browser.status in {"completed", "failed", "stopped"}:
+                        step.update(status="completed" if browser.status == "completed" else "failed", detail=browser.detail)
+                        self.browser_summary(run_id, browser)
+                        changed = True
+                    else:
+                        waiting = True
+                elif step["status"] == "waiting_confirmation":
+                    proposal = self.resume_workspace.read_proposal(step["proposal_id"])
+                    if proposal.status == "pending":
+                        self.store.update(run_id, status="waiting_confirmation")
+                        waiting = True
+                    else:
+                        step.update(status="completed" if proposal.status in {"approved", "partially_approved"} else "blocked",
+                            detail="简历提案已处理；不重新执行提案")
+                        changed = True
+            if changed or not waiting:
+                lock = self.sessions.setdefault(run["session_id"], asyncio.Lock())
+                async with lock:
+                    async with self.slots:
+                        context = RunContext(run_id, asyncio.current_task(),
+                            lambda kind, data: self.emit(run_id, kind, data), lambda value: self.save(run_id, value),
+                            session_id=run["session_id"], search_state=self.search_state(run["session_id"]),
+                            persist_search=lambda value: self.store.save_search_state(run["session_id"], value),
+                            dialogue=self.store.dialogue_state(run["session_id"]),
+                            mutate_dialogue=lambda op: self.store.mutate_dialogue(run["session_id"], op),
+                            retrieve_history=lambda query, limit: self.jobs.search_conversation_history(run["session_id"], query, limit=limit),
+                            enforce_task_scope=True, user_message=plan["original"])
+                        token = current_run.set(context)
+                        try:
+                            self.store.update(run_id, status="running")
+                            persist(plan)
+                            await advance(plan, self.agent.tool_registry)
+                        finally:
+                            current_run.reset(token)
+            if all(step["status"] in DONE for step in plan["steps"]):
+                if not self.store.has_event(run_id, "workflow_summary") and any(step.get("task_id") or step.get("proposal_id") for step in plan["steps"]):
+                    lines = [render_step(step) for step in plan["steps"] if step["tool"] != "job_search_start" or step["status"] != "completed"]
+                    message = "任务编排结果：\n\n" + ("\n\n".join(lines) or "搜索已完成，暂无其他待执行动作。")
+                    self.jobs.add_conversation_message("assistant", message, conversation_id=run["session_id"], run_id=f"plan:{run_id}")
+                    self.store.event(run_id, "workflow_summary", {"message": message, "statistics_changed": True, "plans_changed": True})
+                uncertain = any(step["status"] == "outcome_indeterminate" for step in plan["steps"])
+                failed = any(step["status"] in {"failed", "blocked", "skipped"} for step in plan["steps"])
+                self.finish(run_id, "outcome_indeterminate" if uncertain else "failed" if failed else "completed",
+                    "所有步骤已结束；部分步骤未成功，请查看逐步记录" if uncertain or failed else "完整请求执行结束")
                 return
             await asyncio.sleep(1)
 
@@ -382,7 +461,7 @@ class AgentRuntime:
 
     def browser_summary(self, run_id: str, browser):
         run = self.store.get(run_id)
-        if self.store.has_event(run_id, "browser_summary"):
+        if any(event["kind"] == "browser_summary" and event["data"].get("task_id") == browser.id for event in self.store.events(run_id)):
             return
         from ..jobs.search_reporting import render_search_report
         try:
@@ -391,13 +470,13 @@ class AgentRuntime:
         except (KeyError, ValueError):
             message = "搜索已结束；部分详情尚未读取，可在看板核对已保存结果。"
             report = {"jobs": []}
-        self.jobs.add_conversation_message("assistant", message, conversation_id=run["session_id"], run_id=f"summary:{run_id}")
+        self.jobs.add_conversation_message("assistant", message, conversation_id=run["session_id"], run_id=f"summary:{run_id}:{browser.id}")
         if report.get("jobs"):
             self.store.mutate_dialogue(run["session_id"], {"op": "snapshot", "source": run_id,
                 "topic": "applications", "kind": "job", "version": browser.id,
                 "items": [{key: item[key] for key in ("id", "title", "company", "stage", "content_hash")}
                           for item in report["jobs"]], "displayed": True})
-        self.store.event(run_id, "browser_summary", {"message": message, "discovered": browser.discovered,
+        self.store.event(run_id, "browser_summary", {"task_id": browser.id, "message": message, "discovered": browser.discovered,
                                                     "stored": browser.stored, "duplicates": browser.duplicates,
                                                     "report": report, "statistics_changed": True})
 

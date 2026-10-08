@@ -2,6 +2,7 @@ export type AgentRun = {
   id: string; session_id: string; kind: "chat" | "learning_plan" | "delivery" | "job_analysis" | "browser"; status: string;
   result: Record<string, unknown> | null; error: string | null; can_resume: boolean;
   browser_id: string | null; created_at: string;
+  plan_steps?: Array<{ id: string; tool: string; depends_on: string[]; status: string; detail?: string }>;
 };
 
 export type RunEvent = { seq: number; kind: string; data: Record<string, unknown> };
