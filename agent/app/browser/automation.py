@@ -63,6 +63,7 @@ class BrowserAutomationService:
         self.cdp_url = cdp_url
         self.current_id: str | None = None
         self.worker: asyncio.Task | None = None
+        self.resume_access_check = False
         self.lifecycle_lock = asyncio.Lock()
         self.gate = asyncio.Event()
         self.gate.set()
@@ -88,6 +89,7 @@ class BrowserAutomationService:
                     self.store.update_task(current.id, status=BrowserTaskStatus.STOPPED, detail="后端已重启；原浏览器任务已安全停止")
             task_id = uuid.uuid4().hex
             self.current_id = task_id
+            self.resume_access_check = False
             self.gate.set()
             state = self.store.create_task(
                 task_id,
@@ -150,6 +152,7 @@ class BrowserAutomationService:
             raise ValueError(f"当前浏览器状态为 {state.status}，没有暂停或等待接管的任务，未执行恢复")
         if self.worker is None or self.worker.done():
             raise ValueError("浏览器任务已没有存活执行器，请重新搜索；未恢复旧任务")
+        self.resume_access_check = True
         self.gate.set()
         source_label = "模拟招聘网站" if state.source == "mock" else "BOSS"
         self.store.event(state.id or "unknown", "task_resumed", f"用户确认继续；将重新绑定{source_label}页面")
@@ -486,28 +489,7 @@ class BrowserAutomationService:
             page = await self.session.navigate(MOCK_SITE_ORIGIN, page=page)
         await page.locator("#keyword").wait_for(state="attached", timeout=10_000)
 
-        while True:
-            evidence = await self.mock_adapter.inspect(page)
-            await self._record_checkpoint(task_id, "mock_login_preflight", page, evidence.as_dict())
-            if evidence.authenticated_signal:
-                break
-            await self.mock_adapter.open_login_prompt(page)
-            evidence = await self.mock_adapter.inspect(page)
-            reason = evidence.intervention_reason or "需要使用求职者账号登录并完成 MFA"
-            self.gate.clear()
-            self.store.event(task_id, "user_takeover_required", reason)
-            self.store.update_task(
-                task_id,
-                status=BrowserTaskStatus.WAITING_FOR_USER,
-                detail="模拟招聘网站登录窗口已打开；请人工完成验证码/MFA，完成后点击继续",
-                takeover_reason=reason,
-                checkpoint="mock_waiting_for_login",
-                current_url=page.url,
-            )
-            await self._wait_for_user_or_disconnect()
-            page = await self.session.recover_page(MOCK_SITE_ORIGIN)
-            if not page.url.startswith(MOCK_SITE_ORIGIN):
-                page = await self.session.navigate(MOCK_SITE_ORIGIN, page=page)
+        page = await self._ensure_mock_access(task_id, MOCK_SITE_ORIGIN, "mock_login_preflight")
 
         applicant_id = await page.evaluate(
             "() => localStorage.getItem('userRole') === 'applicant' ? localStorage.getItem('userId') : null"
@@ -968,6 +950,40 @@ class BrowserAutomationService:
 
     async def _respect_pause(self) -> None:
         await self._wait_for_user_or_disconnect()
+        if self.resume_access_check:
+            # A user confirmation opens the gate, not proof of authentication.
+            # The worker rebinds and inspects the live page before another action.
+            self.resume_access_check = False
+            state = self.current()
+            if state.source == "mock":
+                await self._ensure_mock_access(state.id, state.current_url or MOCK_SITE_ORIGIN, "mock_resume_access")
+            else:
+                await self._ensure_access(state.id, state.current_url or BOSS_ORIGIN, "resume_access", require_auth=True)
+
+    async def _ensure_mock_access(self, task_id: str, target_url: str, checkpoint: str) -> Page:
+        while True:
+            if not self.session:
+                raise RuntimeError("浏览器会话已经断开")
+            page = await self.session.recover_page(target_url)
+            if not page.url.startswith(MOCK_SITE_ORIGIN):
+                page = await self.session.navigate(MOCK_SITE_ORIGIN, page=page)
+            evidence = await self.mock_adapter.inspect(page)
+            await self._record_checkpoint(task_id, checkpoint, page, evidence.as_dict())
+            if evidence.authenticated_signal and not evidence.intervention_reason:
+                self.resume_access_check = False
+                self.store.event(task_id, "login_access_verified", "已重新核对模拟站求职者登录与验证状态")
+                self.store.update_task(task_id, status=BrowserTaskStatus.RUNNING, takeover_reason=None,
+                    detail="模拟招聘网站登录与验证状态已核对", checkpoint=checkpoint + "_verified")
+                return page
+            await self.mock_adapter.open_login_prompt(page)
+            evidence = await self.mock_adapter.inspect(page)
+            reason = evidence.intervention_reason or "需要使用求职者账号登录并完成 MFA"
+            self.gate.clear()
+            self.store.event(task_id, "user_takeover_required", reason)
+            self.store.update_task(task_id, status=BrowserTaskStatus.WAITING_FOR_USER,
+                detail="登录/验证状态尚未通过，请人工完成后再继续", takeover_reason=reason,
+                checkpoint="mock_waiting_for_login", current_url=page.url)
+            await self._wait_for_user_or_disconnect()
 
     async def _wait_for_user_or_disconnect(self) -> None:
         if not self.session or self.session.disconnected.is_set():
@@ -1033,9 +1049,9 @@ class BrowserAutomationService:
             and (authenticated or loading)
         )
 
-    async def _ensure_access(self, task_id: str, target_url: str, checkpoint: str, *, screenshot: bool = False) -> Page:
+    async def _ensure_access(self, task_id: str, target_url: str, checkpoint: str, *, screenshot: bool = False, require_auth: bool = False) -> Page:
         restore_attempts = 0
-        tolerated_reason: str | None = None
+        require_auth = require_auth or checkpoint == "login_preflight"
         while True:
             if not self.session:
                 raise RuntimeError("浏览器会话已经断开")
@@ -1046,10 +1062,8 @@ class BrowserAutomationService:
                 screenshot=screenshot or evidence.intervention_reason is not None,
             )
             reason = evidence.intervention_reason
-            if reason == tolerated_reason:
-                # The human just confirmed this exact wall is resolved; BOSS
-                # login DOM can linger for seconds after a successful login.
-                reason = None
+            if not reason and require_auth and not evidence.authenticated_signal:
+                reason = "页面尚无可核对的登录状态，请完成登录或等待页面加载后再继续"
             target_path = urlparse(target_url).path
             current_path = urlparse(page.url).path
             if not reason and target_path and target_path not in current_path:
@@ -1075,6 +1089,11 @@ class BrowserAutomationService:
                 checkpoint = "target_page_restored"
                 continue
             if not reason:
+                if require_auth:
+                    self.resume_access_check = False
+                    self.store.event(task_id, "login_access_verified", "已重新核对页面登录与验证状态")
+                    self.store.update_task(task_id, status=BrowserTaskStatus.RUNNING, takeover_reason=None,
+                        detail="页面登录与验证状态已核对", checkpoint=checkpoint + "_verified")
                 return page
             self.gate.clear()
             self.store.event(task_id, "user_takeover_required", reason)
@@ -1085,7 +1104,6 @@ class BrowserAutomationService:
                 await page.wait_for_timeout(1_000)
             except PlaywrightError:
                 continue
-            tolerated_reason = reason
             checkpoint = "user_takeover_resumed"
 
     async def _record_checkpoint(self, task_id: str, name: str, page: Page, evidence: dict | None = None, *, screenshot: bool = False) -> None:

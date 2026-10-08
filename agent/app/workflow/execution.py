@@ -32,6 +32,9 @@ def render_step(step: dict) -> str:
         return f"{tool}：{step.get('detail') or step['status']}"
     if not isinstance(result, dict):
         return f"{tool}：{str(result)[:800]}"
+    if tool == "search_state_read":
+        from ..core.request_summary import search_summary
+        return search_summary(result)
     if tool == "job_search_start":
         args = result.get("search_conditions", {})
         return ("已启动搜索：" + " · ".join(args.get("queries") or [])

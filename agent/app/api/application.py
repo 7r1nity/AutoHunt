@@ -707,7 +707,10 @@ async def pause_browser_task() -> BrowserTaskView:
 
 @app.post("/api/v1/browser/tasks/current/resume", response_model=BrowserTaskView)
 async def resume_browser_task() -> BrowserTaskView:
-    return await browser_service.resume()
+    try:
+        return await browser_service.resume()
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @app.post("/api/v1/browser/tasks/current/stop", response_model=BrowserTaskView)

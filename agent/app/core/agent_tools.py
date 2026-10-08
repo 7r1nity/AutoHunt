@@ -752,7 +752,12 @@ class AgentToolRegistry:
                 raise ValueError(f"{path} 数值超出范围")
 
     async def _context_read(self, _args):
-        return compact_state(active_run().dialogue or {}) if active_run() else {}
+        from .request_summary import request_context, request_summary
+        context = active_run()
+        if not context:
+            return {}
+        saved, conditions = context.dialogue or {}, context.search_state or {}
+        return {**request_context(saved), "message": request_summary(saved, conditions)}
 
     async def _question_ask(self, args):
         dialogue_change("question", **args)

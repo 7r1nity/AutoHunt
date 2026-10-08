@@ -485,6 +485,10 @@ class AutoHuntAgent:
     async def _dispatch_contextual_message(self, message: str, patch: dict | None) -> ChatResponse:
         context = active_run()
         stripped = message.strip()
+        from .request_summary import is_request_summary, request_summary
+        if is_request_summary(message):
+            return ChatResponse(message=request_summary(context.dialogue or {}, context.search_state or {},
+                self._conversation_history), lane=AgentLane.APPLICATION)
         if stripped in {"退出当前任务", "不办了"}:
             dialogue_change("request_state", request=None)
             return await self._resolve_context_confirmation("取消")
@@ -953,7 +957,8 @@ class AutoHuntAgent:
                 f"- 当前状态：**{view.status}**"
             )
         else:
-            message = f"{verb}浏览器任务。当前状态：**{view.status}**。"
+            message = (f"已收到继续请求，执行器正在重新核验页面登录与验证码状态；尚未确认验证通过。当前状态：**{view.status}**。"
+                if intent == "resume_search" else f"{verb}浏览器任务。当前状态：**{view.status}**。")
         return ChatResponse(
             message=message,
             lane=AgentLane.APPLICATION,
