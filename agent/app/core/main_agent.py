@@ -943,8 +943,13 @@ class AutoHuntAgent:
 
     async def _handle_plain(self, message: str) -> ChatResponse:
         from ..growth.requests import continued_plan_scope, resume_stamp
+        from .composite import composite_request
         continued = continued_plan_scope((active_run().dialogue or {}) if active_run() else {}, message,
             resume_stamp(self.resume_workspace.read_document(), self.candidate_state)) if self.resume_workspace else None
+        # A composite request must be decomposed; the growth branch would consume
+        # the whole message as a plan focus and silently drop the search in it.
+        if composite_request(message) and (self._learning_plan_command(message) or continued is not None):
+            return await self._handle_tool_loop(message)
         if self.learning_plans is not None and (self._learning_plan_command(message) or continued is not None):
             if self.tool_registry is not None:
                 outcome = await self.tool_registry.execute(

@@ -33,6 +33,7 @@ agent/test-results/
 Thumbs.db
 tmp/
 /.runtime/
+/_diag/
 /docs/*preview*.png
 /docs/*preview*.jpg
 /91 - AutoHunt AI Job Application Assistant (ConnectOnion-example).pdf
