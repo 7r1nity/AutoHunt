@@ -130,11 +130,6 @@ app.add_middleware(
 )
 
 
-@app.get("/health")
-async def health() -> dict:
-    return {"status": "ok", "service": "autohunt-backend", "version": "0.1.0"}
-
-
 @app.post("/api/v1/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest) -> ChatResponse:
     try:

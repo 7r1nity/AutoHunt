@@ -57,11 +57,9 @@ Log in to BOSS in that visible Chrome window. In AutoHunt choose **现有 Chrome
 
 Do not expose the CDP port outside localhost and do not use your everyday Chrome profile as the remote-debugging profile.
 
-Run tests:
-
-```powershell
-.\.venv\Scripts\python.exe -m pytest
-```
+Automated test sources and runners were removed at the project owner's request.
+Use `scripts/verify.ps1` from the repository root for syntax, type and build checks;
+these checks do not replace behavioral or browser regression tests.
 
 Run the local MCP server over stdio:
 
@@ -73,7 +71,6 @@ The MCP server exposes only allowlisted memory, sanitized candidate-profile, pre
 
 ## API summary
 
-- `GET /health`
 - `POST /api/v1/chat`
 - `POST /api/v1/browser/search`
 - `GET/POST /api/v1/resumes`

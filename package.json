@@ -5,8 +5,7 @@
   "scripts": {
     "dev": "pnpm --dir frontend dev",
     "build": "pnpm --dir frontend build",
-    "typecheck": "pnpm --dir frontend typecheck",
-    "test:agent": "agent\\.venv\\Scripts\\python.exe -m pytest agent\\tests"
+    "typecheck": "pnpm --dir frontend typecheck"
   },
   "packageManager": "pnpm@11.19.0"
 }

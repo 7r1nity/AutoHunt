@@ -44,7 +44,7 @@ cd agent
 pnpm --dir frontend dev --hostname 127.0.0.1
 ```
 
-打开 [AutoHunt](http://127.0.0.1:3000)，后端健康检查：[health](http://127.0.0.1:8000/health)。前后端的服务 Token 必须相同；`AUTOHUNT_DATA_KEY` 必须跨重启保留。
+打开 [AutoHunt](http://127.0.0.1:3000)。前后端的服务 Token 必须相同；`AUTOHUNT_DATA_KEY` 必须跨重启保留。
 
 ### 成长计划（当前 MVP）
 
@@ -74,20 +74,19 @@ pnpm --dir frontend dev --hostname 127.0.0.1
 | `agent/app/memory`、`jobs` | 原件/证据/简历/偏好与职位统计 |
 | `agent/app/browser`、`delivery` | DOM 适配、会话、锁和有授权的投递 |
 | `agent/app/mcp`、`sandbox_backend`、`multiagent` | MCP 出口、文件沙箱/协议、任务 Broker |
-| `agent/tests`、`scripts` | 单元/组件/浏览器测试和验证入口 |
+| `scripts` | 启动、数据清理与静态构建检查入口 |
 | [架构与完整功能清单](docs/architecture.md) | 当前调用链、18 个 MCP 工具、存储和实现边界 |
 | [代码审查记录](docs/code-review.md) | 已修问题、剩余风险和冗余清理原则 |
 | [TODO](docs/TODO.md) | P0/P1/P2 优先级及逐项验收条件 |
-| [测试评估与交付标准](docs/testing-and-delivery.md) | 闭环、指标、验收门槛和本次证据 |
-| [浏览器测试说明](docs/browser-testing.md) | 模拟站隔离测试细节 |
+| [测试评估与交付标准](docs/testing-and-delivery.md) | 历史验证记录与设计标准；测试源码现已移除 |
+| [浏览器测试说明](docs/browser-testing.md) | 历史隔离测试设计；测试入口现已移除 |
 
 ## 验证
 
 ```powershell
 .\scripts\verify.ps1
-.\scripts\verify.ps1 -Browser -MockRoot C:\job_agent
 ```
 
-测试自动隔离数据根和模型密钥。运行数据默认位于 `agent/data`，可通过 `AUTOHUNT_DATA_ROOT` 指向独立目录。不要把私有原件、浏览器会话、测试日志或 `.env` 提交到仓库。不要同时用不同数据根连接同一个 CDP 会话：它们不会共享同一把锁。
+自动化测试源码、夹具和执行入口已按项目负责人要求移除。当前验证仅检查 Python 语法、前端类型与生产构建，不等于行为或浏览器回归验证；文档中的旧测试记录仅作为历史设计参考。运行数据默认位于 `agent/data`，可通过 `AUTOHUNT_DATA_ROOT` 指向独立目录。不要把私有原件、浏览器会话、运行日志或 `.env` 提交到仓库。不要同时用不同数据根连接同一个 CDP 会话：它们不会共享同一把锁。
 
 修改浏览器锁后请完整重启后端，使搜索和投递执行器使用同一版本。后端暂不应以多个 uvicorn worker 部署；当前状态与队列仍有进程内单例。
