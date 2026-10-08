@@ -86,6 +86,7 @@ class DialogueState(Strict):
     clarification: dict[str, Any] | None = None
     selected_job: JobSelection | None = None
     learning_request: dict[str, Any] | None = None
+    workflow_request: dict[str, Any] | None = None
 
 
 def topic_for(message: str, previous: str = "general") -> str:
@@ -122,6 +123,10 @@ def apply_operation(saved: dict | None, operation: dict, *, clock: float | None 
     now = time.time() if clock is None else clock
     op = operation["op"]
     source = str(operation.get("source", ""))[:128]
+    if op == "workflow":
+        state.workflow_request = copy.deepcopy(operation.get("request"))
+        state.revision += 1
+        return state.model_dump(mode="json")
     for item in state.pending:
         if item.status == "pending" and item.expires_at < now:
             item.status = "expired"
@@ -392,6 +397,8 @@ def compact_state(saved: dict) -> dict:
                   for item in state.snapshots[-2:] if item.displayed and item.topic == state.active_intent],
         "tasks": state.tasks, "selected_job": state.selected_job.model_dump() if state.selected_job else None,
         "learning_request": state.learning_request,
+        "workflow": ({key: state.workflow_request.get(key) for key in
+            ("id", "status", "search", "missing", "actions", "expires_at")} if state.workflow_request else None),
         "trace": [{**item, "recency_weight": round(0.8 ** (state.turn-item["turn"]), 3)}
                   for item in state.trace[-6:]], "summary": state.summary[-8:]}
 

@@ -490,6 +490,10 @@ export default function Home() {
       if (runtimeNotificationIdsRef.current.has(key)) return;
       runtimeNotificationIdsRef.current.add(key);
       if (event.kind === "browser_summary") void fetchInsights();
+      if (event.kind === "workflow_summary") {
+        void fetchInsights();
+        if (event.data.plans_changed) void fetchLearningPlans();
+      }
       if (event.kind === "delivery") {
         const task = event.data.task as DeliveryTask | undefined;
         if (task?.id && (["starting", "running", "waiting_for_user"].includes(task.status)
@@ -500,7 +504,7 @@ export default function Home() {
         }
         void fetchInsights();
       }
-      const text = event.kind === "browser_summary" ? event.data.message : (event.data.result as { message?: string })?.message;
+      const text = event.kind === "browser_summary" || event.kind === "workflow_summary" ? event.data.message : (event.data.result as { message?: string })?.message;
       if (typeof text !== "string") return;
       const proposal = event.kind === "response" ? (event.data.result as { resume_proposal?: ResumeProposal })?.resume_proposal : undefined;
       setMessages((current) => current.some((message) => message.author === "agent" && message.text === text) ? current : [...current, {

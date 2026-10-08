@@ -89,7 +89,7 @@ class MockWorkflowCoordinator:
                 pass
             self.wakeup.clear()
 
-    async def queue_deliveries(self, *, min_score: int, session_id: str) -> dict:
+    async def queue_deliveries(self, *, min_score: int, session_id: str, task_id: str | None = None) -> dict:
         """One explicit bounded batch, not a persistent rule for unseen future jobs."""
         from ..growth.requests import resume_stamp
         if not 0 <= min_score <= 100:
@@ -100,7 +100,7 @@ class MockWorkflowCoordinator:
         if not self.settings()["applicant_id"]:
             raise ValueError("请先在模拟站登录求职者账号并完成一次搜索，以绑定账号")
         document = self.resume.read_document()
-        evidence = self.jobs.jobs_for_resume_analysis(profile.resume_id, limit=200, min_score=min_score)
+        evidence = self.jobs.jobs_for_resume_analysis(profile.resume_id, limit=200, min_score=min_score, task_id=task_id)
         eligible = [self.jobs.get_job(item["id"]) for item in evidence
                     if item["stage"] in {"review", "applying"}
                     and self.delivery.supports(item["source_url"])

@@ -115,7 +115,8 @@ class LearningPlanService:
         resume_id = self.candidates.read().profile.resume_id
         return self.jobs.learning_plans(resume_id) if resume_id else []
 
-    async def generate(self, focus: str = "", *, min_score: int | None = None, max_score: int | None = None) -> dict:
+    async def generate(self, focus: str = "", *, min_score: int | None = None, max_score: int | None = None,
+                       task_id: str | None = None) -> dict:
         if isinstance(self.llm, LLMManager) and self.llm.settings_store.read()["provider"] == "mock":
             raise ValueError("详细跨行业学习计划需要真实模型；请先在模型设置中配置 DeepSeek")
         profile = self.candidates.read().profile
@@ -126,7 +127,7 @@ class LearningPlanService:
             legacy_start = self.original_resumes.get(profile.resume_id).uploaded_at
         jobs = self.jobs.jobs_for_resume_analysis(
             profile.resume_id, limit=20, legacy_since=legacy_start.isoformat() if legacy_start else None,
-            min_score=min_score, max_score=max_score,
+            min_score=min_score, max_score=max_score, task_id=task_id,
         )
         jobs = [job for job in jobs if len(str(job["description"] or "").strip()) >= 40]
         if not jobs:
@@ -190,6 +191,7 @@ class LearningPlanService:
             "summary": redact_text(plan.summary),
             "jobs_analyzed": len(jobs),
             "score_scope": {"min_score": min_score, "max_score": max_score},
+            "search_task_id": task_id,
             "job_sources": [
                 {"id": int(job["id"]), "title": str(job["title"])[:120],
                  "source_url": str(job["source_url"])[:500]}

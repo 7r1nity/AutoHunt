@@ -98,6 +98,10 @@ class AgentRuntime:
             browser_id = (data.get("result") or {}).get("id")
             if browser_id:
                 self.store.update(run_id, checkpoint={"browser_id": browser_id})
+        if kind == "workflow_bound":
+            saved = self.store.get(run_id)["checkpoint"] or {}
+            if saved.get("browser_id") == data.get("browser_id"):
+                self.store.update(run_id, checkpoint={**saved, "workflow": data["workflow"]})
         self.store.event(run_id, kind, data)
 
     def save(self, run_id: str, checkpoint: dict):
@@ -277,9 +281,83 @@ class AgentRuntime:
             if browser.status in {"completed", "failed", "stopped"}:
                 status = {"completed": "completed", "failed": "failed", "stopped": "cancelled"}[browser.status]
                 self.browser_summary(run_id, browser)
+                await self.complete_workflow(run_id, browser)
                 self.finish(run_id, status, browser.detail)
                 return
             await asyncio.sleep(1)
+
+    async def complete_workflow(self, run_id: str, browser):
+        """Post-search actions are finite, resume/task bound, claimed before effects.
+
+        A crash during this section never replays delivery or plan generation.
+        Search itself is already completed and will not be restarted here.
+        """
+        run = self.store.get(run_id)
+        saved = run["checkpoint"] or {}
+        workflow = saved.get("workflow")
+        if not workflow or saved.get("workflow_finished"):
+            return
+        from ..growth.requests import resume_stamp
+        lock = self.sessions.setdefault(run["session_id"], asyncio.Lock())
+        async with lock:
+            current = self.store.dialogue_state(run["session_id"]).get("workflow_request") or {}
+            stamp = resume_stamp(self.resume_workspace.read_document(), self.agent.candidate_state)
+            reason = None
+            if saved.get("workflow_claimed"):
+                reason = "服务在后续动作执行期间中断；请核对队列和计划，未自动重放"
+            elif run["cancel_requested"] or browser.status != "completed":
+                reason = "搜索停止或失败，未执行后续动作"
+            elif workflow["resume_stamp"] != stamp:
+                reason = "主简历已变更，后续授权不再适用"
+            elif workflow["expires_at"] < time.time():
+                reason = "后续动作授权已过期，请核对搜索结果后重新下达指令"
+            elif current.get("id") != workflow["id"] or current.get("status") != "searching":
+                reason = "会话中的原工作流已取消或被新请求替代"
+            if reason:
+                lines = [reason]
+            else:
+                self.store.update(run_id, checkpoint={**saved, "workflow_claimed": True})
+                self.store.event(run_id, "progress", {"detail": "搜索已完成，正在处理本次结果的后续动作"})
+                lines = []
+                for action in workflow["actions"]:
+                    if self.store.get(run_id)["cancel_requested"]:
+                        break
+                    # Resume can change from the UI independently of chat ordering.
+                    if resume_stamp(self.resume_workspace.read_document(), self.agent.candidate_state) != stamp:
+                        lines.append("主简历已变更，剩余动作未执行")
+                        break
+                    name = "自动投递" if action["kind"] == "delivery" else "成长计划"
+                    try:
+                        self.store.event(run_id, "workflow_step", {"action": action["kind"], "status": "started", "scope": action["scope"]})
+                        if action["kind"] == "delivery":
+                            coordinator = self.agent.tool_registry.mock_workflow
+                            if coordinator is None:
+                                raise ValueError("模拟站自动投递执行器未配置；不支持真实网站投递")
+                            result = await asyncio.wait_for(coordinator.queue_deliveries(
+                                min_score=action["scope"]["min_score"], session_id=run["session_id"], task_id=browser.id), timeout=15)
+                            lines.append(result["message"])
+                        else:
+                            if self.plans is None:
+                                raise ValueError("成长计划执行器未配置")
+                            async with asyncio.timeout(self.plan_timeout):
+                                async with self.slots:
+                                    result = await self.plans.generate(action["instruction"], task_id=browser.id, **action["scope"])
+                            lines.append("劣势分析：" + result["summary"] + f"\n已保存成长计划「{result['title']}」，依据本次 {result['jobs_analyzed']} 份 JD。")
+                        self.store.event(run_id, "workflow_step", {"action": action["kind"], "status": "completed"})
+                    except (ValueError, RuntimeError, TimeoutError) as exc:
+                        lines.append(f"{name}未完成：{str(exc) or '超时'}；不会自动重试或扩大范围。")
+                        self.store.event(run_id, "workflow_step", {"action": action["kind"], "status": "failed", "detail": str(exc)})
+                    except Exception as exc:
+                        lines.append(f"{name}执行未确认（{type(exc).__name__}），请核对执行记录；不会自动重试。")
+                        self.store.event(run_id, "workflow_step", {"action": action["kind"], "status": "outcome_indeterminate", "error_type": type(exc).__name__})
+            if not lines:
+                lines = ["本次搜索没有待执行的后续动作。"]
+            message = "本次工作流结果：\n\n" + "\n\n".join(lines)
+            self.jobs.add_conversation_message("assistant", message, conversation_id=run["session_id"], run_id=f"workflow:{run_id}")
+            self.store.event(run_id, "workflow_summary", {"message": message, "statistics_changed": True, "plans_changed": True})
+            self.store.update(run_id, checkpoint={**(self.store.get(run_id)["checkpoint"] or {}), "workflow_finished": True})
+            if current.get("id") == workflow["id"]:
+                self.store.mutate_dialogue(run["session_id"], {"op": "workflow", "request": {**current, "status": "finished"}})
 
     async def watch_delivery(self, run_id: str):
         run = self.store.get(run_id)

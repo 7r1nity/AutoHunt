@@ -903,14 +903,19 @@ class JobStore:
 
     def jobs_for_resume_analysis(self, resume_id: str, *, limit: int = 20,
                                  legacy_since: str | None = None, min_score: int | None = None,
-                                 max_score: int | None = None) -> list[dict[str, Any]]:
+                                 max_score: int | None = None, task_id: str | None = None) -> list[dict[str, Any]]:
         """Return saved JD evidence from terminal runs for one resume, not the global board."""
         with self.lock, self._connect() as db:
             task_ids = [row["id"] for row in db.execute(
                 "SELECT id FROM browser_tasks WHERE status IN ('completed','stopped','failed') AND resume_id=? "
                 "ORDER BY started_at DESC LIMIT 20", (resume_id,),
             )]
-            if not task_ids and legacy_since:
+            if task_id is not None:
+                task_ids = [row["id"] for row in db.execute(
+                    "SELECT id FROM browser_tasks WHERE id=? AND resume_id=? AND status='completed'",
+                    (task_id, resume_id),
+                )]
+            if task_id is None and not task_ids and legacy_since:
                 legacy = db.execute(
                     "SELECT id FROM browser_tasks WHERE status IN ('completed','stopped','failed') "
                     "AND resume_id IS NULL AND started_at>=? ORDER BY started_at DESC LIMIT 1",

@@ -493,6 +493,18 @@ class AutoHuntAgent:
             document = self.resume_workspace.read_document() if self.resume_workspace else None
             save_search_state(prepare_search_state(None, self.candidate_state.read(), document.version if document else None))
             return ChatResponse(message="已重置临时上下文与会话搜索条件；简历、长期偏好和历史记录保留。已启动的浏览器任务不会被删除，如需中断请发送「停止搜索」。", lane=AgentLane.CANDIDATE)
+        # Plan dependent actions BEFORE any single-intent quick path can consume
+        # the request. The planner is read-only; missing slots never start search.
+        from ..workflow.compound import needs_plan, pending_request, is_slot_reply
+        from ..growth.requests import resume_stamp
+        stamp = resume_stamp(self.resume_workspace.read_document(), self.candidate_state) if self.resume_workspace else ""
+        pending = pending_request(context.dialogue or {}, stamp)
+        if needs_plan(message) or pending and is_slot_reply(message):
+            return await self._handle_compound(message, stamp, pending)
+        if pending and CONFIRM.fullmatch(stripped):
+            return ChatResponse(message="原请求仍缺少明确参数：" + "；".join(pending["missing"]) + "。确认本身不能补齐这些数值，尚未执行。", lane=AgentLane.APPLICATION)
+        if parse_search_message(message).authorized or REJECT.fullmatch(stripped) or re.search(r"停止搜索|暂停搜索|退出当前任务", message):
+            dialogue_change("workflow", request=None)
         if CONFIRM.fullmatch(stripped) or REJECT.fullmatch(stripped):
             return await self._resolve_context_confirmation(stripped)
         from .action_language import explicit_mock_delivery
@@ -560,6 +572,53 @@ class AutoHuntAgent:
         else:
             response = await self._handle_plain(message)
         return response
+
+    async def _handle_compound(self, message: str, stamp: str, previous: dict | None) -> ChatResponse:
+        from ..workflow.compound import extract_plan
+        context = active_run()
+        if not self.tool_registry:
+            return ChatResponse(message="工作流执行器尚未配置，没有启动搜索或后续动作。", lane=AgentLane.APPLICATION)
+        # A fresh search command replaces, rather than appends to, an unanswered
+        # request; an actual slot answer continues the original authorization.
+        if previous and parse_search_message(message).authorized:
+            previous = None
+        emit("progress", detail="正在拆解搜索条件和后续动作；尚未执行")
+        try:
+            plan = await extract_plan(self.llm, message, previous=previous,
+                conditions=context.search_state or {}, stamp=stamp, turn=(context.dialogue or {}).get("turn", 0))
+        except (ValueError, RuntimeError, asyncio.TimeoutError) as exc:
+            return ChatResponse(message=f"未启动任务：{str(exc) or '规划超时'}。请明确搜索条件及后续动作范围。", lane=AgentLane.APPLICATION)
+        dialogue_change("workflow", request=plan)
+        if plan["missing"]:
+            args = plan["search"]
+            remembered = f"已保留目标 {args['result_limit']} 个" if args.get("result_limit") else "已保留搜索请求"
+            if args.get("locations"):
+                remembered += f"、城市 {'、'.join(args['locations'])}"
+            return ChatResponse(message=f"{remembered}；执行顺序为先搜索，再处理本次结果。请一次补充："
+                + "；".join(plan["missing"]) + "。没有启动搜索、投递或生成计划；补充后会继续此请求。", lane=AgentLane.APPLICATION)
+        outcome = await self.tool_registry.execute("job_search_start", plan["search"],
+            user_message=plan["search_quote"], state=ToolLoopState(explicit_search_intent=True))
+        if outcome.status != "ok":
+            dialogue_change("workflow", request={**plan, "status": "blocked"})
+            return ChatResponse(message=f"搜索未启动：{outcome.content}。后续动作没有执行，请处理后重新发起请求。", lane=AgentLane.APPLICATION)
+        plan.update(status="searching", browser_id=outcome.content["id"])
+        dialogue_change("workflow", request=plan)
+        emit("workflow_bound", browser_id=outcome.content["id"], workflow=plan)
+        actual = outcome.content.get("search_conditions", {})
+        message_text = "已启动搜索：" + " · ".join(actual.get("queries") or [])
+        if actual.get("locations"):
+            message_text += "；城市：" + "、".join(actual["locations"])
+        if actual.get("result_limit"):
+            message_text += f"；目标 {actual['result_limit']} 个"
+        if actual.get("salary_min"):
+            message_text += f"；月薪下限 ≥{actual['salary_min']} 元"
+        descriptions = [f"匹配分 ≥{action['scope']['min_score']} 的模拟站职位加入有限投递队列（回复后发送，不等于已投递）"
+            if action["kind"] == "delivery" else f"按匹配分范围 {action['scope']} 分析劣势并保存成长计划" for action in plan["actions"]]
+        if descriptions:
+            message_text += "。本次搜索成功完成后：" + "；".join(descriptions)
+        message_text += "。仅使用本次结果；验证需人工接管，失败、停止或简历变更不会继续后续动作。"
+        return ChatResponse(message=message_text, lane=AgentLane.APPLICATION,
+            tool_events=[ToolEvent(tool="job_search_start", status="ok", detail="复合请求已绑定到搜索任务")])
 
     async def _resolve_context_confirmation(self, message: str) -> ChatResponse:
         context = active_run()

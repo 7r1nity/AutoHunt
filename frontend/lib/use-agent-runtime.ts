@@ -40,7 +40,7 @@ export function useAgentRuntime() {
     const controller = new AbortController();
     connections.current.set(run.id, controller);
     void followRun(run.id, (event) => {
-      if (event.kind === "browser_summary" || event.kind === "response" && !onEvent) {
+      if (event.kind === "browser_summary" || event.kind === "workflow_summary" || event.kind === "response" && !onEvent) {
         setNotifications((current) => [...current.slice(-99), { sessionId: run.session_id, runId: run.id, event }]);
       }
       if (currentSession.current === run.session_id && mounted.current) {
