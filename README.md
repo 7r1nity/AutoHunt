@@ -2,7 +2,7 @@
 
 本地单用户求职 Agent MVP：材料/简历 → 搜索与匹配 → 申请看板 → 模拟招聘站沟通与投递 → 报告/统计。Next.js + TypeScript 前端，FastAPI + Python Agent 后端，Playwright 浏览器执行器。
 
-项目作者：[7r1nity](https://github.com/7r1nity)。AI 开发协作：[Codex](https://openai.com/codex/)，协作提交使用 `Co-authored-by: Codex <noreply@openai.com>` 署名。GitHub 上的账号、头像与贡献展示由其邮箱关联规则决定；此署名不授予仓库访问权限。
+项目负责人：[7r1nity](https://github.com/7r1nity)。AI 开发协作：[Codex](https://openai.com/codex/)。按项目负责人的要求，后续 Codex 创建的提交使用 `Codex <noreply@openai.com>` 作为作者与提交者，GitHub 已将该邮箱关联到 [codex](https://github.com/codex) 账号及头像。推送仍由项目负责人的账号认证；提交署名不授予仓库访问权限，已有提交保持不变。
 
 **能力边界**：支持模拟站投递演练，保留 BOSS 搜索 Adapter；真实 BOSS 提交未开放。本次测试不代表真实网站已验收。CAPTCHA/MFA 由用户接管。现有为单 Agent + 并发分析任务，不是自治 Multi-Agent；文件沙箱不是容器执行隔离。
 

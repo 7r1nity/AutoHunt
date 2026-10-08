@@ -20,9 +20,13 @@ The account's repositories page is not a Git remote URL.
   local changes. Do not claim a push succeeded without checking it.
 - Do not start recruitment searches or submit applications just to verify Git delivery.
 - This agreement covers AutoHunt's workspace, not the separate mock site's checkout.
-- Keep `7r1nity` as the principal commit author. For changes assisted by Codex,
-  append the local Codex default trailer: `Co-authored-by: Codex <noreply@openai.com>`.
-  Do not impersonate a GitHub bot or grant repository access for attribution.
+- Per the user's updated request, use `Codex <noreply@openai.com>` as both
+  author and committer for future Codex-created commits in this repository.
+  GitHub has verified this email maps to the `codex` account and its avatar.
+  Keep this identity in repository-local Git configuration, not global settings.
+  Push using the user's existing `7r1nity` authentication; commit attribution does
+  not change the authenticated pusher or grant Codex repository access.
+  Do not rewrite historical commits or add a redundant Codex co-author trailer.
 
 ## Implementation
 
