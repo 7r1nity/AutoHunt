@@ -458,6 +458,10 @@ class AgentToolRegistry:
                 if any(not mentions.get(field, False) for field in arguments):
                     raise ValueError("只允许修改用户本轮明确提到的搜索条件；未提及字段应省略")
             executor_started = True
+            context = active_run()
+            request = (context.dialogue or {}).get("task_request") if context else None
+            if request and request.get("run_id") == context.run_id and spec.effect in {"write", "external"}:
+                dialogue_change("request_state", request={**request, "execution_started": True, "status": "running"})
             content = await safe_retry(lambda: spec.executor(arguments),
                 retry_safe=spec.effect == "read" and name in self.RETRY_SAFE_READS,
                 on_retry=record_retry)

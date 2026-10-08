@@ -20,6 +20,7 @@ class AgentRuntime:
         self.store, self.agent, self.jobs = store, agent, jobs
         self.browser, self.plans, self.resume_workspace = browser, plans, resume_workspace
         self.tasks: dict[str, asyncio.Task] = {}
+        self.cancellations: dict[str, asyncio.Task] = {}
         self.sessions: dict[str, asyncio.Lock] = {}
         self.slots = asyncio.Semaphore(2)
         self.queue_timeout, self.chat_timeout, self.plan_timeout = queue_timeout, chat_timeout, plan_timeout
@@ -53,6 +54,7 @@ class AgentRuntime:
                 self.finish(run_id, "outcome_indeterminate" if run["mutation_started"] else "interrupted", "服务停止，检查点已保存")
             task.cancel()
         await asyncio.gather(*(task for _, task in tasks), return_exceptions=True)
+        await asyncio.gather(*list(self.cancellations.values()), return_exceptions=True)
         self.tasks.clear()
 
     def schedule(self, run_id: str, *, watch_only=False):
@@ -89,6 +91,12 @@ class AgentRuntime:
         if previous["status"] in TERMINAL:
             return
         self.store.update(run_id, status=status, error=detail if status != "completed" else None, **fields)
+        request = self.store.dialogue_state(previous["session_id"]).get("task_request")
+        if request and request.get("run_id") == run_id:
+            self.store.mutate_dialogue(previous["session_id"], {"op": "request_state", "source": run_id,
+                "expected_run": run_id,
+                "request": {**request, "status": ("clarifying" if request.get("status") == "clarifying" else "finished") if status == "completed" else status,
+                    "failure": "" if status == "completed" else detail[:300]}})
         self.store.event(run_id, "status", {"status": status, "detail": detail})
 
     def emit(self, run_id: str, kind: str, data: dict):
@@ -103,6 +111,9 @@ class AgentRuntime:
         if kind == "plan_state":
             saved = self.store.get(run_id)["checkpoint"] or {}
             self.store.update(run_id, checkpoint={**saved, "phase": "action_plan", "plan": data["plan"]})
+        if kind == "plan_failed":
+            saved = self.store.get(run_id)["checkpoint"] or {}
+            self.store.update(run_id, checkpoint={**saved, "planning_failure": data})
         if kind == "workflow_bound":
             saved = self.store.get(run_id)["checkpoint"] or {}
             if saved.get("browser_id") == data.get("browser_id"):
@@ -174,11 +185,16 @@ class AgentRuntime:
                     try:
                         from ..growth.plans import is_explicit_plan_request
                         from ..core.action_language import plan_scope_answer
+                        from ..workflow.planning import PLANNING_TIMEOUT, shortcut_safe
+                        from ..workflow.requests import is_continuation
+                        resuming_request = bool(is_continuation(run["payload"].get("message", "")) and
+                            (context.dialogue or {}).get("task_request"))
                         plan_followup = bool((context.dialogue or {}).get("learning_request")
                             and plan_scope_answer(run["payload"].get("message", "")))
                         budget = self.plan_timeout if run["kind"] == "learning_plan" else (
-                            self.plan_timeout + 35 if is_explicit_plan_request(run["payload"].get("message", ""))
-                            or plan_followup or ((context.dialogue or {}).get("instruction_request") or {}).get("status") == "clarifying"
+                            self.plan_timeout + PLANNING_TIMEOUT if is_explicit_plan_request(run["payload"].get("message", ""))
+                            or plan_followup or resuming_request or ((context.dialogue or {}).get("instruction_request") or {}).get("status") == "clarifying"
+                            else max(self.chat_timeout, PLANNING_TIMEOUT + 20) if not shortcut_safe(run["payload"].get("message", ""))
                             else self.chat_timeout)
                         async with asyncio.timeout(budget):
                             if run["kind"] == "learning_plan":
@@ -223,6 +239,11 @@ class AgentRuntime:
                                 self.jobs.add_conversation_message("assistant", result["message"], response=result, conversation_id=run["session_id"], run_id=run_id)
                             self.store.event(run_id, "response", {"result": result, "elapsed_ms": round((time.monotonic()-started)*1000)})
                             if run["kind"] == "chat":
+                                planning_failure = (self.store.get(run_id)["checkpoint"] or {}).get("planning_failure")
+                                if planning_failure:
+                                    self.finish(run_id, "timed_out" if planning_failure["code"] == "planning_timeout" else "failed",
+                                        planning_failure["detail"], error_type="TimeoutError" if planning_failure["code"] == "planning_timeout" else "ValueError")
+                                    return
                                 uncertain = any(event.get("status") == "outcome_indeterminate" for event in result.get("tool_events", []))
                                 controller_error = any(event.get("tool") == "tool_call_controller" and event.get("status") == "error" for event in result.get("tool_events", []))
                                 if uncertain or controller_error:
@@ -238,11 +259,8 @@ class AgentRuntime:
             # Human/browser waits do not consume an LLM slot or block later chat turns.
             await self.watch(run_id)
         except asyncio.CancelledError:
-            current = self.store.get(run_id)
-            if current["cancel_requested"]:
-                uncertain = current["mutation_started"] and not current["result"]
-                if not (current["checkpoint"] or {}).get("browser_id") and not (current["checkpoint"] or {}).get("delivery_id"):
-                    self.finish(run_id, "outcome_indeterminate" if uncertain else "cancelled", "任务已停止，已完成的步骤保留")
+            # The cancellation coordinator owns finalization AFTER child/remote
+            # cleanup. Never advertise a terminal state while cleanup is running.
             raise
         except TimeoutError:
             current = self.store.get(run_id)
@@ -533,8 +551,27 @@ class AgentRuntime:
         run = self.store.get(run_id)
         if run["status"] in TERMINAL:
             return run
-        self.store.update(run_id, cancel_requested=1, status="cancelling")
-        self.store.event(run_id, "status", {"status": "cancelling", "detail": "正在停止任务"})
+        cleanup = self.cancellations.get(run_id)
+        if cleanup is None:
+            self.store.update(run_id, cancel_requested=1, status="cancelling")
+            self.store.event(run_id, "status", {"status": "cancelling", "detail": "正在停止任务，等待执行器安全清理"})
+            cleanup = asyncio.create_task(self._cancel_cleanup(run_id), name=f"cancel-run-{run_id}")
+            self.cancellations[run_id] = cleanup
+            cleanup.add_done_callback(lambda done: self.cancellations.pop(run_id, None))
+        # Return an acknowledgement promptly. Cleanup is durable/observed and is
+        # not cancelled by HTTP disconnect or the Next.js proxy's 15s deadline.
+        await asyncio.wait({cleanup}, timeout=1)
+        return self.store.get(run_id)
+
+    async def _cancel_cleanup(self, run_id: str):
+        try:
+            await self._stop_bound_tasks(run_id)
+        except Exception as exc:
+            current = self.store.get(run_id)
+            self.finish(run_id, "outcome_indeterminate" if current["mutation_started"] else "failed",
+                f"停止清理未能确认：{type(exc).__name__}；请核对运行记录，不要重复提交")
+
+    async def _stop_bound_tasks(self, run_id: str):
         task = self.tasks.get(run_id)
         if task:
             task.cancel()
@@ -548,9 +585,28 @@ class AgentRuntime:
         if delivery_id and self.delivery and self.delivery.current().id == delivery_id:
             view = await self.delivery.stop()
             self.finish(run_id, "outcome_indeterminate" if view.status == "outcome_indeterminate" else "cancelled", view.detail)
-        if current["status"] not in TERMINAL:
-            self.finish(run_id, "cancelled", "任务已停止")
-        return self.store.get(run_id)
+        current = self.store.get(run_id)
+        checkpoint = copy.deepcopy(current["checkpoint"] or {})
+        plan = checkpoint.get("plan")
+        uncertain = False
+        if plan:
+            plan.update(status="cancelled", expires_at=0)
+            for step in plan["steps"]:
+                if step["status"] == "claimed":
+                    unknown = step.get("effect") in {"write", "external"}
+                    uncertain |= unknown
+                    step.update(status="outcome_indeterminate" if unknown else "skipped", detail="执行期间中断，结果需核对" if unknown else "已中断")
+                elif step["status"] in {"pending", "waiting_external", "waiting_confirmation"}:
+                    step.update(status="skipped", detail="用户已停止，后续步骤不再执行；已产生的结果/提案保留")
+            self.store.update(run_id, checkpoint=checkpoint)
+            active = self.store.dialogue_state(current["session_id"]).get("instruction_request") or {}
+            if active.get("id") == plan["id"]:
+                self.store.mutate_dialogue(current["session_id"], {"op": "instruction", "request": {**active,
+                    "status": "cancelled", "expires_at": 0, "steps": plan["steps"]}})
+        else:
+            uncertain = bool(current["mutation_started"] and not current["result"] and not browser_id and not delivery_id)
+        self.finish(run_id, "outcome_indeterminate" if uncertain else "cancelled",
+            "任务已停止；中断时正在执行的写入需核对，未自动重试" if uncertain else "任务已停止，已完成的步骤保留")
 
     async def resume(self, run_id: str) -> dict:
         run = self.store.get(run_id)

@@ -4,7 +4,7 @@ import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from "re
 import { ImportedResume, ImportedResumeEditor } from "@/components/imported-resume";
 import { useAgentRuntime } from "@/lib/use-agent-runtime";
 import { RuntimePanel } from "@/components/runtime-panel";
-import { terminalRun } from "@/lib/agent-runtime";
+import { interruptionCommand, terminalRun } from "@/lib/agent-runtime";
 import { createChatTurn, createMessageId } from "@/lib/chat-message";
 import { inventoryRequest, inventoryError } from "@/lib/inventory-request";
 import { shortJobDate } from "@/lib/job-display";
@@ -1375,6 +1375,10 @@ export default function Home() {
   }
 
   async function deliver(value: string) {
+    if (interruptionCommand(value)) {
+      await interruptTask(value);
+      return;
+    }
     if (runtime.busyRun || conversationLoading) return;
     const sessionAtStart = runtime.sessionId;
     const turn = createChatTurn(value, now());
@@ -1393,6 +1397,9 @@ export default function Home() {
       let streamed = "";
       const payload = await runtime.execute("chat", { message: value }, (event) => {
         if (runtime.currentSession.current !== sessionAtStart) return;
+        if (event.kind === "progress" && !streamed && typeof event.data.detail === "string") {
+          setMessages((current) => current.map((item) => item.id === messageId ? { ...item, text: String(event.data.detail) } : item));
+        }
         if (event.kind === "delta") {
           streamed += String(event.data.text ?? "");
           setMessages((current) => current.map((item) => item.id === messageId ? { ...item, text: streamed } : item));
@@ -1471,6 +1478,16 @@ export default function Home() {
       // The instruction is a search command: start the browser task right away
       // and let the 确认登录 card drive the login handoff.
       void startChatSearch(messageId, actionQueries, actionLocations, actionDryRun);
+    }
+  }
+
+  async function interruptTask(command?: string) {
+    try {
+      await runtime.interrupt();
+      if (command) setChatText((current) => current.trim() === command ? "" : current);
+      setNotice("已发送当前会话的停止请求；最终状态请查看运行记录，已完成的步骤保留。");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "停止尚未确认，请重试");
     }
   }
 
@@ -1745,7 +1762,8 @@ export default function Home() {
                   <form className="composer" onSubmit={sendMessage}>
                     <button type="button" onClick={() => chatUploadRef.current?.click()} aria-label="上传简历或候选人材料">＋</button>
                     <input value={chatText} onChange={(event) => setChatText(event.target.value)} placeholder="给 AutoHunt Agent 发消息…" />
-                    <button type="submit" className="send" aria-label="发送" disabled={Boolean(runtime.busyRun) || conversationLoading}>↑</button>
+                    {runtime.canInterrupt && <button type="button" className="stop-task" aria-label="停止当前会话任务" title="停止当前会话任务，保留已完成的步骤" disabled={runtime.stopping} onClick={() => void interruptTask()}>{runtime.stopping ? "停止中…" : "■ 停止"}</button>}
+                    <button type="submit" className="send" aria-label="发送" disabled={runtime.stopping || ((Boolean(runtime.busyRun) || conversationLoading) && !interruptionCommand(chatText))}>↑</button>
                   </form>
                   <small className="chat-disclaimer">Agent 可能出错；投递前请核对职位与申请内容。</small>
                 </div>

@@ -18,10 +18,15 @@ export function useAgentRuntime() {
   const [runs, setRuns] = useState<AgentRun[]>([]);
   const [progress, setProgress] = useState<Record<string, string>>({});
   const [busyRun, setBusyRun] = useState<string | null>(null);
+  const [stopping, setStopping] = useState(false);
   const [notifications, setNotifications] = useState<Array<{ sessionId: string; runId: string; event: RunEvent }>>([]);
   const currentSession = useRef(sessionId);
   const connections = useRef(new Map<string, AbortController>());
   const mounted = useRef(true);
+  const pendingStart = useRef<{ session: string; cancel: boolean; ready: Promise<AgentRun> } | null>(null);
+  const controls = useRef(new Map<string, Promise<AgentRun>>());
+  const settlements = useRef(new Map<string, (run: AgentRun) => void>());
+  const stopRequest = useRef<{ session: string; promise: Promise<void> } | null>(null);
 
   const refresh = useCallback(async (session: string) => {
     const [response, conditions, context] = await Promise.all([
@@ -93,6 +98,7 @@ export function useAgentRuntime() {
     currentSession.current = sessionId;
     localStorage.setItem("autohunt-conversation", sessionId);
     setBusyRun(null);
+    setStopping(false);
     setRuns([]);
     setSearchState(null);
     setDialogue(null);
@@ -128,33 +134,101 @@ export function useAgentRuntime() {
   }
 
   async function execute(kind: AgentRun["kind"], payload: Record<string, string>, onEvent?: (event: RunEvent) => void): Promise<Record<string, unknown>> {
+    const session = sessionId;
+    if (pendingStart.current?.session === session || stopRequest.current?.session === session) throw new Error("当前请求正在创建或停止，请稍候");
     setBusyRun("starting");
+    const start = { session, cancel: false, ready: createRun(session, kind, payload) };
+    pendingStart.current = start;
     let run: AgentRun;
     try {
-      run = await createRun(sessionId, kind, payload);
+      run = await start.ready;
     } catch (error) {
-      setBusyRun(null);
+      if (currentSession.current === session) setBusyRun(null);
       throw error;
+    } finally {
+      if (pendingStart.current === start) pendingStart.current = null;
     }
     if (currentSession.current === run.session_id) {
       setRuns((current) => [run, ...current]);
       setBusyRun(run.id);
     }
-    return new Promise((resolve, reject) => observe(run, (event) => {
+    const result = new Promise<Record<string, unknown>>((resolve, reject) => {
+      const settle = (next: AgentRun) => {
+        if (!terminalRun(next.status)) return;
+        settlements.current.delete(run.id);
+        if (next.status === "completed" && next.result) resolve(next.result);
+        else reject(new Error(next.error ?? "任务已停止，已完成的步骤保留"));
+      };
+      settlements.current.set(run.id, settle);
+      observe(run, (event) => {
       onEvent?.(event);
-      if (event.kind === "response") resolve(event.data.result as Record<string, unknown>);
+      if (event.kind === "response") {
+        settlements.current.delete(run.id);
+        resolve(event.data.result as Record<string, unknown>);
+      }
       if (event.kind === "status" && terminalRun(String(event.data.status)) && event.data.status !== "completed") {
+        settlements.current.delete(run.id);
         reject(new Error(String(event.data.detail ?? "任务已停止")));
       }
-    }, reject));
+      }, (error) => { settlements.current.delete(run.id); reject(error); });
+    });
+    // Stop may be clicked before POST /runs has returned an ID. Do not abort
+    // that POST (it could already have created a durable task); cancel by ID.
+    if (start.cancel) void control(run, "cancel").catch(() => undefined);
+    return result;
   }
 
   async function control(run: AgentRun, action: "cancel" | "resume") {
-    const response = await fetch(`/api/agent/runs/${run.id}/${action}`, { method: "POST" });
-    const next = await response.json() as AgentRun & { detail?: string };
-    if (!response.ok) throw new Error(next.detail ?? "任务操作失败");
-    if (!terminalRun(next.status)) observe(next);
-    await refresh(sessionId);
+    const key = `${run.id}:${action}`;
+    const existing = controls.current.get(key);
+    if (existing) return existing;
+    const request = (async () => {
+      const response = await fetch(`/api/agent/runs/${run.id}/${action}`, { method: "POST" });
+      const next = await response.json() as AgentRun & { detail?: string };
+      if (!response.ok) throw new Error(next.detail ?? "任务操作失败");
+      if (currentSession.current === run.session_id) {
+        setRuns((current) => current.map((item) => item.id === next.id ? next : item));
+        if (terminalRun(next.status)) setBusyRun((current) => current === run.id ? null : current);
+      }
+      settlements.current.get(run.id)?.(next);
+      if (!terminalRun(next.status)) observe(next);
+      void refresh(run.session_id).catch(() => undefined);
+      return next;
+    })();
+    controls.current.set(key, request);
+    try { return await request; }
+    finally { if (controls.current.get(key) === request) controls.current.delete(key); }
+  }
+
+  async function interrupt() {
+    const session = sessionId;
+    if (stopRequest.current?.session === session) return stopRequest.current.promise;
+    setStopping(true);
+    const promise = (async () => {
+      const start = pendingStart.current?.session === session ? pendingStart.current : null;
+      if (start) {
+        start.cancel = true;
+        await control(await start.ready, "cancel");
+        return;
+      }
+      // Read fresh session-scoped state, including restored background tasks.
+      const response = await fetch(`/api/agent/runs?conversation_id=${session}`, { cache: "no-store" });
+      if (!response.ok) throw new Error("无法读取当前会话任务；未确认停止，请重试");
+      const items = await response.json() as AgentRun[];
+      const active = items.filter((run) => run.session_id === session && !terminalRun(run.status));
+      if (!active.length) {
+        if (currentSession.current === session) setBusyRun(null);
+        return;
+      }
+      const results = await Promise.allSettled(active.map((run) => control(run, "cancel")));
+      if (results.some((item) => item.status === "rejected")) throw new Error("部分任务停止尚未确认，请在任务与上下文中核对或重试");
+    })();
+    stopRequest.current = { session, promise };
+    try { await promise; }
+    finally {
+      if (stopRequest.current?.promise === promise) stopRequest.current = null;
+      if (currentSession.current === session) setStopping(false);
+    }
   }
 
   async function resetSearchState() {
@@ -173,5 +247,6 @@ export function useAgentRuntime() {
     if (currentSession.current === session) { setDialogue(value); setSearchState(value.conditions); }
   }
 
-  return { sessionId, setSessionId, sessions, searchState, resetSearchState, dialogue, resetContext, runs, progress, busyRun, notifications, currentSession, newSession, execute, control, observe };
+  const canInterrupt = Boolean(busyRun) || runs.some((run) => run.session_id === sessionId && !terminalRun(run.status));
+  return { sessionId, setSessionId, sessions, searchState, resetSearchState, dialogue, resetContext, runs, progress, busyRun, stopping, canInterrupt, interrupt, notifications, currentSession, newSession, execute, control, observe };
 }

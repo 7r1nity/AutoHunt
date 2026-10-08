@@ -2,6 +2,41 @@
 from __future__ import annotations
 
 import re
+from decimal import Decimal
+
+
+NUMBER = r"(?:\d{1,3}(?:[,，]\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?|[零〇一二两三四五六七八九十百千万]+)"
+
+
+def numeric_value(value: str) -> int:
+    """Complete Arabic/grouped or Chinese numeral; never match a numeric prefix."""
+    text = value.replace(",", "").replace("，", "")
+    if re.fullmatch(r"\d+(?:\.\d+)?", text):
+        return int(Decimal(text))
+    digits = {word: index for index, word in enumerate("零一二三四五六七八九")}
+    digits.update({"〇": 0, "两": 2})
+    if all(char in digits for char in text):
+        return int("".join(str(digits[char]) for char in text))
+    total, section, number = 0, 0, 0
+    last_unit = 1
+    for char in text:
+        if char in digits:
+            number = digits[char]
+        elif char in {"十", "百", "千"}:
+            last_unit = {"十": 10, "百": 100, "千": 1000}[char]
+            section += (number or 1)*last_unit
+            number = 0
+        elif char == "万":
+            total += (section+number or 1)*10000
+            section, number, last_unit = 0, 0, 10000
+        else:
+            raise ValueError("数值格式无效")
+    # Spoken 一万五 / 一千五 are 15000 / 1500, not 10005 / 1005.
+    return total+section+number*(last_unit//10 if last_unit >= 100 and number and not re.search(r"[零〇]", text) else 1)
+
+
+def employment_requirement(message: str) -> bool:
+    return bool(re.search(r"(?:只要|仅|尽量|优先|要求|找|排除|不要|不考虑).{0,12}(?:实习|校招|应届|社招|兼职)|(?:实习|校招|应届|社招).{0,5}(?:优先|为主)", message))
 
 
 def missing_search_message(has_resume: bool) -> str:
@@ -90,24 +125,49 @@ def explicit_search_constraints(message: str) -> dict:
     and other constraints remain the main model's responsibility.
     """
     fields = {}
-    count = re.search(r"(?:找|搜(?:索)?|需要|提供|给我)\s*(\d+)\s*(?:份|个|条)(?:工作|岗位|职位)?", message)
-    if count:
-        fields["result_limit"] = int(count.group(1))
-    labeled_count = re.search(r"(?:目标数量|结果数量|岗位数量|职位数量|数量)\s*[:：]?\s*(\d+)\s*(?:份|个|条)?", message)
-    if labeled_count:
-        fields["result_limit"] = int(labeled_count.group(1))
-    salary = re.search(
-        r"(?:薪资|月薪|工资|薪水|薪酬)(?:水平)?\s*(?:在|为|至少|不低于|最低|达到|大于)?\s*"
-        r"(\d+(?:\.\d+)?)\s*([kK千万]|元)?\s*(?:/月|每月)?\s*(以上|以下|以内|不超过)?",
-        message,
-    )
-    if not salary:
-        salary = re.search(r"(\d+(?:\.\d+)?)\s*([kK千万])\s*(以上)", message)
-    if salary and salary.group(3) not in {"以下", "以内", "不超过"}:
-        # Do not reinterpret annual/daily/hourly figures as monthly wages.
-        if not re.search(r"年薪|/年|每年|/天|每天|/小时|每小时", message):
-            scale = {"k": 1000, "千": 1000, "万": 10000}.get((salary.group(2) or "元").lower(), 1)
-            fields["salary_min"] = int(float(salary.group(1)) * scale)
+    def put(key, value):
+        if key in fields and fields[key] != value:
+            raise ValueError(f"{key} 存在冲突值，请明确最终条件")
+        fields[key] = value
+    count_pattern = rf"(?:找|搜(?:索)?|需要|提供|给我|目标数量|结果数量|岗位数量|职位数量|数量)\s*[:：]?\s*({NUMBER})\s*(?:份|个|条)"
+    for count in re.finditer(count_pattern, message):
+        put("result_limit", numeric_value(count[1]))
+    for count in re.finditer(rf"(?:目标数量|结果数量|岗位数量|职位数量|数量)\s*[:：]?\s*({NUMBER})(?![\d,，.])", message):
+        put("result_limit", numeric_value(count[1]))
+    salary_pattern = (rf"(?:薪资|月薪|工资|薪水|薪酬)(?:水平)?\s*(?:在|为|至少|不低于|不要低于|最低|达到|大于)?\s*"
+                      rf"({NUMBER})(?![\d,，.])\s*([kK千万]|元)?\s*(?:/月|每月)?\s*(以上|以下|以内|不超过)?")
+    salaries = list(re.finditer(salary_pattern, message))
+    if not salaries:
+        salaries = list(re.finditer(rf"({NUMBER})(?![\d,，.])\s*([kK千万])\s*(以上)", message))
+    if not re.search(r"年薪|/年|每年|/天|每天|/小时|每小时", message):
+        for salary in salaries:
+            if salary[3] not in {"以下", "以内", "不超过"}:
+                scale = {"k": 1000, "千": 1000, "万": 10000}.get((salary[2] or "元").lower(), 1)
+                # Preserve decimals before multiplying, e.g. 1.5万.
+                value = Decimal(salary[1].replace(",", "").replace("，", "")) if re.fullmatch(r"[\d,，.]+", salary[1]) else numeric_value(salary[1])
+                put("salary_min", int(value*scale))
+    # Only explicit city clauses are authoritative; mentions in unrelated prose are not.
+    from .search_language import SEARCH_CITIES
+    city_names = "|".join(map(re.escape, SEARCH_CITIES))
+    for match in re.finditer(r"(?:工作地点|地点|城市)\s*(?:可以是|改成|改为|换成|在|是|为)?\s*[:：]?\s*([^。；;\n]+)", message):
+        segment = re.split(r"薪资|工资|月薪|数量|目标|尽量|对于|然后|并且|并生成|并总结|只要|要求", match[1])[0]
+        segment = re.sub(r"(?:都可以|都行|也可以|均可)\s*[，, ]*$", "", segment).strip(" ，,")
+        cities = list(dict.fromkeys(m.group() for m in re.finditer(city_names, segment)))
+        if cities:
+            # A known-city whitelist must not silently discard an extra city.
+            # Preserve complete simple lists, including destinations not in it.
+            tokens = [item for item in re.split(r"[、,，/\s]+|或者|以及|和|或", segment) if item]
+            residue = re.sub(city_names, "", segment)
+            if re.fullmatch(r"[、,，/\s]*", residue):
+                pass  # Also allows adjacent known names (上海杭州).
+            elif all(re.fullmatch(r"[\u4e00-\u9fff]{2,10}|[A-Za-z][A-Za-z.-]{1,30}", item)
+                     and not re.search(r"不要|排除|不去|除了|不限|都|可以|最好", item) for item in tokens):
+                cities = list(dict.fromkeys(tokens))
+            else:
+                raise ValueError("城市条件不能完整解析，请明确完整城市列表")
+            put("locations", cities)
+        elif re.fullmatch(r"\s*(?:不限|不限制)[，, ]*", segment):
+            put("locations", [])
     return fields
 
 

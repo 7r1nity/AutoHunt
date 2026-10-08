@@ -9,6 +9,10 @@ export type RunEvent = { seq: number; kind: string; data: Record<string, unknown
 
 export const terminalRun = (status: string) => ["completed", "failed", "cancelled", "timed_out", "interrupted", "outcome_indeterminate"].includes(status);
 
+// Fully consumed control commands only: questions, negation, quotes and mixed
+// requests must not cancel a task just because they mention stopping.
+export const interruptionCommand = (text: string) => /^(?:请|帮我)?(?:中断|停止|取消|终止|结束)(?:当前|本次|这个|正在执行的|正在运行的)?(?:任务|执行|请求|搜索)?[。！!]*$/.test(text.replace(/\s+/g, ""));
+
 export async function createRun(conversation_id: string, kind: AgentRun["kind"], payload: Record<string, string>) {
   const response = await fetch("/api/agent/runs", { method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ conversation_id, request_id: crypto.randomUUID(), kind, ...payload }) });
@@ -51,7 +55,15 @@ export async function followRun(runId: string, onEvent: (event: RunEvent) => voi
         reader.releaseLock();
       }
       const snapshot = await fetch(`/api/agent/runs/${runId}`, { signal, cache: "no-store" });
-      if (snapshot.ok && terminalRun((await snapshot.json() as AgentRun).status)) return;
+      if (snapshot.ok) {
+        const run = await snapshot.json() as AgentRun;
+        if (terminalRun(run.status)) {
+          // A dropped final frame must still settle the waiting chat promise.
+          if (run.result) onEvent({ seq: cursor, kind: "response", data: { result: run.result } });
+          onEvent({ seq: cursor, kind: "status", data: { status: run.status, detail: run.error ?? "任务已结束" } });
+          return;
+        }
+      }
       throw new Error("事件流已断开");
     } catch (error) {
       if (signal?.aborted) return;

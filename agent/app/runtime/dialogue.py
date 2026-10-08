@@ -88,6 +88,7 @@ class DialogueState(Strict):
     learning_request: dict[str, Any] | None = None
     workflow_request: dict[str, Any] | None = None
     instruction_request: dict[str, Any] | None = None
+    task_request: dict[str, Any] | None = None
 
 
 def topic_for(message: str, previous: str = "general") -> str:
@@ -124,6 +125,14 @@ def apply_operation(saved: dict | None, operation: dict, *, clock: float | None 
     now = time.time() if clock is None else clock
     op = operation["op"]
     source = str(operation.get("source", ""))[:128]
+    if op == "request_state":
+        from ..workflow.requests import TaskRequest
+        if operation.get("expected_run") and (state.task_request or {}).get("run_id") != operation["expected_run"]:
+            return state.model_dump(mode="json")
+        incoming = operation.get("request")
+        state.task_request = TaskRequest.model_validate(incoming).model_dump() if incoming else None
+        state.revision += 1
+        return state.model_dump(mode="json")
     if op == "workflow":
         state.workflow_request = copy.deepcopy(operation.get("request"))
         state.revision += 1
@@ -155,7 +164,7 @@ def apply_operation(saved: dict | None, operation: dict, *, clock: float | None 
         if state.learning_request and next_topic != "learning":
             state.learning_request = None
         frame = state.frames.get(state.active_intent)
-        if frame and frame.missing_slots and re.fullmatch(r"[\d一二三四五六七八九十]+(?:个|份|条)?", message.strip()):
+        if frame and frame.missing_slots and re.fullmatch(r"(?:那就|就|要)?\s*[\d零〇一二两三四五六七八九十百]+(?:个|份|条)?(?:吧)?", message.strip()):
             next_topic = state.active_intent
         if frame and frame.missing_slots == ["queries"]:
             from ..core.search_contract import safe_role_keyword
@@ -380,9 +389,10 @@ def slot_answer_patch(saved: dict, message: str, *, clock: float | None = None) 
         if 1 <= len(queries) <= 5 and all(safe_role_keyword(item) for item in queries):
             return {"queries": queries}
     if frame.missing_slots == ["result_limit"]:
-        answer = re.fullmatch(r"(\d{1,3})(?:个|份|条)?[。!！ ]*", message.strip())
-        if answer and 1 <= int(answer[1]) <= 100:
-            return {"result_limit": int(answer[1])}
+        from ..core.search_contract import NUMBER, numeric_value
+        answer = re.fullmatch(rf"(?:那就|就|要)?\s*({NUMBER})(?:个|份|条)?(?:吧)?[。!！ ]*", message.strip())
+        if answer and 1 <= numeric_value(answer[1]) <= 100:
+            return {"result_limit": numeric_value(answer[1])}
     if frame.missing_slots == ["salary_min"]:
         answer = re.fullmatch(r"(\d+(?:\.\d+)?)\s*([kK千万]|元)[。!！ ]*", message.strip())
         if answer:
@@ -405,6 +415,7 @@ def compact_state(saved: dict) -> dict:
         "tasks": state.tasks, "selected_job": state.selected_job.model_dump() if state.selected_job else None,
         "learning_request": state.learning_request,
         "instruction": state.instruction_request,
+        "task_request": state.task_request,
         "workflow": ({key: state.workflow_request.get(key) for key in
             ("id", "status", "search", "missing", "actions", "expires_at")} if state.workflow_request else None),
         "trace": [{**item, "recency_weight": round(0.8 ** (state.turn-item["turn"]), 3)}

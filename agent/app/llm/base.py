@@ -13,6 +13,9 @@ class LLMRequest:
     # Fast mode: skip slow reasoning/thinking knobs. Used for bulk scoring calls
     # (job pre-screen, per-job matching) where latency matters more than depth.
     fast: bool = False
+    # Explicit structured-output bounds, used only by the no-tools planner.
+    json_output: bool = False
+    max_output_tokens: int | None = None
 
 
 @dataclass(frozen=True)

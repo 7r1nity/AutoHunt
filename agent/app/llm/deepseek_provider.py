@@ -48,9 +48,17 @@ class DeepSeekProvider(LLMProvider):
             ],
             "stream": False,
         }
-        if not request.fast:
+        if request.fast:
+            # Omitting thinking parameters does NOT disable the provider's
+            # default reasoning mode. Planning/scoring must explicitly opt out.
+            kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
+        else:
             kwargs["reasoning_effort"] = "high"
             kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
+        if request.json_output:
+            kwargs["response_format"] = {"type": "json_object"}
+        if request.max_output_tokens is not None:
+            kwargs["max_tokens"] = request.max_output_tokens
         response = await self._completion(**kwargs)
         text = response.choices[0].message.content or ""
         if not text.strip():

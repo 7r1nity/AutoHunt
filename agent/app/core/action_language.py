@@ -20,6 +20,13 @@ def score_scope(message: str) -> dict | None:
         (r"(?:高于|大于|>)(\d{1,3})(?:分)?", 1, "min_score"),
     )
     result = {}
+    range_match = re.search(r"(?<!\d)(\d{1,3})(?:分)?(?:至|到|[-–—~～])(\d{1,3})(?:分)?", text)
+    if range_match:
+        lower, upper = int(range_match[1]), int(range_match[2])
+        if not 0 <= lower <= upper <= 100:
+            raise ValueError("匹配分数范围无效或相互冲突，请明确 0–100 分之间的范围")
+        result = {"min_score": lower, "max_score": upper}
+    text = text.replace("分及以上", "分以上").replace("分及以下", "分以下")
     for pattern, offset, key in patterns:
         for match in re.finditer(pattern, text):
             value = int(match[1]) + offset

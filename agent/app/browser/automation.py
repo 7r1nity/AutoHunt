@@ -147,7 +147,9 @@ class BrowserAutomationService:
     async def resume(self) -> BrowserTaskView:
         state = self.current()
         if state.status not in {BrowserTaskStatus.PAUSED, BrowserTaskStatus.WAITING_FOR_USER}:
-            return state
+            raise ValueError(f"当前浏览器状态为 {state.status}，没有暂停或等待接管的任务，未执行恢复")
+        if self.worker is None or self.worker.done():
+            raise ValueError("浏览器任务已没有存活执行器，请重新搜索；未恢复旧任务")
         self.gate.set()
         source_label = "模拟招聘网站" if state.source == "mock" else "BOSS"
         self.store.event(state.id or "unknown", "task_resumed", f"用户确认继续；将重新绑定{source_label}页面")

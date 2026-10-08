@@ -124,6 +124,11 @@ class IntentRouter:
 
         # --- Layer 0: rules -------------------------------------------------
         match = self.rule_engine.match(message)
+        from ..workflow.requests import is_continuation
+        if (not match or match.category != "P0") and is_continuation(message):
+            outcome = RouteOutcome("llm", "compound_request", "context:task_reference")
+            self._record(outcome, qhash, started)
+            return outcome  # Generic continuation must never bind directly to a browser.
         from ..workflow.planning import shortcut_safe
         if (not match or match.category != "P0") and not shortcut_safe(message):
             outcome = RouteOutcome("llm", "compound_request", "rule:complete_goal_required")

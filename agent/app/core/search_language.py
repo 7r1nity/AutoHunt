@@ -26,7 +26,7 @@ _FIELD = re.compile(r"(?:工作地点|目标数量|结果数量|岗位数量|职
 _RESULT = re.compile(r"搜索结果|检索结果|职位结果|岗位结果|找到的(?:职位|岗位)|有哪些(?:职位|岗位)")
 RESULT_EXACT = re.compile(r"^(?:看看职位|查看职位|列出职位|最近找到的职位|职位列表|看看找到的职位|推荐职位|职位搜索结果|岗位搜索结果|查看搜索结果|查看检索结果|查看职位结果|找到的职位|找到的岗位)$")
 _CONTROLS = {
-    "stop": r"^(?:停止|中断|取消|结束)(?:搜索|检索|任务|浏览器任务)$|^别搜了$",
+    "stop": r"^(?:停止|中断|取消|结束)(?:当前)?(?:搜索|检索|任务|浏览器任务)?$|^别搜了$",
     "pause": r"^(?:暂停(?:搜索|检索|任务|一下|浏览器任务)|先停一下|停一停)$",
     "resume": r"^(?:(?:继续|恢复)(?:搜索|检索|任务)|接着搜索|接着跑|确认登录|登录完成|验证完成继续)$",
 }
@@ -92,6 +92,14 @@ def role_fragments(value: str) -> list[str]:
 
 
 def parse_search_message(message: str) -> SearchLanguage:
+    try:
+        return _parse_search_message(message)
+    except ValueError as exc:
+        # Conflicts require reasoning/clarification, never a partial regex result.
+        return SearchLanguage(action="search", unresolved=message, reason="conflicting_parameters")
+
+
+def _parse_search_message(message: str) -> SearchLanguage:
     text = _text(message)
     # Mentioning/quoting a command is not consent to run it.
     if re.search(r"[“”‘’\"`]|如果|假如|举例|例如|当我说|我说过|上次说", text) or _QUESTION.search(text):

@@ -486,6 +486,7 @@ class AutoHuntAgent:
         context = active_run()
         stripped = message.strip()
         if stripped in {"退出当前任务", "不办了"}:
+            dialogue_change("request_state", request=None)
             return await self._resolve_context_confirmation("取消")
         if stripped in {"重置上下文", "清空会话状态", "重新开始"}:
             dialogue_change("reset")
@@ -498,6 +499,21 @@ class AutoHuntAgent:
         from ..workflow.planning import live_request, pending_slot_answer, shortcut_safe, revoked
         from ..growth.requests import resume_stamp
         stamp = resume_stamp(self.resume_workspace.read_document(), self.candidate_state) if self.resume_workspace else ""
+        from ..workflow.requests import is_continuation, resolve_continuation, failed_history_request
+        if is_continuation(message):
+            if not (context.dialogue or {}).get("task_request"):
+                recovered = failed_history_request(self._conversation_history)
+                if recovered:
+                    dialogue_change("request_state", request=recovered.model_dump())
+            resolved = resolve_continuation(context.dialogue or {},
+                self.tool_registry.browser if self.tool_registry else None, stamp)
+            emit("request_resolution", action=resolved.action, detail=resolved.message)
+            if resolved.action == "replan":
+                emit("progress", detail="已定位上文尚未执行的请求，正在重新规划全部目标；不是恢复空闲浏览器")
+                return await self._handle_planned(resolved.original)
+            if resolved.action == "browser":
+                return await self._direct_browser_control("resume_search")
+            return ChatResponse(message=resolved.message, lane=AgentLane.APPLICATION)
         pending = live_request(context.dialogue or {}, stamp)
         if pending and any(revoked(step["tool"], [pending["original"], message]) for step in pending.get("steps", [])):
             # Persist withdrawn authority even if the model subsequently returns
@@ -508,6 +524,8 @@ class AutoHuntAgent:
             return await self._handle_planned(message, previous=pending)
         search_action = parse_search_message(message)
         if search_action.authorized or REJECT.fullmatch(stripped) or search_action.action in {"stop", "pause"}:
+            if search_action.authorized or REJECT.fullmatch(stripped) or search_action.action == "stop":
+                dialogue_change("request_state", request=None)
             dialogue_change("workflow", request=None)
             dialogue_change("instruction", request=None)
             if REJECT.fullmatch(stripped) or search_action.authorized or search_action.action == "stop":
@@ -586,12 +604,19 @@ class AutoHuntAgent:
         if not self.tool_registry:
             return ChatResponse(message="工作流执行器尚未配置，没有启动搜索或后续动作。", lane=AgentLane.APPLICATION)
         stamp = resume_stamp(self.resume_workspace.read_document(), self.candidate_state)
+        from ..workflow.requests import TaskRequest, action_request
+        tracked = action_request(previous["original"] if previous else message)
+        if tracked:
+            task_request = TaskRequest(original=previous["original"] if previous else message,
+                run_id=context.run_id, resume_stamp=stamp, conditions=context.search_state or {})
+            dialogue_change("request_state", request=task_request.model_dump())
         emit("progress", detail="正在识别全部目标、核对参数与执行依赖；尚未执行")
         try:
             if self.router and not self.router.llm_available():
                 raise RuntimeError("主模型熔断保护生效，请稍后重试")
             plan = await plan_request(self.llm, self.tool_registry, message, previous=previous,
-                dialogue=compact_state(context.dialogue or {}), conditions=context.search_state or {}, stamp=stamp)
+                dialogue={**compact_state(context.dialogue or {}), "recent_turns": bounded_history(
+                    self._conversation_history, max_messages=8, max_chars=4000)}, conditions=context.search_state or {}, stamp=stamp)
             if self.router:
                 self.router.record_llm_success()
         except (ValueError, RuntimeError, asyncio.TimeoutError) as exc:
@@ -599,16 +624,29 @@ class AutoHuntAgent:
                 if isinstance(exc, asyncio.TimeoutError):
                     self.router.record_llm_failure()
                 self.router.record_final(message, "plan_rejected")
-            return ChatResponse(message=f"没有执行任务：{str(exc) or '规划超时'}。原始请求保留，不会自动重试。", lane=AgentLane.APPLICATION)
+            detail = f"没有执行任务：{str(exc) or '规划超时'}。原始请求保留，不会自动重试。"
+            if tracked:
+                task_request.status, task_request.failure = "failed", type(exc).__name__
+                dialogue_change("request_state", request=task_request.model_dump())
+            emit("plan_failed", code="planning_timeout" if isinstance(exc, TimeoutError) else "planning_rejected", detail=detail)
+            return ChatResponse(message=detail, lane=AgentLane.APPLICATION)
         except Exception as exc:
             if self.router:
                 self.router.record_llm_failure()
-            return ChatResponse(message=f"任务规划暂不可用（{type(exc).__name__}），没有执行任何动作。", lane=AgentLane.APPLICATION)
+            detail = f"任务规划暂不可用（{type(exc).__name__}），没有执行任何动作。"
+            if tracked:
+                task_request.status, task_request.failure = "failed", type(exc).__name__
+                dialogue_change("request_state", request=task_request.model_dump())
+            emit("plan_failed", code="planning_unavailable", detail=detail)
+            return ChatResponse(message=detail, lane=AgentLane.APPLICATION)
         emit("request_plan", plan_id=plan["id"], goals=plan["goals"], steps=[
             {key: step[key] for key in ("id", "tool", "depends_on", "effect")} for step in plan["steps"]], questions=plan["questions"])
         if self.router:
             self.router.record_final(message, "plan_clarifying" if plan["questions"] else
                 "+".join(dict.fromkeys(step["tool"] for step in plan["steps"])) or "answer")
+        if tracked:
+            task_request.status = "clarifying" if plan["questions"] else "running"
+            dialogue_change("request_state", request=task_request.model_dump())
         return await begin(plan, self.tool_registry)
 
     async def _resolve_context_confirmation(self, message: str) -> ChatResponse:
@@ -901,6 +939,9 @@ class AutoHuntAgent:
             return ChatResponse(message=str(outcome.content), lane=AgentLane.APPLICATION,
                 tool_events=[ToolEvent(tool=tool, status=outcome.status, detail=str(outcome.content)[:300])])
         view = self.tool_registry.browser.current()
+        if intent == "resume_search" and view.status not in {BrowserTaskStatus.RUNNING, BrowserTaskStatus.STARTING}:
+            return ChatResponse(message=f"未恢复浏览器任务：当前状态 {view.status}，没有可恢复的执行器。请明确重新搜索或继续上文尚未执行的请求。",
+                lane=AgentLane.APPLICATION, tool_events=[ToolEvent(tool=tool, status="error", detail=str(view.status))])
         verb = {"pause_search": "已暂停", "resume_search": "已继续", "stop_search": "已中断"}[intent]
         if intent == "stop_search":
             message = (
