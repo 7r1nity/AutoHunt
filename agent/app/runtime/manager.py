@@ -10,6 +10,7 @@ from .context import RunContext, current_run
 from .search_state import prepare_search_state
 from .store import RunStore, TERMINAL
 from ..core.models import BrowserSearchRequest
+from .resilience import WatchLimits, wait_expired
 
 
 class AgentRuntime:
@@ -23,6 +24,7 @@ class AgentRuntime:
         self.slots = asyncio.Semaphore(2)
         self.queue_timeout, self.chat_timeout, self.plan_timeout = queue_timeout, chat_timeout, plan_timeout
         self.delivery = None
+        self.watch_limits = WatchLimits.configured()
 
     async def start(self):
         self.sessions.clear()
@@ -270,6 +272,10 @@ class AgentRuntime:
                 if decision.status != "pending":
                     self.finish(run_id, "completed", "修改提案已处理")
                     return
+                if wait_expired(decision.created_at, self.watch_limits.confirmation):
+                    self.store.event(run_id, "watchdog_expired", {"code": "confirmation_timeout", "proposal_id": decision.id})
+                    self.finish(run_id, "timed_out", "简历提案确认等待已过期；未自动接受，提案仍保留供核对")
+                    return
                 await asyncio.sleep(1)
         browser_id = (run["checkpoint"] or {}).get("browser_id")
         if not browser_id:
@@ -277,7 +283,7 @@ class AgentRuntime:
             return
         previous = None
         while True:
-            browser = self.jobs.get_task(browser_id)
+            browser = self.observe_browser(browser_id)
             snapshot = browser.model_dump(mode="json")
             key = (str(browser.status), browser.checkpoint, browser.stored, browser.discovered)
             if key != previous:
@@ -312,7 +318,7 @@ class AgentRuntime:
             waiting = False
             for step in plan["steps"]:
                 if step["status"] == "waiting_external":
-                    browser = self.jobs.get_task(step["task_id"])
+                    browser = self.observe_browser(step["task_id"])
                     if previous.get(step["id"]) != str(browser.status):
                         previous[step["id"]] = str(browser.status)
                         status = "waiting_user" if browser.status in {"waiting_for_user", "paused"} else "running"
@@ -327,8 +333,13 @@ class AgentRuntime:
                 elif step["status"] == "waiting_confirmation":
                     proposal = self.resume_workspace.read_proposal(step["proposal_id"])
                     if proposal.status == "pending":
-                        self.store.update(run_id, status="waiting_confirmation")
-                        waiting = True
+                        if wait_expired(proposal.created_at, self.watch_limits.confirmation):
+                            step.update(status="blocked", detail="简历提案确认等待已过期，未自动接受或执行依赖动作")
+                            self.store.event(run_id, "watchdog_expired", {"code": "confirmation_timeout", "step_id": step["id"]})
+                            changed = True
+                        else:
+                            self.store.update(run_id, status="waiting_confirmation")
+                            waiting = True
                     else:
                         step.update(status="completed" if proposal.status in {"approved", "partially_approved"} else "blocked",
                             detail="简历提案已处理；不重新执行提案")
@@ -443,7 +454,7 @@ class AgentRuntime:
         task_id = run["checkpoint"]["delivery_id"]
         previous = None
         while True:
-            view = self.jobs.get_delivery_run(task_id)
+            view = self.observe_delivery(task_id)
             key = (str(view.status), view.checkpoint, view.recruiter_reply, view.submitted)
             if key != previous:
                 previous = key
@@ -458,6 +469,44 @@ class AgentRuntime:
                 self.finish(run_id, str(view.status), view.detail, result={"delivery": view.model_dump(mode="json")})
                 return
             await asyncio.sleep(1)
+
+    def observe_browser(self, task_id: str):
+        """A dead worker is not a live browser lease; never replay it on restart."""
+        from ..core.models import BrowserTaskStatus
+        view = self.jobs.get_task(task_id)
+        alive = self.browser.current().id == task_id and self.browser.worker and not self.browser.worker.done()
+        if view.status not in {"completed", "failed", "stopped"} and not alive:
+            detail = "浏览器执行器已中断，原任务已停止；部分结果保留，不自动重新搜索"
+            self.jobs.event(task_id, "watchdog_expired", detail, reason_code="worker_lost")
+            view = self.jobs.update_task(task_id, status=BrowserTaskStatus.FAILED, detail=detail, checkpoint="worker_lost")
+        return view
+
+    def observe_delivery(self, task_id: str):
+        from ..core.models import DeliveryTaskStatus
+        view = self.jobs.get_delivery_run(task_id)
+        code = None
+        alive = self.delivery and self.delivery.current().id == task_id and self.delivery.worker and not self.delivery.worker.done()
+        if view.status == "waiting_for_reply" and not alive and wait_expired(view.started_at, self.watch_limits.reply):
+            code = "reply_timeout"
+        elif view.status == "waiting_for_user" and wait_expired(view.updated_at, self.watch_limits.human):
+            # A live worker has a cooperative watchdog which releases its lease.
+            if not alive:
+                code = "human_timeout"
+        elif view.status in {"starting", "running"}:
+            if not alive:
+                code = "worker_lost"
+        if code:
+            uncertain = view.checkpoint in {"submit_started", "submission_unconfirmed"} and not view.submitted
+            detail = "任务等待已过期或执行器中断；不自动重放，已确认的投递保留，请核对执行记录"
+            if uncertain:
+                self.jobs.mark_outcome_indeterminate(view.job_id, detail)
+            elif not view.submitted:
+                self.jobs.mark_delivery_failed(view.job_id, detail)
+            status = DeliveryTaskStatus.OUTCOME_INDETERMINATE if uncertain else DeliveryTaskStatus.COMPLETED if view.submitted else DeliveryTaskStatus.FAILED
+            view = self.jobs.update_delivery_run(task_id, status=status, detail=detail, checkpoint=code)
+            if self.delivery and self.delivery.current().id == task_id and (not self.delivery.worker or self.delivery.worker.done()):
+                self.delivery.state = view
+        return view
 
     def browser_summary(self, run_id: str, browser):
         run = self.store.get(run_id)

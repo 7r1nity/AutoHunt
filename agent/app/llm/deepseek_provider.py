@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 from openai import AsyncOpenAI
 
 from .base import LLMProvider, LLMRequest, LLMResult, LLMToolCall, LLMToolResult
 from ..core.security import redact_text
+from ..runtime.resilience import safe_retry
+from ..runtime.context import emit
 
 
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
@@ -23,6 +26,13 @@ class DeepSeekProvider(LLMProvider):
             max_retries=0,
         )
 
+    async def _completion(self, **kwargs):
+        # Pure inference / stream creation only. Once streaming begins, never
+        # replay received tokens. Outer planner/run deadlines remain authoritative.
+        async with asyncio.timeout(60):
+            return await safe_retry(lambda: self.client.chat.completions.create(**kwargs), retry_safe=True,
+                on_retry=lambda data: emit("model_retry", provider=self.name, **data))
+
     async def generate(self, request: LLMRequest) -> LLMResult:
         kwargs: dict = {
             "model": self.model,
@@ -41,7 +51,7 @@ class DeepSeekProvider(LLMProvider):
         if not request.fast:
             kwargs["reasoning_effort"] = "high"
             kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
-        response = await self.client.chat.completions.create(**kwargs)
+        response = await self._completion(**kwargs)
         text = response.choices[0].message.content or ""
         if not text.strip():
             raise RuntimeError("DeepSeek returned no text output")
@@ -59,7 +69,7 @@ class DeepSeekProvider(LLMProvider):
         messages: list[dict],
         tools: list[dict],
     ) -> LLMToolResult:
-        response = await self.client.chat.completions.create(
+        response = await self._completion(
             model=self.model,
             messages=[{"role": "system", "content": instructions}, *messages],
             tools=tools,
@@ -102,7 +112,7 @@ class DeepSeekProvider(LLMProvider):
 
     async def generate_with_tools_stream(self, *, instructions: str, messages: list[dict], tools: list[dict], on_delta) -> LLMToolResult:
         """Stream display text, assemble native tool calls, never expose reasoning."""
-        stream = await self.client.chat.completions.create(
+        stream = await self._completion(
             model=self.model, messages=[{"role": "system", "content": instructions}, *messages],
             tools=tools, tool_choice="auto", stream=True,
         )

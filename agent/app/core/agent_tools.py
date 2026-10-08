@@ -6,8 +6,6 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
-from pydantic import ValidationError
-
 from .models import BrowserMode, BrowserSearchRequest, JobPreferenceUpdate
 from .security import redact
 from ..browser.automation import BrowserAutomationService
@@ -21,6 +19,7 @@ from ..runtime.dialogue import bounded_data, compact_state, resolve_reference, A
 from ..runtime.search_state import merge_search_state, prepare_search_state
 from .search_contract import explicit_search_constraints, missing_search_message, safe_role_keyword
 from .search_language import parse_search_message
+from ..runtime.resilience import classify_failure, safe_retry
 
 
 class MissingSearchInput(ValueError):
@@ -67,12 +66,14 @@ class AgentToolOutcome:
     effect: str
     action: str | None = None
     resume_proposal: Any | None = None
+    failure: dict | None = None
 
     def observation(self) -> str:
         return bounded_data({
             "status": self.status,
             "tool": self.tool,
             "result": self.content,
+            "failure": self.failure,
         }, budget=9000)
 
 
@@ -168,6 +169,10 @@ class AgentToolPolicy:
 
 
 class AgentToolRegistry:
+    # Some nominally read tools create snapshots/focus; do not replay them.
+    RETRY_SAFE_READS = frozenset({"job_stats_read", "preference_read", "memory_read",
+                                "context_state_read", "context_history_read", "search_state_read",
+                                "browser_task_read", "mock_delivery_status"})
     def __init__(
         self,
         *,
@@ -358,7 +363,8 @@ class AgentToolRegistry:
     ) -> AgentToolOutcome:
         spec = self._tools.get(name)
         if spec is None:
-            return AgentToolOutcome(name, "denied", "工具不在允许列表中", "unknown")
+            return AgentToolOutcome(name, "denied", "工具不在允许列表中", "unknown",
+                failure={"code": "unknown_tool", "retryable": False, "effect_started": False, "uncertain": False})
         context = active_run()
         planned = bool(context and context.action_authority and context.action_authority.get("tool") == name)
         if name == "mock_delivery_start" and not planned:
@@ -400,12 +406,25 @@ class AgentToolRegistry:
                 exact_patch = slot_answer_patch(active_run().dialogue or {}, user_message)
             if exact_patch:
                 arguments = exact_patch
-        allowed, reason = self.policy.authorize(spec, arguments, user_message, state)
+        try:
+            allowed, reason = self.policy.authorize(spec, arguments, user_message, state)
+        except Exception as exc:
+            failure = classify_failure(exc, effect=spec.effect, started=False).metadata()
+            failure["retryable"] = False  # Never retry or repair the policy gate.
+            emit("tool_finished", tool=name, status="error", detail="工具授权校验未完成", failure=failure)
+            return AgentToolOutcome(name, "error", "工具授权校验未完成，没有执行", spec.effect, failure=failure)
         if not allowed:
             dialogue_change("tool", tool=name, status="denied", detail=reason)
             emit("tool_denied", tool=name, detail=reason)
-            return AgentToolOutcome(name, "denied", reason, spec.effect)
+            return AgentToolOutcome(name, "denied", reason, spec.effect,
+                failure={"code": "authorization_denied", "retryable": False, "effect_started": False, "uncertain": False})
         emit("tool_started", tool=name, effect=spec.effect, arguments=arguments)
+        executor_started = False
+        started_at, attempts = time.monotonic(), 1
+        def record_retry(data: dict) -> None:
+            nonlocal attempts
+            attempts = data["next_attempt"]
+            emit("tool_retry", tool=name, effect=spec.effect, **data)
         try:
             self.validate_arguments(spec.parameters, arguments)
             if name == "job_search_start":
@@ -438,10 +457,14 @@ class AgentToolRegistry:
                 }
                 if any(not mentions.get(field, False) for field in arguments):
                     raise ValueError("只允许修改用户本轮明确提到的搜索条件；未提及字段应省略")
-            content = await spec.executor(arguments)
+            executor_started = True
+            content = await safe_retry(lambda: spec.executor(arguments),
+                retry_safe=spec.effect == "read" and name in self.RETRY_SAFE_READS,
+                on_retry=record_retry)
             dialogue_change("tool", tool=name, status="ok", detail=bounded_data(content, budget=500),
                 browser_id=content.get("id") if name == "job_search_start" and isinstance(content, dict) else None)
-            emit("tool_finished", tool=name, status="ok", result=content)
+            emit("tool_finished", tool=name, status="ok", result=content, attempts=attempts,
+                 duration_ms=round((time.monotonic() - started_at) * 1000))
             if name == "resume_propose_patch" and content.get("proposal") is not None:
                 return AgentToolOutcome(
                     name,
@@ -461,15 +484,16 @@ class AgentToolRegistry:
             dialogue_change("tool", tool=name, status="awaiting_user", detail=str(exc))
             emit("tool_finished", tool=name, status="awaiting_user", detail=str(exc))
             return AgentToolOutcome(name, "awaiting_user", str(exc), spec.effect)
-        except (ValidationError, ValueError, KeyError) as exc:
-            dialogue_change("tool", tool=name, status="error", detail=str(exc))
-            emit("tool_finished", tool=name, status="error", detail=str(exc))
-            return AgentToolOutcome(name, "error", str(exc), spec.effect)
         except Exception as exc:
-            status = "outcome_indeterminate" if spec.effect in {"external", "write"} else "error"
-            emit("tool_finished", tool=name, status=status, detail=str(exc))
+            failure = classify_failure(exc, effect=spec.effect, started=executor_started)
+            metadata = failure.metadata()
+            metadata["retryable"] = metadata["retryable"] and name in self.RETRY_SAFE_READS
+            metadata.update(attempts=attempts, retry_exhausted=metadata["retryable"] and attempts >= 3)
+            status = "outcome_indeterminate" if failure.uncertain else "error"
+            emit("tool_finished", tool=name, status=status, detail=str(exc), failure=metadata,
+                 duration_ms=round((time.monotonic() - started_at) * 1000))
             dialogue_change("tool", tool=name, status=status, detail=str(exc))
-            return AgentToolOutcome(name, status, str(exc), spec.effect)
+            return AgentToolOutcome(name, status, str(exc), spec.effect, failure=metadata)
 
     async def _job_results(self, args: dict[str, Any]) -> Any:
         context = active_run()

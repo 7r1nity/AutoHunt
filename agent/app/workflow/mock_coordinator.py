@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -13,6 +14,7 @@ from ..jobs.analysis import analyze_job
 from ..jobs.store import JobStore
 from ..memory.candidate_state import CandidateStateStore
 from ..memory.resume_workspace import ResumeWorkspaceStore, resume_document_digest
+from ..runtime.resilience import safe_retry, wait_expired
 
 
 MOCK_ORIGIN = "http://127.0.0.1:8080"
@@ -50,6 +52,7 @@ class MockWorkflowCoordinator:
         self.queue_lock = asyncio.Lock()
         self.wakeup = asyncio.Event()
         self.on_delivery_started = None
+        self.poll_failures: dict[str, tuple[int, float]] = {}
 
     def settings(self) -> dict:
         return self.jobs.mock_workflow_settings()
@@ -73,12 +76,21 @@ class MockWorkflowCoordinator:
                 (settings["daily_enabled"], self.run_daily_if_due),
             ):
                 if enabled:
+                    name = action.__name__
+                    failures, retry_at = self.poll_failures.get(name, (0, 0))
+                    if time.monotonic() < retry_at:
+                        continue
                     try:
-                        await action()
+                        async with asyncio.timeout(120):
+                            await action()
+                        self.poll_failures.pop(name, None)
                     except asyncio.CancelledError:
                         raise
                     except Exception as exc:
-                        self.jobs.record_mock_workflow_error(f"{type(exc).__name__}: {exc}")
+                        failures += 1
+                        delay = min(300, 60 * 2 ** min(3, failures - 3)) if failures >= 3 else self.poll_seconds
+                        self.poll_failures[name] = failures, time.monotonic() + delay
+                        self.jobs.record_mock_workflow_error(f"{name}: {type(exc).__name__}；连续失败 {failures} 次，{delay:.0f} 秒后检查；已派发/未知写入不重放")
             try:
                 self._report_finished_daily_run()
             except Exception as exc:
@@ -167,10 +179,24 @@ class MockWorkflowCoordinator:
                     self._finish_queue_item(item, "completed", "已核实简历投递完成")
                     continue
                 if run.status == DeliveryTaskStatus.WAITING_FOR_REPLY:
+                    if wait_expired(run.started_at, self.delivery.watch_limits.reply):
+                        expired = self.jobs.update_delivery_run(run.id, status=DeliveryTaskStatus.FAILED,
+                            checkpoint="reply_timeout", detail="回复等待过期，未自动重试投递")
+                        if self.delivery.current().id == run.id:
+                            self.delivery.state = expired
+                        self._finish_queue_item(item, "blocked", "回复等待过期，请重新核对授权")
+                        continue
                     self.jobs.update_mock_delivery(job["id"], "dispatched", "等待回复；正在检查", run_id=run.id)
                     await self.delivery.resume_authorized_run(run.id, **item["binding"])
                     return
                 if run.status == DeliveryTaskStatus.WAITING_FOR_USER:
+                    if wait_expired(run.updated_at, self.delivery.watch_limits.human) and (not self.delivery.worker or self.delivery.worker.done()):
+                        expired = self.jobs.update_delivery_run(run.id, status=DeliveryTaskStatus.FAILED,
+                            checkpoint="human_timeout", detail="人工接管等待过期，未绕过验证")
+                        if self.delivery.current().id == run.id:
+                            self.delivery.state = expired
+                        self._finish_queue_item(item, "blocked", "人工接管等待过期，请重新核对")
+                        continue
                     return  # Dedicated UI takeover, never bypass verification.
                 self._finish_queue_item(item, "blocked", f"任务状态 {run.status}，需人工核验，不会重试")
 
@@ -255,9 +281,11 @@ class MockWorkflowCoordinator:
 
     @staticmethod
     async def _get(client: httpx.AsyncClient, path: str, headers: dict, params: dict | None = None):
-        response = await client.get(path, headers=headers, params=params)
-        response.raise_for_status()
-        return response.json()
+        async def read():
+            response = await client.get(path, headers=headers, params=params)
+            response.raise_for_status()
+            return response.json()
+        return await safe_retry(read, retry_safe=True)
 
     def _import_contacted_job(self, external_id: int, remote: dict) -> tuple[int, bool]:
         description = "\n".join([

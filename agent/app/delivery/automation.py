@@ -9,6 +9,7 @@ from ..browser.session import BrowserSession
 from ..core.models import BrowserMode, DeliveryTaskStatus, DeliveryTaskView
 from ..jobs.store import JobStore
 from .mock_site_adapter import MockJobSiteAdapter
+from ..runtime.resilience import WatchLimits, WatchdogExpired, guarded_operation, wait_expired
 
 
 class UnsupportedDeliverySite(ValueError):
@@ -40,6 +41,7 @@ class DeliveryAutomationService:
         self.monitor_wakeup = asyncio.Event()
         self.state = self.jobs.latest_delivery_run()
         self.lifecycle_lock = asyncio.Lock()
+        self.watch_limits = WatchLimits.configured()
 
     def current(self) -> DeliveryTaskView:
         return self.state.model_copy(deep=True)
@@ -74,7 +76,7 @@ class DeliveryAutomationService:
                 action="submit_resume",
             )
             self.gate.set()
-            self.worker = asyncio.create_task(self._run_until_terminal(job_id) if monitor_reply else self._run_once(job_id, require_reply=True), name=f"delivery-{job_id}")
+            self.worker = asyncio.create_task(self._run_until_terminal(job_id) if monitor_reply else self._run_once_guarded(job_id, require_reply=True), name=f"delivery-{job_id}")
             return authorization_id, job_id, expires_at, self.current()
 
     async def resume_authorized_run(self, run_id: str, **binding) -> DeliveryTaskView:
@@ -91,7 +93,7 @@ class DeliveryAutomationService:
                 raise UnsupportedDeliverySite("仅支持本地模拟招聘网站")
             self.state = saved
             self.gate.set()
-            self.worker = asyncio.create_task(self._run_once(saved.job_id, require_reply=True), name=f"delivery-check-{saved.job_id}")
+            self.worker = asyncio.create_task(self._run_once_guarded(saved.job_id, require_reply=True), name=f"delivery-check-{saved.job_id}")
             return self.current()
     async def start(self, authorization_id: str, token: str, job_id: int) -> DeliveryTaskView:
         async with self.lifecycle_lock:
@@ -206,7 +208,7 @@ class DeliveryAutomationService:
     async def _run_until_terminal(self, job_id: int) -> None:
         while True:
             batch = any(item["run_id"] == self.state.id for item in self.jobs.mock_delivery_queue())
-            await self._run_once(job_id, require_reply=batch)
+            await self._run_once_guarded(job_id, require_reply=batch)
             if self.state.status != DeliveryTaskStatus.WAITING_FOR_REPLY or self.reply_poll_seconds is None:
                 return
             try:
@@ -217,6 +219,37 @@ class DeliveryAutomationService:
             if self.state.status != DeliveryTaskStatus.WAITING_FOR_REPLY:
                 return
             self._update(DeliveryTaskStatus.STARTING, "后台正在检查招聘方回复")
+
+    def expire_reply_wait(self, job_id: int) -> None:
+        detail = "招聘方回复等待已过期，监测已停止；已确认的投递保留，未投递需重新核对授权"
+        if self.state.submitted:
+            self._update(DeliveryTaskStatus.COMPLETED, detail, checkpoint="reply_timeout")
+        else:
+            self.jobs.mark_delivery_failed(job_id, detail)
+            self._update(DeliveryTaskStatus.FAILED, detail, checkpoint="reply_timeout")
+
+    async def _run_once_guarded(self, job_id: int, *, require_reply: bool = False) -> None:
+        if wait_expired(self.state.started_at, self.watch_limits.reply):
+            self.expire_reply_wait(job_id)
+            return
+        def observe():
+            view = self.state
+            return ((view.status, view.checkpoint, view.current_url, view.submitted,
+                     view.recruiter_reply), view.status == DeliveryTaskStatus.WAITING_FOR_USER)
+        try:
+            await guarded_operation(self._run_once(job_id, require_reply=require_reply),
+                                    observe, limits=self.watch_limits)
+        except WatchdogExpired as exc:
+            # Never retry a click whose outcome is unknown, even if the timeout
+            # happened after submit() returned but before persistence finished.
+            if self.state.checkpoint in {"submit_started", "submission_unconfirmed"}:
+                self.jobs.mark_outcome_indeterminate(job_id, str(exc))
+                self._update(DeliveryTaskStatus.OUTCOME_INDETERMINATE, str(exc), checkpoint="submission_unconfirmed")
+            elif self.state.submitted:
+                self._update(DeliveryTaskStatus.COMPLETED, str(exc), checkpoint=exc.code)
+            else:
+                self.jobs.mark_delivery_failed(job_id, str(exc))
+                self._update(DeliveryTaskStatus.FAILED, str(exc), checkpoint=exc.code)
 
     async def _run_once(self, job_id: int, *, require_reply: bool = False) -> None:
         lock = BrowserExecutionLock(self.data_root / "private" / "browser-session.lock", self.state.id or f"delivery:{job_id}")

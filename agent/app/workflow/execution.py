@@ -10,6 +10,7 @@ from ..core.models import AgentLane, ChatResponse, ToolEvent
 from ..growth.requests import resume_stamp
 from ..runtime.context import active_run, dialogue_change, emit
 from ..runtime.dialogue import bounded_data
+from ..runtime.resilience import classify_failure
 
 DONE = {"completed", "failed", "skipped", "blocked", "outcome_indeterminate"}
 
@@ -104,28 +105,31 @@ async def advance(plan: dict, registry) -> list[dict]:
                 if outcome.status == "ok":
                     step.update(status="completed", result=outcome.content)
                     if step["tool"] == "job_search_start":
-                        step.update(status="waiting_external", task_id=outcome.content["id"])
+                        step.update(status="waiting_external", task_id=outcome.content["id"], wait_started_at=time.time())
                     if step["tool"] in {"job_results_read", "resume_document_read"} and outcome.content.get("snapshot_id"):
                         dialogue_change("display", snapshot_id=outcome.content["snapshot_id"])
                 elif outcome.resume_proposal is not None:
                     step.update(status="waiting_confirmation", result={"proposal": outcome.resume_proposal.model_dump(mode="json")},
                         proposal_id=outcome.resume_proposal.id)
+                    step["wait_started_at"] = time.time()
                 else:
                     step.update(status="outcome_indeterminate" if outcome.status == "outcome_indeterminate" else "blocked",
-                        detail=str(outcome.content)[:1000])
+                        detail=str(outcome.content)[:1000], failure=outcome.failure)
             except asyncio.CancelledError:
                 # Leave claim durable so restart cannot replay an uncertain write.
                 raise
             except TimeoutError:
+                step["failure"] = classify_failure(TimeoutError(), effect=step["effect"], started=True).metadata()
                 step.update(status="outcome_indeterminate" if step["effect"] in {"write", "external"} else "failed",
                     detail="步骤超时；结果未确认，不自动重试")
             except Exception as exc:
+                step["failure"] = classify_failure(exc, effect=step["effect"], started=True).metadata()
                 step.update(status="outcome_indeterminate" if step["effect"] in {"write", "external"} else "failed",
                     detail=f"步骤异常：{type(exc).__name__}；请查看执行记录，不自动重试")
             finally:
                 context.user_message, context.action_authority = previous_message, previous_authority
             observed.append(step); changed = True
-            emit("plan_step", step_id=step["id"], tool=step["tool"], status=step["status"], detail=step.get("detail", ""))
+            emit("plan_step", step_id=step["id"], tool=step["tool"], status=step["status"], detail=step.get("detail", ""), failure=step.get("failure"))
             persist(plan)
         if not changed:
             break

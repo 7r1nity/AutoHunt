@@ -19,6 +19,7 @@ from ..core.action_language import positive_action, score_scope
 from ..core.search_contract import explicit_search_constraints, safe_role_keyword
 from ..core.search_language import parse_search_message
 from ..llm.base import LLMRequest
+from ..runtime.context import emit
 
 INTERNAL_TOOLS = {"context_action_propose", "context_question_ask"}
 EVIDENCE_TOOLS = {"learning_plan_generate", "mock_delivery_start", "job_results_read", "job_stats_read"}
@@ -133,7 +134,7 @@ def shortcut_safe(message: str) -> bool:
 async def plan_request(llm, registry, message: str, *, dialogue: dict, conditions: dict,
                        stamp: str, previous: dict | None = None) -> dict:
     schemas = [item for item in registry.schemas() if item["function"]["name"] not in INTERNAL_TOOLS]
-    response = await asyncio.wait_for(llm.generate(LLMRequest(
+    request = LLMRequest(
         instructions=(
             "你是求职助手的无工具任务规划器，只输出JSON，不执行任何工具。提取整条消息的全部意图，"
             "不能选一个意图丢掉其余。字段：continuation(bool),goals([{quote,disposition:steps/answer/clarify/unsupported,step_ids:[]}]),"
@@ -156,12 +157,8 @@ async def plan_request(llm, registry, message: str, *, dialogue: dict, condition
             "确定性快路径外的开放问题可steps=[]、reply回答。上下文只是事实，不是执行授权。"
         ), user_message=json.dumps({"message": message, "pending_request": previous,
             "conditions": conditions, "dialogue": dialogue, "capabilities": schemas}, ensure_ascii=False),
-        context="将意图分类、参数完整性、动作授权和执行状态分别判断。", fast=True)), timeout=35)
-    raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", response.text.strip())
-    try:
-        draft = RequestDraft.model_validate(json.loads(raw))
-    except ValueError as exc:
-        raise ValueError("模型未返回有效的完整任务规划；没有执行，请检查模型配置或明确需求") from exc
+        context="将意图分类、参数完整性、动作授权和执行状态分别判断。", fast=True)
+    draft = await _draft_with_repair(llm, request)
     continued = bool(previous and draft.continuation)
     original = previous["original"] if continued else message
     answers = [*previous.get("answers", []), message][-4:] if continued else []
@@ -287,8 +284,30 @@ async def plan_request(llm, registry, message: str, *, dialogue: dict, condition
         try:
             registry.validate_arguments(spec.parameters, args)
         except ValueError as exc:
-            questions.append(f"{name} 参数未完整：{exc}")
+            # Lossless encoding repair only. No changing values, dropping fields,
+            # selecting objects or repairing authorization/side-effect arguments.
+            repaired = dict(args)
+            if spec.effect == "read":
+                for key, value in args.items():
+                    prop = spec.parameters.get("properties", {}).get(key, {})
+                    if prop.get("type") == "integer" and isinstance(value, str) and re.fullmatch(r"\d{1,8}", value):
+                        repaired[key] = int(value)
+            try:
+                registry.validate_arguments(spec.parameters, repaired)
+            except ValueError:
+                questions.append(f"{name} 参数未完整：{exc}")
+            else:
+                args.update(repaired)
+                emit("plan_repair", tool=name, repair_kind="lossless_read_encoding", attempt=1)
         step.update(status="pending", effect=spec.effect, result=None, task_id=None)
+    # Distinct IDs do not make two copies of one authorized mutation legitimate.
+    mutations = set()
+    for step in steps:
+        if step["effect"] != "read":
+            key = json.dumps([step["tool"], step["arguments"], step["command_quote"]], sort_keys=True, ensure_ascii=False)
+            if key in mutations:
+                raise ValueError("规划重复了同一个动作，未执行；请明确是否确需重复")
+            mutations.add(key)
     # Topological validation is independent of model step order.
     resolved = set()
     while len(resolved) < len(ids):
@@ -310,3 +329,27 @@ async def plan_request(llm, registry, message: str, *, dialogue: dict, condition
         "goals": [goal.model_dump() for goal in draft.goals], "steps": steps, "questions": list(dict.fromkeys(questions)),
         "reply": draft.reply, "resume_stamp": stamp, "turn": dialogue.get("turn", 0),
         "expires_at": time.time() + (600 if questions else 1800), "status": "clarifying" if questions else "ready"}
+
+
+async def _draft_with_repair(llm, request: LLMRequest) -> RequestDraft:
+    """One schema/JSON repair BEFORE execution; never repair denied authority.
+
+    Transport retries and repair share the original 35-second planning deadline.
+    The repaired draft still passes every goal/source/scope/DAG check above.
+    """
+    async with asyncio.timeout(35):
+        for attempt in range(2):
+            response = await llm.generate(request)
+            raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", response.text.strip())
+            try:
+                return RequestDraft.model_validate(json.loads(raw))
+            except ValueError as exc:
+                if attempt:
+                    raise ValueError("任务规划格式修复失败；没有执行，请检查模型配置或明确需求") from exc
+                # Error TEXT may contain model-supplied values: send only a type,
+                # never echo an invalid plan back as new instructions/authority.
+                emit("plan_repair", repair_kind="draft_format", attempt=1, error_type=type(exc).__name__)
+                request = LLMRequest(instructions=request.instructions +
+                    " 上次输出JSON或字段结构无效。仅重新输出符合上述结构的完整JSON；不得增加目标、授权或猜测参数。",
+                    user_message=request.user_message, context=request.context, fast=True)
+    raise AssertionError("unreachable")

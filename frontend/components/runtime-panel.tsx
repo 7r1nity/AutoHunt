@@ -11,6 +11,16 @@ const labels: Record<string, string> = { queued: "排队中", running: "执行�
   skipped: "前置失败，未执行", blocked: "条件或授权不足",
   interrupted: "已中断", timed_out: "超时", failed: "失败", outcome_indeterminate: "待核验" };
 
+function stepDescription(event: RunEvent): string {
+  const data = event.data;
+  if (event.kind === "tool_retry" || event.kind === "model_retry")
+    return `${event.kind === "tool_retry" ? data.tool : "模型请求"} · ${data.code} · 第 ${data.next_attempt}/3 次尝试，退避 ${data.delay_seconds} 秒（仅安全读取/推理）`;
+  if (event.kind === "plan_repair")
+    return data.repair_kind === "draft_format" ? "规划格式无效，进行一次修复；尚未执行工具" : `${data.tool} · 修复只读参数编码，不改变范围`;
+  if (event.kind === "watchdog_expired") return `安全停止 · ${data.code}；未自动重放动作`;
+  return String(data.detail || (event.kind === "request_plan" ? `已规划 ${(data.steps as unknown[] | undefined)?.length ?? 0} 个步骤` : event.kind === "plan_step" ? `${data.step_id} · ${data.tool} · ${labels[String(data.status)] ?? data.status}` : event.kind === "tool_started" ? `调用 ${data.tool}` : event.kind === "tool_finished" ? `${data.tool} · ${data.status}` : event.kind === "response" ? "已返回回复" : event.kind === "browser_summary" ? `搜索摘要：发现 ${data.discovered}，保存 ${data.stored}` : event.kind === "browser" ? "浏览器状态已更新" : event.kind));
+}
+
 function Steps({ run }: { run: AgentRun }) {
   const [events, setEvents] = useState<RunEvent[]>([]);
   const [error, setError] = useState("");
@@ -33,7 +43,8 @@ function Steps({ run }: { run: AgentRun }) {
     <summary>执行步骤</summary>
     {error && <p>{error}</p>}
     <ol>{events.map((event) => <li key={event.seq}>
-      {String(event.data.detail || (event.kind === "request_plan" ? `已规划 ${(event.data.steps as unknown[] | undefined)?.length ?? 0} 个步骤` : event.kind === "plan_step" ? `${event.data.step_id} · ${event.data.tool} · ${labels[String(event.data.status)] ?? event.data.status}` : event.kind === "tool_started" ? `调用 ${event.data.tool}` : event.kind === "tool_finished" ? `${event.data.tool} · ${event.data.status}` : event.kind === "response" ? "已返回回复" : event.kind === "browser_summary" ? `搜索摘要：发现 ${event.data.discovered}，保存 ${event.data.stored}` : event.kind === "browser" ? "浏览器状态已更新" : event.kind))}
+      {stepDescription(event)}
+      {Boolean(event.data.failure) && <small> · 错误码 {String((event.data.failure as Record<string, unknown>).code)} · {(event.data.failure as Record<string, unknown>).uncertain ? "结果未知，请人工核对" : "步骤已停止"}</small>}
     </li>)}</ol>
   </details>;
 }

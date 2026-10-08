@@ -32,6 +32,7 @@ from ..llm.manager import LLMManager
 from ..memory.candidate_state import CandidateStateStore
 from ..memory.resume_workspace import ResumeWorkspaceStore, resume_document_digest
 from ..memory.stores import MemoryStore
+from ..runtime.resilience import WatchLimits, WatchdogExpired, guarded_operation
 
 
 TERMINAL_STATUSES = {
@@ -70,6 +71,7 @@ class BrowserAutomationService:
         self.mock_adapter = MockJobSiteSearchAdapter()
         self.mock_delivery_adapter = MockDeliveryAdapter()
         self.resume_workspace = resume_workspace
+        self.watch_limits = WatchLimits.configured()
 
     async def start(self, request: BrowserSearchRequest) -> BrowserTaskView:
         async with self.lifecycle_lock:
@@ -103,8 +105,23 @@ class BrowserAutomationService:
                 "result_limit": request.result_limit, "salary_min": request.salary_min, "max_jobs": request.max_jobs,
                 "conversation_id": request.conversation_id, "revision": request.search_state_revision,
             })
-            self.worker = asyncio.create_task(self._run(task_id, request), name=f"browser-search-{task_id[:8]}")
+            self.worker = asyncio.create_task(self._run_guarded(task_id, request), name=f"browser-search-{task_id[:8]}")
             return state
+
+    async def _run_guarded(self, task_id: str, request: BrowserSearchRequest) -> None:
+        def observe():
+            view = self.store.get_task(task_id)
+            key = (view.status, view.checkpoint, view.current_url, view.detail,
+                   view.discovered, view.stored, view.duplicates, view.matched,
+                   view.funnel.model_dump_json(), view.dry_run_contacted, view.dry_run_submitted)
+            return key, view.status in {BrowserTaskStatus.WAITING_FOR_USER, BrowserTaskStatus.PAUSED}
+        try:
+            await guarded_operation(self._run(task_id, request), observe, limits=self.watch_limits)
+        except WatchdogExpired as exc:
+            self.store.event(task_id, "watchdog_expired", str(exc), reason_code=exc.code)
+            self.store.increment_funnel(task_id, funnel_errors=1)
+            self.store.update_task(task_id, status=BrowserTaskStatus.FAILED, detail=str(exc),
+                                   checkpoint=exc.code, takeover_reason=None)
 
     def current(self) -> BrowserTaskView:
         if self.current_id:
@@ -682,6 +699,7 @@ class BrowserAutomationService:
             job = self.store.get_job(job_id)
             label = f"{job['company']} / {job['title']}"
             submit_started = False
+            submit_confirmed = False
             try:
                 job_url = self.mock_delivery_adapter.normalize_job_url(str(job.get("source_url") or ""))
                 if not job_url:
@@ -758,8 +776,10 @@ class BrowserAutomationService:
                     self.store.mark_recruiter_reply(job_id, observation.hr_reply_text)
                     counters["dry_run_replied"] += 1
                     submit_started = True
+                    self.store.update_task(task_id, checkpoint="mock_dry_run_submit_started")
                     result = await self.mock_delivery_adapter.submit(page)
                     if result.confirmed:
+                        submit_confirmed = True
                         self.store.mark_delivery_completed(job_id, f"Dry Run 已确认点击发送简历；招聘方回复：{observation.hr_reply_text}")
                         counters["dry_run_submitted"] += 1
                         report_lines.append(f"- {label}：检测到明确回复并已点击“发简历”")
@@ -776,6 +796,8 @@ class BrowserAutomationService:
                     counters["dry_run_waiting_reply"] += 1
                     report_lines.append(f"- {label}：已发起沟通，等待回复，未发送简历")
             except asyncio.CancelledError:
+                if submit_started and not submit_confirmed:
+                    self.store.mark_outcome_indeterminate(job_id, "简历提交期间中断/超时，结果未知，禁止自动重试")
                 raise
             except Exception as exc:
                 counters["dry_run_failed"] += 1
