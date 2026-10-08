@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=80"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "autohunt-backend"
+version = "0.1.0"
+description = "Secure single-agent backend MVP for AutoHunt"
+requires-python = ">=3.12"
+dependencies = [
+  "cryptography>=45,<47",
+  "fastapi>=0.116,<1",
+  "mcp>=2,<3",
+  "openai>=2,<3",
+  "playwright>=1.58,<2",
+  "pypdf>=6.0,<7",
+  "pydantic>=2.11,<3",
+  "python-dotenv>=1.1,<2",
+  "python-multipart>=0.0.20,<1",
+  "uvicorn[standard]>=0.35,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "httpx>=0.28,<1",
+  "pytest>=8.4,<9",
+  "pytest-asyncio>=1.1,<2",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+asyncio_mode = "auto"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+exclude = ["data*", "tests*"]

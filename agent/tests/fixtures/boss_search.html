@@ -1,0 +1,16 @@
+<!doctype html><html><head><title>BOSS职位搜索</title></head><body>
+  <div class="user-nav">个人中心</div>
+  <button class="city-label" onclick="document.querySelector('.city-list').style.display='block'">全国</button>
+  <ul class="city-list" style="display:none">
+    <li onclick="document.querySelector('.city-label').textContent=this.textContent; this.parentElement.style.display='none'">深圳</li>
+    <li>杭州</li>
+  </ul>
+  <input placeholder="搜索职位、公司"><button onclick="this.dataset.clicked='yes'">搜索</button>
+  <ul>
+    <li class="job-card-wrapper">
+      <a href="https://www.zhipin.com/job_detail/demo123.html"><span class="job-name">Python Agent 工程师</span></a>
+      <span class="company-name">示例科技</span><span class="job-area">上海</span><span class="salary">20-30K</span>
+      <ul class="tag-list"><li>Python</li><li>FastAPI</li></ul>
+    </li>
+  </ul>
+</body></html>

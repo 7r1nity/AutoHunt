@@ -1,0 +1,383 @@
+from __future__ import annotations
+
+import asyncio
+import copy
+import json
+import time
+from typing import AsyncIterator
+
+from .context import RunContext, current_run
+from .search_state import prepare_search_state
+from .store import RunStore, TERMINAL
+from ..core.models import BrowserSearchRequest
+
+
+class AgentRuntime:
+    """Durable runs, per-session ordering, bounded concurrency and one deadline."""
+    def __init__(self, store: RunStore, agent, jobs, browser, plans, resume_workspace,
+                 *, queue_timeout=120, chat_timeout=55, plan_timeout=105):
+        self.store, self.agent, self.jobs = store, agent, jobs
+        self.browser, self.plans, self.resume_workspace = browser, plans, resume_workspace
+        self.tasks: dict[str, asyncio.Task] = {}
+        self.sessions: dict[str, asyncio.Lock] = {}
+        self.slots = asyncio.Semaphore(2)
+        self.queue_timeout, self.chat_timeout, self.plan_timeout = queue_timeout, chat_timeout, plan_timeout
+        self.delivery = None
+
+    async def start(self):
+        self.sessions.clear()
+        self.slots = asyncio.Semaphore(2)
+        # Re-enqueue only requests which never began. Side effects are not replayed.
+        for run in reversed(self.store.list(active=True)):
+            if run["cancel_requested"]:
+                self.finish(run["id"], "outcome_indeterminate" if run["mutation_started"] else "cancelled", "取消请求已恢复")
+            elif run["status"] == "queued":
+                self.schedule(run["id"])
+            elif run["result"] is not None or (run["checkpoint"] or {}).get("browser_id") or (run["checkpoint"] or {}).get("delivery_id") or run["status"] == "waiting_confirmation":
+                if run["kind"] == "chat" and run["result"]:
+                    self.jobs.add_conversation_message("assistant", run["result"].get("message", ""), response=run["result"],
+                                                       conversation_id=run["session_id"], run_id=run["id"])
+                self.schedule(run["id"], watch_only=True)
+            else:
+                self.finish(run["id"], "outcome_indeterminate" if run["mutation_started"] else "interrupted",
+                            "服务重启；已保存步骤，请核对后恢复")
+
+    async def shutdown(self):
+        # Persist before cancelling workers; distinguish service loss from user stop.
+        tasks = list(self.tasks.items())
+        for run_id, task in tasks:
+            run = self.store.get(run_id)
+            if run["status"] not in TERMINAL and not (run["checkpoint"] or {}).get("browser_id") and not (run["checkpoint"] or {}).get("delivery_id") and run["status"] != "waiting_confirmation":
+                self.finish(run_id, "outcome_indeterminate" if run["mutation_started"] else "interrupted", "服务停止，检查点已保存")
+            task.cancel()
+        await asyncio.gather(*(task for _, task in tasks), return_exceptions=True)
+        self.tasks.clear()
+
+    def schedule(self, run_id: str, *, watch_only=False):
+        task = asyncio.create_task(self.execute(run_id, watch_only=watch_only), name=f"agent-run-{run_id}")
+        self.tasks[run_id] = task
+        task.add_done_callback(lambda done: self.tasks.pop(run_id, None))
+
+    def submit(self, session_id: str, request_key: str, kind: str, payload: dict, parent_id=None) -> dict:
+        if kind not in {"chat", "learning_plan", "job_analysis"}:
+            raise ValueError("不支持的任务类型")
+        run, created = self.store.create(session_id, request_key, kind, payload, parent_id)
+        if created:
+            self.schedule(run["id"])
+        return run
+
+    def track_delivery(self, task_id: str, session_id: str = "default") -> dict:
+        run, created = self.store.create(session_id, f"delivery:{task_id}", "delivery", {})
+        if created:
+            self.store.update(run["id"], status="running", mutation_started=1, checkpoint={"delivery_id": task_id})
+            self.store.mutate_dialogue(session_id, {"op": "task", "source": run["id"], "kind": "delivery_id", "id": task_id, "status": "running", "bind": True})
+            self.schedule(run["id"], watch_only=True)
+        return self.store.get(run["id"])
+
+    def track_browser(self, task_id: str, session_id: str = "default") -> dict:
+        run, created = self.store.create(session_id, f"browser:{task_id}", "browser", {})
+        if created:
+            self.store.update(run["id"], status="running", mutation_started=1, checkpoint={"browser_id": task_id})
+            self.store.mutate_dialogue(session_id, {"op": "task", "source": run["id"], "kind": "browser_id", "id": task_id, "status": "running", "bind": True})
+            self.schedule(run["id"], watch_only=True)
+        return self.store.get(run["id"])
+
+    def finish(self, run_id: str, status: str, detail: str, **fields):
+        previous = self.store.get(run_id)
+        if previous["status"] in TERMINAL:
+            return
+        self.store.update(run_id, status=status, error=detail if status != "completed" else None, **fields)
+        self.store.event(run_id, "status", {"status": status, "detail": detail})
+
+    def emit(self, run_id: str, kind: str, data: dict):
+        if self.store.get(run_id)["status"] in TERMINAL:
+            return
+        if kind == "tool_started" and data.get("effect") in {"write", "external"}:
+            self.store.update(run_id, mutation_started=1)
+        if kind == "tool_finished" and data.get("tool") == "job_search_start" and data.get("status") == "ok":
+            browser_id = (data.get("result") or {}).get("id")
+            if browser_id:
+                self.store.update(run_id, checkpoint={"browser_id": browser_id})
+        self.store.event(run_id, kind, data)
+
+    def save(self, run_id: str, checkpoint: dict):
+        current = self.store.get(run_id)
+        # A durable external-task binding must never be overwritten by an LLM step.
+        if not (current["checkpoint"] or {}).get("browser_id"):
+            checkpoint = copy.deepcopy(checkpoint)
+            for message in checkpoint.get("messages", []):
+                message.pop("reasoning_content", None)
+            self.store.update(run_id, checkpoint=checkpoint)
+
+    async def wait_response(self, run_id: str) -> dict:
+        while True:
+            run = self.store.get(run_id)
+            if run["result"] is not None:
+                return run["result"]
+            if run["status"] in TERMINAL:
+                if run.get("error_type") == "ValueError":
+                    raise ValueError(run["error"])
+                if run.get("error_type") == "TimeoutError":
+                    raise TimeoutError(run["error"])
+                raise RuntimeError(run["error"] or "任务没有返回结果")
+            await asyncio.sleep(0.1)
+
+    def search_state(self, session_id: str) -> dict:
+        candidate = self.agent.candidate_state.read() if hasattr(self.agent, "candidate_state") else None
+        workspace = getattr(self.agent, "resume_workspace", None)
+        version = workspace.read_document().version if workspace else None
+        saved = self.store.search_state(session_id)
+        return prepare_search_state(saved, candidate, version)
+
+    async def execute(self, run_id: str, *, watch_only=False):
+        run = self.store.get(run_id)
+        if watch_only:
+            try:
+                await self.watch(run_id)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                self.finish(run_id, "failed", "恢复任务状态时发生错误，请查看执行记录")
+            return
+        lock = self.sessions.setdefault(run["session_id"], asyncio.Lock())
+        try:
+            # Queue time is separately bounded; processing budget starts at admission.
+            async with asyncio.timeout(self.queue_timeout):
+                await lock.acquire()
+            try:
+                await asyncio.wait_for(self.slots.acquire(), timeout=self.queue_timeout)
+                try:
+                    self.store.update(run_id, status="running")
+                    self.store.event(run_id, "status", {"status": "running", "detail": "正在处理请求"})
+                    context = RunContext(run_id, asyncio.current_task(),
+                                         lambda kind, data: self.emit(run_id, kind, data),
+                                         lambda value: self.save(run_id, value),
+                                         (run["checkpoint"] or {}).get("resume_checkpoint"),
+                                         session_id=run["session_id"],
+                                         search_state=self.store.save_search_state(run["session_id"], self.search_state(run["session_id"])),
+                                         persist_search=lambda value: self.store.save_search_state(run["session_id"], value),
+                                         dialogue=self.store.dialogue_state(run["session_id"]),
+                                         mutate_dialogue=lambda operation: self.store.mutate_dialogue(run["session_id"], operation),
+                                         retrieve_history=lambda query, limit: self.jobs.search_conversation_history(run["session_id"], query, limit=limit),
+                                         enforce_task_scope=True)
+                    token = current_run.set(context)
+                    started = time.monotonic()
+                    try:
+                        from ..growth.plans import is_explicit_plan_request
+                        from ..core.action_language import plan_scope_answer
+                        plan_followup = bool((context.dialogue or {}).get("learning_request")
+                            and plan_scope_answer(run["payload"].get("message", "")))
+                        budget = self.plan_timeout if run["kind"] == "learning_plan" or is_explicit_plan_request(run["payload"].get("message", "")) or plan_followup else self.chat_timeout
+                        async with asyncio.timeout(budget):
+                            if run["kind"] == "learning_plan":
+                                self.store.event(run_id, "progress", {"detail": "正在核对 JD 证据并生成计划"})
+                                result = await self.plans.generate(run["payload"].get("focus", "")[:400])
+                            elif run["kind"] == "job_analysis":
+                                from ..jobs.analysis import analyze_job
+                                from ..core.models import JobAnalysisRequest
+                                result = analyze_job(JobAnalysisRequest.model_validate(run["payload"])).model_dump(mode="json")
+                            else:
+                                worker = copy.copy(self.agent)
+                                history = self.jobs.conversation_history(conversation_id=run["session_id"], limit=100)
+                                worker.restore_history(history)
+                                if not run["parent_id"]:
+                                    self.jobs.add_conversation_message("user", run["payload"]["message"], conversation_id=run["session_id"], run_id=run_id)
+                                response = await worker.handle(run["payload"]["message"])
+                                # Resolve the old UI-only search confirmation within this run.
+                                if response.action == "confirm_search":
+                                    from .search_state import merge_search_state
+                                    candidate = worker.candidate_state.read() if hasattr(worker, "candidate_state") else None
+                                    workspace = getattr(worker, "resume_workspace", None)
+                                    snapshot = merge_search_state(context.search_state, {
+                                        "queries": response.action_queries or [response.action_query],
+                                        "locations": response.action_locations or context.search_state["locations"],
+                                    }, candidate, workspace.read_document().version if workspace else None)
+                                    context.search_state = self.store.save_search_state(run["session_id"], snapshot)
+                                    self.store.update(run_id, mutation_started=1)
+                                    browser = await self.browser.start(BrowserSearchRequest(
+                                        query=response.action_query, queries=response.action_queries or [],
+                                        locations=snapshot["locations"], dry_run=response.action_dry_run,
+                                        result_limit=snapshot["result_limit"], salary_min=snapshot["salary_min"],
+                                        conversation_id=run["session_id"], search_state_revision=context.search_state["revision"],
+                                        max_jobs=snapshot["max_jobs"] or min(200, max(30, (snapshot["result_limit"] or 0)*5)),
+                                    ))
+                                    self.store.update(run_id, mutation_started=1, checkpoint={"browser_id": browser.id})
+                                    from .context import dialogue_change
+                                    dialogue_change("task", kind="browser_id", id=browser.id, status=str(browser.status), bind=True)
+                                    response.action = None
+                                result = response.model_dump(mode="json")
+                            self.store.update(run_id, result=result)
+                            if run["kind"] == "chat":
+                                self.jobs.add_conversation_message("assistant", result["message"], response=result, conversation_id=run["session_id"], run_id=run_id)
+                            self.store.event(run_id, "response", {"result": result, "elapsed_ms": round((time.monotonic()-started)*1000)})
+                            if run["kind"] == "chat":
+                                uncertain = any(event.get("status") == "outcome_indeterminate" for event in result.get("tool_events", []))
+                                controller_error = any(event.get("tool") == "tool_call_controller" and event.get("status") == "error" for event in result.get("tool_events", []))
+                                if uncertain or controller_error:
+                                    status = "outcome_indeterminate" if uncertain or self.store.get(run_id)["mutation_started"] else "failed"
+                                    self.finish(run_id, status, "工具控制器中断，已保存已执行的步骤")
+                                    return
+                    finally:
+                        current_run.reset(token)
+                finally:
+                    self.slots.release()
+            finally:
+                lock.release()
+            # Human/browser waits do not consume an LLM slot or block later chat turns.
+            await self.watch(run_id)
+        except asyncio.CancelledError:
+            current = self.store.get(run_id)
+            if current["cancel_requested"]:
+                uncertain = current["mutation_started"] and not current["result"]
+                if not (current["checkpoint"] or {}).get("browser_id") and not (current["checkpoint"] or {}).get("delivery_id"):
+                    self.finish(run_id, "outcome_indeterminate" if uncertain else "cancelled", "任务已停止，已完成的步骤保留")
+            raise
+        except TimeoutError:
+            current = self.store.get(run_id)
+            self.finish(run_id, "outcome_indeterminate" if current["mutation_started"] else "timed_out",
+                        "任务超过时间预算；已有执行记录保留，未自动重试", error_type="TimeoutError")
+        except Exception as exc:
+            current = self.store.get(run_id)
+            self.finish(run_id, "outcome_indeterminate" if current["mutation_started"] and not current["result"] else "failed",
+                        str(exc) if isinstance(exc, (ValueError, RuntimeError)) else f"任务执行失败：{type(exc).__name__}；请查看步骤记录", error_type=type(exc).__name__)
+
+    async def watch(self, run_id: str):
+        run = self.store.get(run_id)
+        if run["status"] in TERMINAL:
+            return
+        if (run["checkpoint"] or {}).get("delivery_id"):
+            await self.watch_delivery(run_id)
+            return
+        proposal = (run["result"] or {}).get("resume_proposal")
+        if proposal:
+            self.store.update(run_id, status="waiting_confirmation")
+            self.store.event(run_id, "confirmation", {"proposal_id": proposal["id"], "detail": "请审核简历修改提案"})
+            while True:
+                decision = self.resume_workspace.read_proposal(proposal["id"])
+                if decision.status != "pending":
+                    self.finish(run_id, "completed", "修改提案已处理")
+                    return
+                await asyncio.sleep(1)
+        browser_id = (run["checkpoint"] or {}).get("browser_id")
+        if not browser_id:
+            self.finish(run_id, "completed", "任务完成")
+            return
+        previous = None
+        while True:
+            browser = self.jobs.get_task(browser_id)
+            snapshot = browser.model_dump(mode="json")
+            key = (str(browser.status), browser.checkpoint, browser.stored, browser.discovered)
+            if key != previous:
+                previous = key
+                status = "waiting_user" if browser.status in {"waiting_for_user", "paused"} else "running"
+                self.store.update(run_id, status=status)
+                self.store.event(run_id, "browser", {"task": snapshot, "status": status})
+                self.store.mutate_dialogue(run["session_id"], {"op": "task", "source": run_id,
+                    "kind": "browser_id", "id": browser_id, "status": str(browser.status)})
+            if browser.status in {"completed", "failed", "stopped"}:
+                status = {"completed": "completed", "failed": "failed", "stopped": "cancelled"}[browser.status]
+                self.browser_summary(run_id, browser)
+                self.finish(run_id, status, browser.detail)
+                return
+            await asyncio.sleep(1)
+
+    async def watch_delivery(self, run_id: str):
+        run = self.store.get(run_id)
+        task_id = run["checkpoint"]["delivery_id"]
+        previous = None
+        while True:
+            view = self.jobs.get_delivery_run(task_id)
+            key = (str(view.status), view.checkpoint, view.recruiter_reply, view.submitted)
+            if key != previous:
+                previous = key
+                status = "waiting_user" if view.status == "waiting_for_user" else "waiting_reply" if view.status == "waiting_for_reply" else "running"
+                self.store.update(run_id, status=status)
+                self.store.event(run_id, "delivery", {"task": view.model_dump(mode="json"), "status": status, "detail": view.detail})
+            if view.status in {"completed", "failed", "outcome_indeterminate", "cancelled"}:
+                batch = next((item for item in self.jobs.mock_delivery_queue(active_only=False) if item["run_id"] == task_id), None)
+                if batch and view.submitted and not self.store.has_event(run_id, "response"):
+                    message = f"模拟站自动投递 · 职位 #{view.job_id}：已核实简历投递完成。"
+                    self.store.event(run_id, "response", {"result": {"message": message, "delivery": view.model_dump(mode="json")}})
+                self.finish(run_id, str(view.status), view.detail, result={"delivery": view.model_dump(mode="json")})
+                return
+            await asyncio.sleep(1)
+
+    def browser_summary(self, run_id: str, browser):
+        run = self.store.get(run_id)
+        if self.store.has_event(run_id, "browser_summary"):
+            return
+        from ..jobs.search_reporting import render_search_report
+        try:
+            report = self.jobs.search_report(browser.id)
+            message = render_search_report(browser, report)
+        except (KeyError, ValueError):
+            message = "搜索已结束；部分详情尚未读取，可在看板核对已保存结果。"
+            report = {"jobs": []}
+        self.jobs.add_conversation_message("assistant", message, conversation_id=run["session_id"], run_id=f"summary:{run_id}")
+        if report.get("jobs"):
+            self.store.mutate_dialogue(run["session_id"], {"op": "snapshot", "source": run_id,
+                "topic": "applications", "kind": "job", "version": browser.id,
+                "items": [{key: item[key] for key in ("id", "title", "company", "stage", "content_hash")}
+                          for item in report["jobs"]], "displayed": True})
+        self.store.event(run_id, "browser_summary", {"message": message, "discovered": browser.discovered,
+                                                    "stored": browser.stored, "duplicates": browser.duplicates,
+                                                    "report": report, "statistics_changed": True})
+
+    async def cancel(self, run_id: str) -> dict:
+        run = self.store.get(run_id)
+        if run["status"] in TERMINAL:
+            return run
+        self.store.update(run_id, cancel_requested=1, status="cancelling")
+        self.store.event(run_id, "status", {"status": "cancelling", "detail": "正在停止任务"})
+        task = self.tasks.get(run_id)
+        if task:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        current = self.store.get(run_id)
+        browser_id = (current["checkpoint"] or {}).get("browser_id")
+        if browser_id and self.browser.current().id == browser_id:
+            view = await self.browser.stop()
+            self.browser_summary(run_id, view)
+        delivery_id = (current["checkpoint"] or {}).get("delivery_id")
+        if delivery_id and self.delivery and self.delivery.current().id == delivery_id:
+            view = await self.delivery.stop()
+            self.finish(run_id, "outcome_indeterminate" if view.status == "outcome_indeterminate" else "cancelled", view.detail)
+        if current["status"] not in TERMINAL:
+            self.finish(run_id, "cancelled", "任务已停止")
+        return self.store.get(run_id)
+
+    async def resume(self, run_id: str) -> dict:
+        run = self.store.get(run_id)
+        browser_id = (run["checkpoint"] or {}).get("browser_id")
+        delivery_id = (run["checkpoint"] or {}).get("delivery_id")
+        if run["status"] in {"waiting_user", "waiting_reply"} and delivery_id and self.delivery:
+            if self.delivery.current().id != delivery_id:
+                raise ValueError("投递任务已经变更，请核对原任务")
+            await self.delivery.resume()
+            return self.store.update(run_id, status="running")
+        if run["status"] == "waiting_user" and browser_id:
+            if self.browser.current().id != browser_id:
+                raise ValueError("浏览器任务已经变更，请重新搜索")
+            await self.browser.resume()
+            return self.store.update(run_id, status="running")
+        if (run["status"] not in {"interrupted", "timed_out", "failed"} or run["mutation_started"]
+                or run["kind"] == "chat" and (run["checkpoint"] or {}).get("phase") != "tool_loop"):
+            raise ValueError("该任务不能重放；请核对已执行步骤，或在原提案中确认")
+        child = self.submit(run["session_id"], f"resume:{run_id}", run["kind"], run["payload"], parent_id=run_id)
+        if child["status"] == "queued":
+            self.store.update(child["id"], checkpoint={"resume_checkpoint": run["checkpoint"]})
+        return self.store.get(child["id"])
+
+    async def stream(self, run_id: str, after: int = 0) -> AsyncIterator[str]:
+        self.store.get(run_id)
+        cursor = after
+        while True:
+            events = self.store.events(run_id, cursor)
+            for event in events:
+                cursor = event["seq"]
+                yield f"id: {cursor}\nevent: {event['kind']}\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
+            if self.store.get(run_id)["status"] in TERMINAL and not events:
+                return
+            if not events:
+                yield ": heartbeat\n\n"
+            await asyncio.sleep(0.4)

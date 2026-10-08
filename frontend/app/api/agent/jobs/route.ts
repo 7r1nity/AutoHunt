@@ -1,0 +1,45 @@
+import { NextRequest, NextResponse } from "next/server";
+
+const backendUrl = process.env.AUTOHUNT_BACKEND_URL ?? "http://127.0.0.1:8000";
+
+async function requestBackend(path: string, init?: RequestInit) {
+  const token = process.env.AUTOHUNT_BACKEND_TOKEN;
+  if (!token) return NextResponse.json({ detail: "Next.js server has no backend token configured" }, { status: 503 });
+  try {
+    const response = await fetch(`${backendUrl}${path}`, {
+      ...init,
+      headers: { "Content-Type": "application/json", "X-AutoHunt-Key": token },
+      cache: "no-store",
+      signal: AbortSignal.timeout(10_000),
+    });
+    const text = await response.text();
+    return new NextResponse(text || null, { status: response.status, headers: { "Content-Type": "application/json" } });
+  } catch {
+    return NextResponse.json({ detail: "AutoHunt backend is unavailable" }, { status: 503 });
+  }
+}
+
+export async function GET() { return requestBackend("/api/v1/jobs"); }
+
+export async function PUT(request: NextRequest) {
+  const body = await request.json();
+  return requestBackend(`/api/v1/jobs/${Number(body.id)}/stage`, { method: "PUT", body: JSON.stringify({ stage: body.stage }) });
+}
+
+export async function POST(request: NextRequest) {
+  const body = await request.json();
+  if (body.action === "import_mock") {
+    const id = Number(body.external_id ?? 1);
+    const flow = body.flow === "direct" ? "direct" : "gated";
+    return requestBackend(`/api/v1/mock-site/jobs/${id}/import?flow=${flow}`, { method: "POST" });
+  }  if (body.action === "preview") {
+    return requestBackend(`/api/v1/jobs/${Number(body.id)}/delivery-preview`, { method: "POST" });
+  }
+  if (body.action === "authorize" && typeof body.preview_id === "string") {
+    return requestBackend(`/api/v1/deliveries/${encodeURIComponent(body.preview_id)}/authorize`, {
+      method: "POST",
+      body: JSON.stringify({ confirmation: "AUTHORIZE", conversation_id: body.conversation_id ?? "default" }),
+    });
+  }
+  return NextResponse.json({ detail: "Unsupported job action" }, { status: 422 });
+}

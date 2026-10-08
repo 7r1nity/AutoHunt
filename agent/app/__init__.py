@@ -1,0 +1,2 @@
+"""AutoHunt backend package."""
+
