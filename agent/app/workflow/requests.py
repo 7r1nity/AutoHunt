@@ -17,6 +17,7 @@ class TaskRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     id: str = Field(default_factory=lambda: uuid.uuid4().hex)
     run_id: str = ""
+    origin_run_id: str = ""
     original: str = Field(min_length=1, max_length=12000)
     status: str = "planning"
     resume_stamp: str = ""
@@ -26,7 +27,12 @@ class TaskRequest(BaseModel):
     updated_at: float = Field(default_factory=time.time)
 
 
-CONTINUE = re.compile(r"^(?:(?:请|帮我)\s*)?(?:继续|恢复|接着|重试|重新尝试|再试一次|再试一下|重新执行|继续执行)(?:一下)?(?:上(?:一|个|次)?(?:文|面|条)?|刚才|之前|原来|这个|该|当前)?(?:的)?(?:任务|请求|操作|执行|搜索|检索)?[。！!\s]*$")
+CONTINUE = re.compile(
+    r"^(?:(?:请|帮我|麻烦你|我要你|我希望你|你)\s*)?"
+    r"(?:继续执行|重新执行|重新尝试|再试一次|再试一下|继续|恢复|接着(?:执行)?|重试)(?:一下)?"
+    r"(?:(?:我)?(?:第(?:一|1)(?:次|个|条)|最初|最开始|上(?:一|个|次)?(?:文|面|条)?|刚才|之前|原来|这个|该|当前|前面)"
+    r"(?:(?:发送|发|提出|说)(?:给你)?(?:过)?)?)?(?:的)?"
+    r"(?:任务|请求|操作|执行|搜索|检索)?(?:吧)?[。！!\s]*$")
 
 
 def is_continuation(message: str) -> bool:
@@ -35,10 +41,95 @@ def is_continuation(message: str) -> bool:
 
 def action_request(message: str) -> bool:
     """Coarse task focus only, never grants execution authority."""
+    from ..core.request_summary import is_request_summary
+    if is_continuation(message) or is_request_summary(message) or not re.search(r"[\w\u4e00-\u9fff]", message):
+        return False  # References and repair signals are not new task definitions.
     from .planning import command_grounded, MUTATION_CUES
     clauses = re.split(r"[，,。；;\n]|然后|并且|同时|接着", message)
     return any(command_grounded(tool, clause.strip(), [message])
-               for tool in MUTATION_CUES for clause in clauses)
+               for tool in MUTATION_CUES if tool not in {"browser_task_resume", "browser_task_pause", "browser_task_stop", "search_state_update"}
+               for clause in clauses)
+
+
+def request_selector(message: str) -> str:
+    return "first" if is_continuation(message) and re.search(r"第(?:一|1)(?:次|个|条)|最初|最开始", message) else "recent"
+
+
+def proven_idle_resume(events: list[dict]) -> bool:
+    """Narrow legacy no-op proof, never use a model's success/failure prose.
+
+    The old runtime marked a resume attempt as a mutation even when the service
+    returned id=None/status=idle. Any other or unpaired effect remains uncertain.
+    """
+    effects = [event for event in events if event.get("kind") == "tool_started" and event.get("effect") != "read"]
+    finished = [event for event in events if event.get("kind") == "tool_finished" and event.get("tool") == "browser_task_resume"]
+    return bool(effects and len(effects) == len(finished) and
+        all(event.get("tool") == "browser_task_resume" for event in effects) and
+        all(event.get("status") == "ok" and isinstance(event.get("result"), dict) and
+            event["result"].get("id") is None and event["result"].get("status") == "idle" for event in finished))
+
+
+def canonical_request(saved: dict, history: list[dict], records: list[dict] | None = None, *, selector="recent") -> TaskRequest | None:
+    """Select observed user task facts, not an assistant's interpretation of a pronoun.
+
+    Runtime records are session scoped and bounded independently of model history.
+    They provide execution evidence; no historical authorization/token is imported.
+    """
+    current = saved.get("task_request") or {}
+    if selector != "first" and action_request(current.get("original", "")):
+        return TaskRequest.model_validate(current)
+    from datetime import datetime
+    from ..runtime.dialogue import REJECT
+    from ..core.search_language import parse_search_message
+    candidates = []
+    epoch = saved.get("history_epoch", 0)
+    if selector == "first" and records and len(records) >= 500 and datetime.fromisoformat(records[0]["created_at"]).timestamp() > epoch:
+        return None  # The first record of a bounded window is not necessarily the first task.
+    for item in records or []:  # chronological order from RunStore, not model output
+        created = datetime.fromisoformat(item["created_at"]).timestamp()
+        if created < epoch:
+            continue
+        text = item.get("message", "").strip()
+        if (REJECT.fullmatch(text) or text in {"退出当前任务", "不办了", "重置上下文", "清空会话状态", "重新开始"}
+                or parse_search_message(text).action == "stop"):
+            for candidate in candidates:
+                if candidate.status in {"failed", "timed_out", "clarifying", "planning", "interrupted"}:
+                    candidate.status = "cancelled"
+            if text in {"重置上下文", "清空会话状态", "重新开始"}:
+                candidates = []
+            continue
+        if not action_request(text):
+            # A later continuation may have begun effects. Do not replan the
+            # old never-executed request merely because its own run had no writes.
+            if candidates and is_continuation(text) and item.get("execution_started"):
+                target = candidates[0] if request_selector(text) == "first" else candidates[-1]
+                target.execution_started = True
+                target.status = "finished" if item["status"] == "completed" else item["status"]
+            continue
+        reply = item.get("reply", "")
+        status = item["status"]
+        no_execution = not item.get("execution_started")
+        if no_execution and re.match(r"^(?:没有执行任务[:：]|任务规划暂不可用)", reply):
+            status = "timed_out" if "规划超时" in reply else "failed"
+        elif no_execution and status == "completed" and reply.startswith("已记录完整请求，尚未执行"):
+            status = "clarifying"
+        elif status == "completed":
+            status = "finished"
+        from ..core.search_contract import explicit_search_constraints
+        try:
+            conditions = explicit_search_constraints(text)
+        except ValueError:
+            conditions = {}  # Conflicts are revalidated before execution.
+        candidates.append(TaskRequest(id="request:"+item["id"], run_id=item["id"], origin_run_id=item["id"],
+            original=text, status=status, conditions=conditions, execution_started=not no_execution,
+            resume_stamp=item.get("resume_stamp") or "", updated_at=created))
+    if candidates:
+        return candidates[0] if selector == "first" else candidates[-1]
+    if records is not None:
+        return None  # A reset/empty authoritative store must not revive raw chat history.
+    # Local/legacy callers without a run store can recover only an explicitly
+    # paired failure, never a guessed action from raw assistant/JD text.
+    return failed_history_request(history)
 
 
 def failed_history_request(history: list[dict]) -> TaskRequest | None:
@@ -90,6 +181,8 @@ def resolve_continuation(saved: dict, browser, stamp: str, *, now: float | None 
     owned = bool(view and view.id and saved.get("tasks", {}).get("browser_id") == view.id)
     from ..runtime.context import browser_search_available
     live = bool(owned and not browser_search_available(browser))
+    if record and record.status in {"finished", "completed", "cancelled", "outcome_indeterminate"}:
+        return Continuation("clarify", "所指原任务已经结束、取消或结果待核验；不会恢复另一个任务或重放历史操作。请明确新的请求，或先核对执行记录。")
     if record and record.status == "clarifying":
         questions = (saved.get("instruction_request") or {}).get("questions", [])
         return Continuation("clarify", "上文任务还有条件待确认，尚未执行。" + ("请补充：" + "；".join(questions) if questions else "请回答上一轮的追问。"))

@@ -485,10 +485,37 @@ class AutoHuntAgent:
     async def _dispatch_contextual_message(self, message: str, patch: dict | None) -> ChatResponse:
         context = active_run()
         stripped = message.strip()
+        from ..workflow.requests import canonical_request, request_selector, action_request
+        if stripped not in {"退出当前任务", "不办了", "重置上下文", "清空会话状态", "重新开始"} and not REJECT.fullmatch(stripped):
+            current_request = (context.dialogue or {}).get("task_request") or {}
+            selector = request_selector(message)
+            if not action_request(current_request.get("original", "")) or selector == "first":
+                history = getattr(self, "_history_source", self._conversation_history)
+                epoch = (context.dialogue or {}).get("history_epoch", 0)
+                if epoch:
+                    from datetime import datetime
+                    history = [item for item in history if item.get("created_at") and
+                        datetime.fromisoformat(item["created_at"]).timestamp() >= epoch]
+                records = context.request_records() if context.request_records else None
+                recovered = canonical_request(context.dialogue or {}, history, records, selector=selector)
+                if selector == "first" and recovered is None:
+                    return ChatResponse(message="当前记录不足以确定你指的第一次任务；不会把最近的任务冒充第一次任务。请补充原任务内容或时间，没有执行任何操作。", lane=AgentLane.APPLICATION)
+                if recovered:
+                    dialogue_change("request_state", request=recovered.model_dump())
+                    previous = (context.dialogue or {}).get("instruction_request") or {}
+                    if previous and not action_request(previous.get("original", "")):
+                        # Discard only the polluted interpretation, never history,
+                        # search conditions, live executors or valid task plans.
+                        dialogue_change("instruction", request=None)
+                    emit("request_anchor", origin_run_id=recovered.origin_run_id, status=recovered.status,
+                         detail="已按持久化任务事实定位原始请求；未执行任何动作")
         from .request_summary import is_request_summary, request_summary
         if is_request_summary(message):
             return ChatResponse(message=request_summary(context.dialogue or {}, context.search_state or {},
                 self._conversation_history), lane=AgentLane.APPLICATION)
+        if not re.search(r"[\w\u4e00-\u9fff]", stripped):
+            return ChatResponse(message="这条消息没有新的任务参数，不会覆盖原请求。\n\n" +
+                request_summary(context.dialogue or {}, context.search_state or {}, self._conversation_history), lane=AgentLane.APPLICATION)
         if stripped in {"退出当前任务", "不办了"}:
             dialogue_change("request_state", request=None)
             return await self._resolve_context_confirmation("取消")
@@ -503,12 +530,8 @@ class AutoHuntAgent:
         from ..workflow.planning import live_request, pending_slot_answer, shortcut_safe, revoked
         from ..growth.requests import resume_stamp
         stamp = resume_stamp(self.resume_workspace.read_document(), self.candidate_state) if self.resume_workspace else ""
-        from ..workflow.requests import is_continuation, resolve_continuation, failed_history_request
+        from ..workflow.requests import is_continuation, resolve_continuation
         if is_continuation(message):
-            if not (context.dialogue or {}).get("task_request"):
-                recovered = failed_history_request(self._conversation_history)
-                if recovered:
-                    dialogue_change("request_state", request=recovered.model_dump())
             resolved = resolve_continuation(context.dialogue or {},
                 self.tool_registry.browser if self.tool_registry else None, stamp)
             emit("request_resolution", action=resolved.action, detail=resolved.message)
@@ -611,8 +634,11 @@ class AutoHuntAgent:
         from ..workflow.requests import TaskRequest, action_request
         tracked = action_request(previous["original"] if previous else message)
         if tracked:
+            root_original = previous["original"] if previous else message
+            current_request = (context.dialogue or {}).get("task_request") or {}
             task_request = TaskRequest(original=previous["original"] if previous else message,
-                run_id=context.run_id, resume_stamp=stamp, conditions=context.search_state or {})
+                run_id=context.run_id, resume_stamp=stamp, conditions=context.search_state or {},
+                origin_run_id=(current_request.get("origin_run_id") if current_request.get("original") == root_original else "") or context.run_id)
             dialogue_change("request_state", request=task_request.model_dump())
         emit("progress", detail="正在识别全部目标、核对参数与执行依赖；尚未执行")
         try:

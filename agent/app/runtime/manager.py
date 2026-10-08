@@ -179,6 +179,7 @@ class AgentRuntime:
                                          dialogue=self.store.dialogue_state(run["session_id"]),
                                          mutate_dialogue=lambda operation: self.store.mutate_dialogue(run["session_id"], operation),
                                          retrieve_history=lambda query, limit: self.jobs.search_conversation_history(run["session_id"], query, limit=limit),
+                                         request_records=lambda: self.store.request_records(run["session_id"]),
                                          enforce_task_scope=True)
                     token = current_run.set(context)
                     started = time.monotonic()
@@ -373,6 +374,7 @@ class AgentRuntime:
                             dialogue=self.store.dialogue_state(run["session_id"]),
                             mutate_dialogue=lambda op: self.store.mutate_dialogue(run["session_id"], op),
                             retrieve_history=lambda query, limit: self.jobs.search_conversation_history(run["session_id"], query, limit=limit),
+                            request_records=lambda: self.store.request_records(run["session_id"]),
                             enforce_task_scope=True, user_message=plan["original"])
                         token = current_run.set(context)
                         try:

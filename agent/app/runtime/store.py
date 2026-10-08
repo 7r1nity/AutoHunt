@@ -180,6 +180,27 @@ class RunStore:
         runs = [self.decode(row) for row in rows]
         return runs
 
+    def request_records(self, session_id: str) -> list[dict]:
+        """Task facts for reference resolution, not additional model chat context."""
+        from ..workflow.requests import is_continuation, proven_idle_resume
+        with self.connect() as db:
+            rows = db.execute("SELECT id,payload,status,mutation_started,result,created_at,checkpoint FROM agent_runs "
+                "WHERE session_id=? AND kind='chat' ORDER BY created_at DESC LIMIT 500", (session_id,)).fetchall()
+            output = []
+            for row in reversed(rows):
+                payload, result = json.loads(row["payload"]), json.loads(row["result"] or "{}")
+                checkpoint = json.loads(row["checkpoint"] or "{}")
+                started = bool(row["mutation_started"])
+                if started and is_continuation(payload.get("message", "")) and not any(checkpoint.get(k) for k in ("browser_id", "delivery_id", "plan")):
+                    facts = [{"kind": event["kind"], **json.loads(event["data"])} for event in db.execute(
+                        "SELECT kind,data FROM agent_run_events WHERE run_id=? AND kind IN ('tool_started','tool_finished') ORDER BY seq", (row["id"],))]
+                    if proven_idle_resume(facts):
+                        started = False
+                output.append({"id": row["id"], "message": payload.get("message", ""), "status": row["status"],
+                    "execution_started": started, "reply": result.get("message", ""),
+                    "created_at": row["created_at"], "resume_stamp": (checkpoint.get("plan") or {}).get("resume_stamp", "")})
+        return output
+
     def update(self, run_id: str, **fields) -> dict:
         allowed = {"status", "result", "error", "error_type", "checkpoint", "mutation_started", "cancel_requested"}
         if not fields.keys() <= allowed:
