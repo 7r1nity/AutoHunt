@@ -69,13 +69,13 @@ def build_rules(coordinator) -> list[Rule]:
         # A stalled job outranks routine work: it has already failed once, and leaving
         # it parked is exactly the complaint this framework was built to fix.
         Rule("recover_stalled_start", 90, has_stalled_replied_start, recover_stalled_start,
-             reason="提交未开始即失败且招聘方已回复，自动重试无需重新授权"),
+             reason="提交未开始即失败且招聘方已回复，自动重试无需重新授权", cooldown=25),
         Rule("submit_authorised_resume", 80, has_authorised_waiting, submit_authorised,
-             reason="已授权投递等待招聘方回复；回复到达后按钮解锁即发送简历"),
+             reason="已授权投递等待招聘方回复；回复到达后按钮解锁即发送简历", cooldown=25),
         Rule("dispatch_delivery_queue", 60, queue_has_work, dispatch_queue,
-             reason="队列中有已授权的投递，且浏览器空闲"),
+             reason="队列中有已授权的投递，且浏览器空闲", cooldown=10),
         Rule("sync_with_site", 40, has_bound_account, sync_site,
-             reason="站点是唯一能看见人工操作与招聘方回复的来源"),
+             reason="站点是唯一能看见人工操作与招聘方回复的来源", cooldown=30),
         Rule("daily_report", 20, daily_enabled, run_daily,
-             reason="每日汇总开关打开时检查是否到点"),
+             reason="每日汇总开关打开时检查是否到点", cooldown=60),
     ]

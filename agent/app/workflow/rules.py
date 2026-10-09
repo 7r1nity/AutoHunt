@@ -54,6 +54,10 @@ class Rule:
     #: A rule that reports a fault (a failed action, a stalled job) must outrank the
     #: routine rules that would otherwise keep re-selecting the same inert job.
     reason: str = ""
+    #: Seconds a fired rule stands down, so a rule that cannot make progress does not
+    #: starve the lower-priority rules behind it. The highest-priority rule used to
+    #: consume every cycle while its action had nothing to change.
+    cooldown: float = 20.0
 
     def __str__(self) -> str:  # pragma: no cover - debugging aid
         return f"{self.name}(p{self.priority})"
@@ -80,6 +84,8 @@ class RuleEngine:
         #: Bounded history so a stall can be diagnosed from the last few decisions.
         self.history: list[dict[str, Any]] = []
         self.last_observation: dict[str, Any] = {}
+        #: rule name -> monotonic time until which it stands down after firing.
+        self.cooldowns: dict[str, float] = {}
 
     def register(self, rule: Rule) -> None:
         self.rules.append(rule)
@@ -87,7 +93,10 @@ class RuleEngine:
 
     def matching(self, observation: Observation) -> list[Rule]:
         matched = []
+        now = time.monotonic()
         for rule in self.rules:
+            if self.cooldowns.get(rule.name, 0.0) > now:
+                continue
             try:
                 if rule.condition(observation):
                     matched.append(rule)
@@ -116,6 +125,10 @@ class RuleEngine:
             result = await rule.action(observation)
         except Exception as exc:  # noqa: BLE001 - the loop must survive any action
             result = f"动作失败：{type(exc).__name__}：{exc}"
+        # Stand the rule down so the rules behind it get a turn. A rule whose condition
+        # still holds comes back after the cooldown; one that made progress has usually
+        # cleared its own condition by then.
+        self.cooldowns[rule.name] = time.monotonic() + rule.cooldown
         decision = Decision(rule.name, result, names)
         self.record(observation, decision)
         return decision
