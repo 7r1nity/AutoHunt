@@ -82,6 +82,11 @@ class MockJobSiteSearchAdapter:
         await page.wait_for_timeout(200)
 
     async def search(self, page: Page, query: str, city: str | None, *, max_cards: int = 200) -> list[dict]:
+        # The site matches titles by literal substring; a compound label such as
+        # "AI/LLM 算法工程师" matches zero titles. Normalise at the last possible
+        # moment so every caller benefits.
+        from ..core.search_contract import browser_search_keyword
+        query = browser_search_keyword(query) or query
         await page.locator("#keyword").wait_for(state="visible", timeout=10_000)
         await page.locator("#keyword").fill(query)
         category_select = page.locator("#category")

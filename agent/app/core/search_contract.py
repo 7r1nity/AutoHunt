@@ -44,6 +44,32 @@ def missing_search_message(has_resume: bool) -> str:
     return f"{reason}，本会话也没有明确的搜索岗位，因此我还没有启动搜索。请先上传简历，或告诉我想找什么岗位；没有简历也可以按你指定的岗位搜索。"
 
 
+def browser_search_keyword(value: str) -> str:
+    """Reduce a role label to something the job site can actually match.
+
+    The mock site matches titles by literal substring, and its titles carry the
+    Chinese role word with at most a short taxonomy prefix. A résumé-derived label
+    such as "AI/LLM 算法工程师", "NLP 算法工程师" or "RAG 算法工程师" therefore matches
+    nothing even though hundreds of such jobs exist. Latin self-labels and seniority
+    words are dropped when a Chinese role word follows; a label that is only an
+    acronym is kept as-is, because dropping it would search for nothing.
+    """
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if not text:
+        return ""
+    stripped = re.sub(
+        r"^(?:(?:[A-Za-z][A-Za-z0-9+.#/-]*|[一二三四五六七八九十]?[高中初]级|资深|专家|高级|中级|初级)\s*)+",
+        "", text).strip()
+    if stripped and re.search(r"[\u4e00-\u9fff]", stripped) and len(stripped) >= 2:
+        return stripped
+    # A slash inside the role word itself ("数据分析/建模"): keep the first part.
+    if "/" in text:
+        head = text.split("/", 1)[0].strip()
+        if head:
+            return head
+    return text
+
+
 def simple_search_patch(message: str, cities: tuple[str, ...]) -> dict | None:
     """Fully consume a small editing grammar. Unconsumed text goes to the LLM."""
     text = message.strip().strip("。！!")
