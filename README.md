@@ -62,6 +62,7 @@ pnpm --dir frontend dev --hostname 127.0.0.1
 
 | 目录/文档 | 用途 |
 |---|---|
+| [Changelog](CHANGELOG.md) | 已交付变更、验证范围及尚未解决的问题 |
 | `frontend/` | 工作台与同源后端代理 |
 | `agent/app/core`、`intent`、`llm` | 编排、工具策略、路由、模型 |
 | `agent/app/memory`、`jobs` | 原件/证据/简历/偏好与职位统计 |
