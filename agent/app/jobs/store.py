@@ -995,6 +995,18 @@ class JobStore:
                     inserted.append(item["id"])
         return inserted
 
+    def delivery_runs_waiting_reply(self, *, limit: int = 50) -> list[dict]:
+        """Granted runs that still wait for the recruiter, oldest first.
+
+        Reply monitoring is a read-only periodic check, so it must be able to find
+        these without holding the single delivery worker.
+        """
+        with self.lock, self._connect() as db:
+            rows = db.execute(
+                "SELECT * FROM delivery_runs WHERE status IN ('waiting_for_reply','starting','running') "
+                "AND submitted=0 ORDER BY started_at LIMIT ?", (limit,)).fetchall()
+        return [dict(row) for row in rows]
+
     def mock_delivery_queue(self, *, session_id: str | None = None, active_only: bool = True) -> list[dict]:
         query = "SELECT * FROM mock_delivery_queue WHERE 1=1"
         values = []

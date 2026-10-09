@@ -72,6 +72,7 @@ class MockWorkflowCoordinator:
             settings = self.settings()
             for enabled, action in (
                 (bool(self.jobs.mock_delivery_queue()), self.process_delivery_queue),
+                (bool(self.jobs.delivery_runs_waiting_reply(limit=1)), self.check_reply_queue),
                 (settings["monitor_enabled"] and bool(settings["applicant_id"]), self.sync_once),
                 (settings["daily_enabled"], self.run_daily_if_due),
             ):
@@ -140,6 +141,39 @@ class MockWorkflowCoordinator:
                     if run.status == DeliveryTaskStatus.WAITING_FOR_REPLY and not run.submitted:
                         self.jobs.update_delivery_run(run.id, status=DeliveryTaskStatus.CANCELLED, detail="用户停止本会话自动投递，已发送沟通保留")
         return {"message": f"已停止本会话 {len(items)} 项自动投递；已经发送的消息和简历保留。"}
+
+    async def check_reply_queue(self) -> dict:
+        """Reply monitoring that does not hold the delivery worker.
+
+        Dispatch releases the worker as soon as the conversation is open, so the
+        rest of the batch proceeds while each opened job is checked here on a
+        timer. A job only consumes the worker again when there is something to do:
+        a verified reply whose send button is unlocked.
+        """
+        from ..delivery.automation import wait_expired
+        checked = submitted = 0
+        for run in self.jobs.delivery_runs_waiting_reply():
+            if (self.delivery.worker and not self.delivery.worker.done()):
+                break  # a dispatch or another reply check holds the slot
+            item = next((entry for entry in self.jobs.mock_delivery_queue()
+                         if entry["run_id"] == run["id"]), None)
+            if item is None:
+                continue
+            if wait_expired(run["started_at"], self.delivery.watch_limits.reply):
+                continue  # expiry is owned by the run's own watchdog
+            try:
+                view = await self.delivery.resume_authorized_run(run["id"], **item["binding"])
+                checked += 1
+                if view.submitted:
+                    submitted += 1
+                    self._finish_queue_item(item, "completed", "已核实简历投递完成")
+            except Exception as exc:  # noqa: BLE001 - one job must not stop the rest
+                self.jobs.record_mock_workflow_error(f"check_reply job={run['job_id']}: {type(exc).__name__}：{exc}")
+            # Wait for the one-shot check to finish before touching the next job.
+            worker = self.delivery.worker
+            if worker is not None:
+                await asyncio.gather(worker, return_exceptions=True)
+        return {"checked": checked, "submitted": submitted}
 
     async def process_delivery_queue(self) -> None:
         from ..growth.requests import resume_stamp

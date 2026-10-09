@@ -218,19 +218,25 @@ class DeliveryAutomationService:
             )
 
     async def _run_until_terminal(self, job_id: int) -> None:
-        while True:
-            batch = any(item["run_id"] == self.state.id for item in self.jobs.mock_delivery_queue())
-            await self._run_once_guarded(job_id, require_reply=batch)
-            if self.state.status != DeliveryTaskStatus.WAITING_FOR_REPLY or self.reply_poll_seconds is None:
-                return
-            try:
-                await asyncio.wait_for(self.monitor_wakeup.wait(), timeout=self.reply_poll_seconds)
-            except TimeoutError:
-                pass
-            self.monitor_wakeup.clear()
-            if self.state.status != DeliveryTaskStatus.WAITING_FOR_REPLY:
-                return
-            self._update(DeliveryTaskStatus.STARTING, "后台正在检查招聘方回复")
+        """Open the conversation, then hand the wait to the periodic reply check.
+
+        The single delivery worker must not be held for the whole reply window: one
+        job waiting on a recruiter blocked every later job for ~530s. Dispatch now
+        stops as soon as the run enters waiting_for_reply, and
+        MockWorkflowCoordinator.check_reply_queue resumes it when a reply lands.
+        """
+        batch = any(item["run_id"] == self.state.id for item in self.jobs.mock_delivery_queue())
+        await self._run_once_guarded(job_id, require_reply=batch)
+        if self.state.status != DeliveryTaskStatus.WAITING_FOR_REPLY:
+            return
+        # A batch item keeps its queue row so check_reply_queue can still find it.
+        if not batch:
+            self.jobs.update_delivery_run(
+                self.state.id,
+                detail="已发起沟通；后台按周期检查招聘方回复，收到回复后自动发送已授权简历",
+                mock_resume_id=self.state.mock_resume_id,
+                mock_applicant_id=self.state.mock_applicant_id,
+            )
 
     def expire_reply_wait(self, job_id: int) -> None:
         detail = "招聘方回复等待已过期，监测已停止；已确认的投递保留，未投递需重新核对授权"
