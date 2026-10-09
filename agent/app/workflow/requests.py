@@ -239,6 +239,49 @@ class Continuation:
     original: str = ""
 
 
+def stale_questions(questions: list[str], record: TaskRequest | None,
+                    conditions: dict | None = None, steps: list[dict] | None = None) -> list[str]:
+    """Drop stored questions whose condition the plan already satisfies.
+
+    A clarifying record is replayed verbatim on "继续", so a question produced by an
+    older or buggier rule keeps blocking the task even after the underlying gap is
+    filled — the reported case asked for a salary floor while the search step already
+    carried salary_min=15000. Only the questions this module can check are filtered;
+    anything else is still asked, because answering for the user would be worse.
+    """
+    facts: dict[str, bool] = {}
+    sources = [*(steps or []), {"arguments": getattr(record, "arguments", {}) if record else {}}]
+    for step in sources:
+        for key, value in (step.get("arguments") or {}).items():
+            if value is not None:
+                facts[key] = True
+    for key, value in (conditions or {}).items():
+        if value is not None:
+            facts[key] = True
+
+    def satisfied(value) -> bool:
+        # A list or a number counts; an empty list means "no restriction" and does
+        # not satisfy a question that asks for one.
+        return bool(value) if not isinstance(value, (int, float)) else True
+
+    checks = (
+        (r"最低月薪|月薪下限|薪资限制", "salary_min"),
+        (r"最低匹配分|匹配分", "min_score"),
+        (r"匹配分范围|分数范围", "max_score"),
+        (r"数量|份数|目标数量", "result_limit"),
+    )
+    output = []
+    for question in questions:
+        dropped = False
+        for pattern, key in checks:
+            if re.search(pattern, question) and satisfied(facts.get(key)):
+                dropped = True
+                break
+        if not dropped:
+            output.append(question)
+    return output
+
+
 def resolve_continuation(saved: dict, browser, stamp: str, *, now: float | None = None) -> Continuation:
     now = time.time() if now is None else now
     record = TaskRequest.model_validate(saved["task_request"]) if saved.get("task_request") else None
@@ -253,12 +296,26 @@ def resolve_continuation(saved: dict, browser, stamp: str, *, now: float | None 
     # definition and cannot replace the immutable root's goals/constraints.
     foreign_reference = bool(record and instruction.get("original") != record.original
                              and is_continuation(instruction.get("original", "")))
-    questions = [] if foreign_reference else instruction.get("questions", [])
+    questions = [] if foreign_reference else stale_questions(
+        instruction.get("questions", []), record,
+        (saved.get("task_request") or {}).get("conditions"), instruction.get("steps"))
     planner_omission = bool(questions) and all(re.fullmatch(
         r"请求中的搜索结果总结尚未被规划，未执行半条命令。"
         r"|完整请求中的 [a-z_]+ 尚未被规划，请确认是否保留此目标。", question) for question in questions)
-    if record and record.status == "clarifying" and not planner_omission and not foreign_reference:
-        return Continuation("clarify", "上文任务还有条件待确认，尚未执行。" + ("请补充：" + "；".join(questions) if questions else "请回答上一轮的追问。"))
+    # Only a question that still stands blocks the task. A "clarifying" record whose
+    # questions have all been satisfied is replanned, never replayed: the question may
+    # have come from an older rule, and re-asking it demands an answer the user's own
+    # plan already provides.
+    if questions and record and record.status == "clarifying" and not planner_omission and not foreign_reference:
+        return Continuation("clarify", "上文任务还有条件待确认，尚未执行。请补充：" + "；".join(questions))
+    # Every stored question was satisfied by the plan itself, so nothing is actually
+    # pending: replan the original instead of falling through to "nothing to continue".
+    if record and not questions and record.status == "clarifying" and not record.execution_started:
+        if record.resume_stamp and record.resume_stamp != stamp:
+            return Continuation("clarify", "原请求保留，但当前简历已变更。请确认是否按新简历重新执行原请求；尚未启动任何操作。")
+        if now - record.updated_at > 86400:
+            return Continuation("clarify", "原请求已经较久未处理，请重新确认完整条件；不会自动重放旧任务。")
+        return Continuation("replan", original=record.original)
     # An unresolved new request and an older live browser task are different referents.
     if record and (record.status in {"planning", "failed", "timed_out", "interrupted"}
                    or record.status == "clarifying" and (planner_omission or foreign_reference)) and not record.execution_started:
