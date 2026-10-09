@@ -68,6 +68,7 @@ pnpm --dir frontend dev --hostname 127.0.0.1
 | `scripts` | 启动、数据清理与静态构建检查入口 |
 | [架构与完整功能清单](docs/architecture.md) | 当前调用链、18 个 MCP 工具、存储和实现边界 |
 | [代码审查记录](docs/code-review.md) | 已修问题、剩余风险和冗余清理原则 |
+| [请求校验契约](docs/validation-contract.md) | 来源驱动规范化、内部规划修正、真实澄清与权限拦截边界 |
 | [TODO](docs/TODO.md) | P0/P1/P2 优先级及逐项验收条件 |
 | [测试评估与交付标准](docs/testing-and-delivery.md) | 历史验证记录与设计标准；测试源码现已移除 |
 | [浏览器测试说明](docs/browser-testing.md) | 历史隔离测试设计；测试入口现已移除 |

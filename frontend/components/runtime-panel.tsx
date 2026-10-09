@@ -18,8 +18,13 @@ function stepDescription(event: RunEvent): string {
     return `${event.kind === "tool_retry" ? data.tool : "模型请求"} · ${data.code} · 第 ${data.next_attempt}/3 次尝试，退避 ${data.delay_seconds} 秒（仅安全读取/推理）`;
   if (event.kind === "plan_repair" && data.repair_kind === "grounded_summary_read") return "补齐用户已要求的搜索结果总结：只读本次结果，不增加投递或写入动作";
   if (event.kind === "plan_scope_resolved") return `${data.tool} · 已根据相邻分支补齐省略的匹配分范围`;
+  if (event.kind === "plan_validation") {
+    const issues = data.issues as { code: string; detail: string }[] | undefined;
+    const decisions: Record<string, string> = { ready: "通过", clarifying: "需补充用户信息", clarify: "条件待澄清", repair: "内部规划待修正", block: "安全拦截", repair_exhausted: "内部修正未通过" };
+    return `契约校验 · ${decisions[String(data.decision)] ?? data.decision}${issues?.length ? ` · ${issues.map((issue) => `${issue.code}: ${issue.detail}`).join("；")}` : " · 目标、参数、授权与依赖已核对"}`;
+  }
   if (event.kind === "plan_repair")
-    return data.repair_kind === "draft_format" ? "规划格式无效，进行一次修复；尚未执行工具" : data.repair_kind === "transport_metadata" ? "移除格式元数据；仍校验目标、范围和授权" : `${data.tool} · 修复只读参数编码，不改变范围`;
+    return data.repair_kind === "draft_format" ? "规划格式无效，进行一次修复；尚未执行工具" : data.repair_kind === "semantic_contract" ? "内部修正规划遗漏、引用或依赖；不调用工具，不增加授权，仍受总规划超时限制" : data.repair_kind === "transport_metadata" ? "移除格式元数据；仍校验目标、范围和授权" : `${data.tool} · 规范参数编码或补齐只读步骤，不改变已授权范围`;
   if (event.kind === "request_resolution") return `上下文续接 · ${data.action}${data.detail ? ` · ${data.detail}` : ""}`;
   if (event.kind === "request_anchor") return `原请求定位 · ${data.status} · ${data.detail}`;
   if (event.kind === "turn_understanding") return `输入理解 · ${data.role} · ${data.new_task ? "新任务" : "不替换原任务"}`;

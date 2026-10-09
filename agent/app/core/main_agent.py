@@ -717,7 +717,9 @@ class AutoHuntAgent:
                 task_request.status = prior_root.get("status", "failed") if previous and prior_root else "failed"
                 task_request.failure = type(exc).__name__
                 dialogue_change("request_state", request=task_request.model_dump())
-            emit("plan_failed", code="planning_timeout" if isinstance(exc, TimeoutError) else "planning_rejected", detail=detail)
+            issue = getattr(exc, "issue", None)
+            emit("plan_failed", code="planning_timeout" if isinstance(exc, TimeoutError) else issue.code if issue else "planning_rejected",
+                 detail=detail, validation_issue=issue.public() if issue else None)
             return ChatResponse(message=detail, lane=AgentLane.APPLICATION)
         except Exception as exc:
             if self.router:

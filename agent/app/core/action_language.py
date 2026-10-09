@@ -4,6 +4,17 @@ from __future__ import annotations
 import re
 
 
+# Boundaries shared by coverage and authorization. Do not split arbitrary words
+# or strip negation: "不要生成计划" must remain an intact negative clause.
+ACTION_BOUNDARY = (r"[，,。；;！!\n]|然后|并且|同时|接着|但是|不过|而是"
+                   r"|并(?=生成|更新|修改|投递|查看|统计|分析|总结|优化|整理)"
+                   r"|\s+(?=(?:不要|先别|暂不|不用)(?:再|自动|直接)?(?:搜索|检索|投递|生成|更新|写入|提交|修改|删除))")
+
+
+def action_clauses(message: str) -> list[str]:
+    return [part.strip() for part in re.split(ACTION_BOUNDARY, message) if part.strip()]
+
+
 def positive_action(message: str) -> bool:
     text = re.sub(r"\s+", "", message)
     return not bool(re.search(r"不要|先别|暂不|不需要|不用|别(?:生成|制定|投递)|不能|如何|怎么|为什么|是否|能不能|可以吗|[？?]|[“”\"『』]", text))
