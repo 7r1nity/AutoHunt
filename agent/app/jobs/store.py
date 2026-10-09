@@ -911,7 +911,8 @@ class JobStore:
 
     def jobs_for_resume_analysis(self, resume_id: str, *, limit: int = 20,
                                  legacy_since: str | None = None, min_score: int | None = None,
-                                 max_score: int | None = None, task_id: str | None = None) -> list[dict[str, Any]]:
+                                 max_score: int | None = None, salary_min: int | None = None,
+                                 task_id: str | None = None) -> list[dict[str, Any]]:
         """Return saved JD evidence from terminal runs for one resume, not the global board."""
         with self.lock, self._connect() as db:
             task_ids = [row["id"] for row in db.execute(
@@ -946,7 +947,7 @@ class JobStore:
                     continue
                 if job_id > 0 and job_id not in ids:
                     ids.append(job_id)
-                if len(ids) >= limit and min_score is None and max_score is None:
+                if len(ids) >= limit and min_score is None and max_score is None and salary_min is None:
                     break
             if not ids:
                 return []
@@ -955,9 +956,12 @@ class JobStore:
                 "FROM jobs WHERE id IN (" + ",".join("?" for _ in ids) + ")", ids,
             ).fetchall()
         by_id = {int(row["id"]): dict(row) for row in rows}
+        from ..core.search_contract import monthly_salary_lower_bound
         return [by_id[job_id] for job_id in ids if job_id in by_id
                 and (min_score is None or by_id[job_id]["score"] >= min_score)
-                and (max_score is None or by_id[job_id]["score"] <= max_score)][:limit]
+                and (max_score is None or by_id[job_id]["score"] <= max_score)
+                and (salary_min is None or (monthly_salary_lower_bound(by_id[job_id]["salary"]) is not None
+                     and monthly_salary_lower_bound(by_id[job_id]["salary"]) >= salary_min))][:limit]
 
     def save_learning_plan(self, plan: dict[str, Any]) -> None:
         now = utc_now()

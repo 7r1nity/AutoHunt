@@ -118,7 +118,43 @@ def needs_search_reasoning(message: str) -> bool:
     ))
 
 
-def explicit_search_constraints(message: str, *, unresolved: list[str] | None = None) -> dict:
+def downstream_condition_scopes(message: str) -> list[tuple[int, int, str]]:
+    """Locate score-qualified downstream branches, not search-wide filters.
+
+    Offsets retain the original text for citation checks. This only separates
+    parameter ownership; it never grants authority to execute an action.
+    Ambiguous branches remain with the full-request planner.
+    """
+    starts = list(re.finditer(
+        r"(?<![\d.kK千万])(?:对于|针对|对)?\s*(?:匹配(?:度|分数|分)?|评分|分数)?\s*"
+        r"(?:(?:低于|小于|高于|大于|不低于|至少|[<>]=?|[≤≥])\s*\d{1,3}(?![\d.kK千万])"
+        r"|\d{1,3}(?![\d.kK千万])\s*(?:分)?\s*(?:及)?(?:以上|以下|之上|之下))", message))
+    scopes = []
+    for index, start in enumerate(starts):
+        end = starts[index + 1].start() if index + 1 < len(starts) else len(message)
+        # A subsequent new search is not part of the downstream branch.
+        tail = message[start.end():end]
+        boundary = re.search(r"[。；;]|(?:然后|接着|同时)\s*(?:帮我)?(?:搜索|检索|找)", tail)
+        if boundary:
+            end = start.end() + boundary.start()
+        quote = message[start.start():end]
+        learning = bool(re.search(r"(?:生成|制定|创建|规划|更新|补充).*(?:学习计划|成长计划|提升计划|行动方案|学习方案)", quote, re.S))
+        delivery = bool(re.search(r"投递|提交申请|(?:发送|提交)简历", quote))
+        if learning != delivery:
+            scopes.append((start.start(), end, "learning_plan_generate" if learning else "mock_delivery_start"))
+    return scopes
+
+
+def search_constraint_text(message: str) -> str:
+    """Exclude action-local conditions without truncating the user's request."""
+    chars = list(message)
+    for start, end, _ in downstream_condition_scopes(message):
+        chars[start:end] = " " * (end - start)
+    return "".join(chars)
+
+
+def explicit_search_constraints(message: str, *, unresolved: list[str] | None = None,
+                                include_action_scopes: bool = False) -> dict:
     """Protect explicit lower bounds/counts even if the model omits them.
 
     This function never rejects a request because it could not understand part of
@@ -127,6 +163,8 @@ def explicit_search_constraints(message: str, *, unresolved: list[str] | None = 
     planner, which can read the whole sentence. Only a genuine own-value conflict
     still raises, because that needs the user's clarification, not a guess.
     """
+    if not include_action_scopes:
+        message = search_constraint_text(message)
     fields = {}
     def put(key, value):
         if key in fields and fields[key] != value:
@@ -178,7 +216,7 @@ def explicit_search_constraints(message: str, *, unresolved: list[str] | None = 
 def monthly_salary_lower_bound(value: str) -> int | None:
     """Use the advertised monthly range's lower bound; never its upper bound."""
     text = re.sub(r"\s+", "", value).lower()
-    if re.search(r"面议|待定|年薪|/年|每年|/天|元/日|/小时|时薪", text):
+    if re.search(r"面议|待定|年薪|/年|每年|日薪|/天|/日|每天|每日|/小时|每小时|时薪", text):
         return None
     match = re.search(r"(\d+(?:\.\d+)?)([k千万]?)(?:[-~～—–至](\d+(?:\.\d+)?)([k千万]?))?", text)
     if not match:

@@ -116,7 +116,7 @@ class LearningPlanService:
         return self.jobs.learning_plans(resume_id) if resume_id else []
 
     async def generate(self, focus: str = "", *, min_score: int | None = None, max_score: int | None = None,
-                       task_id: str | None = None) -> dict:
+                       salary_min: int | None = None, task_id: str | None = None) -> dict:
         if isinstance(self.llm, LLMManager) and self.llm.settings_store.read()["provider"] == "mock":
             raise ValueError("详细跨行业学习计划需要真实模型；请先在模型设置中配置 DeepSeek")
         profile = self.candidates.read().profile
@@ -127,12 +127,12 @@ class LearningPlanService:
             legacy_start = self.original_resumes.get(profile.resume_id).uploaded_at
         jobs = self.jobs.jobs_for_resume_analysis(
             profile.resume_id, limit=20, legacy_since=legacy_start.isoformat() if legacy_start else None,
-            min_score=min_score, max_score=max_score, task_id=task_id,
+            min_score=min_score, max_score=max_score, salary_min=salary_min, task_id=task_id,
         )
         jobs = [job for job in jobs if len(str(job["description"] or "").strip()) >= 40]
         if not jobs:
-            if min_score is not None or max_score is not None:
-                raise ValueError("指定分数范围内没有当前简历的有效 JD；没有生成计划，也不会擅自扩大范围。请调整分数范围或先搜索职位")
+            if min_score is not None or max_score is not None or salary_min is not None:
+                raise ValueError("指定匹配分和薪资范围内没有当前简历的有效 JD；没有生成计划，也不会擅自扩大范围。请调整条件或先搜索职位")
             raise ValueError("当前简历尚无已完成搜索的有效 JD，请先搜索职位")
         document = self.resumes.read_document()
         resume_text = self.resumes.render_markdown(document)[:12000]
@@ -191,6 +191,7 @@ class LearningPlanService:
             "summary": redact_text(plan.summary),
             "jobs_analyzed": len(jobs),
             "score_scope": {"min_score": min_score, "max_score": max_score},
+            "salary_scope": {"salary_min": salary_min},
             "search_task_id": task_id,
             "job_sources": [
                 {"id": int(job["id"]), "title": str(job["title"])[:120],

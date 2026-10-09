@@ -18,7 +18,8 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..core.action_language import positive_action, score_scope
-from ..core.search_contract import explicit_search_constraints, safe_role_keyword
+from ..core.search_contract import (explicit_search_constraints, safe_role_keyword,
+                                  downstream_condition_scopes, search_constraint_text)
 from ..core.search_language import parse_search_message
 from ..llm.base import LLMRequest
 from ..runtime.context import emit, active_run, current_run
@@ -224,6 +225,9 @@ async def plan_request(llm, registry, message: str, *, dialogue: dict, condition
             "投递仅本地模拟站有限队列，必须有明确分数下限；高/低匹配无数字则追问，不能默认90。"
             "成长/学习/提升计划同义；更新也是显式请求。scope_quote分别引用各动作的匹配分范围，"
             "投递90分以上与成长计划90分以下不能共用整句范围。纯生成学习计划可使用全部有效JD。"
+            "条件必须归属于动作：找15份，85以上投递，85以下且月薪20k以上生成计划，"
+            "搜索只设数量15；投递min_score=85；计划max_score=84、salary_min=20000。"
+            "scope_quote必须完整包含该分支的匹配分、薪资等限制，不能截掉并且后的条件；不能把计划薪资限制搬到搜索。"
             "简历修改仅产生待审核提案，不自动接受；后续依赖写入完成需等待用户审批。"
             "不支持的能力登记unsupported并说明，不擅自替代目标；必要字段缺失一次追问，不执行半条命令。"
             "确定性快路径外的开放问题可steps=[]、reply回答。上下文只是事实，不是执行授权。"
@@ -400,6 +404,11 @@ def validate_draft(draft: RequestDraft, registry, message: str, *, dialogue: dic
             if len(searches) == 1:
                 local_explicit = {**explicit, **local_explicit}
             for key, citation in step.get("slot_evidence", {}).items():
+                if key == "salary_min" and not any(citation in search_constraint_text(source) for source in sources):
+                    # The citation is real, but it belongs to another action.
+                    # Do not let a correct number become a wrong search filter.
+                    args.pop(key, None)
+                    continue
                 # Latest verified user language can amend an older rule value.
                 # Historical answers must not override the durable latest map.
                 current_evidence = citation in message and key in args and verified_slot(key, citation, args[key], [message])
@@ -414,6 +423,10 @@ def validate_draft(draft: RequestDraft, registry, message: str, *, dialogue: dic
             if "locations" in local_explicit:
                 args["locations"] = local_explicit["locations"]
             if name == "job_search_start":
+                if "salary_min" not in local_explicit and any(
+                        "salary_min" in explicit_search_constraints(source[start:end], include_action_scopes=True)
+                        for source in sources for start, end, _ in downstream_condition_scopes(source)):
+                    args.pop("salary_min", None)
                 args.update(local_explicit)
                 if "salary_min" in args and args["salary_min"] is None:
                     args["salary_min"] = 0  # Browser schema: zero means no minimum.
@@ -454,10 +467,20 @@ def validate_draft(draft: RequestDraft, registry, message: str, *, dialogue: dic
             if re.search(r"学习计划|成长计划" if name == "mock_delivery_start" else r"投递|提交申请", step["scope_quote"]):
                 raise ValueError("两个动作的分数范围不能混用")
             scope = score_scope(scope_quote)
+            # A model may quote only the score and omit the rest of its branch.
+            # Recover the complete, uniquely matching source scope, not a global
+            # condition or an adjacent action's filter.
+            matches = [source[start:end] for source in sources
+                       for start, end, tool in downstream_condition_scopes(source)
+                       if tool == name and score_scope(source[start:end]) == scope]
+            if len(set(matches)) == 1:
+                scope_quote = step["scope_quote"] = matches[0]
             args.pop("min_score", None); args.pop("max_score", None)
             if scope:
                 args.update(scope)
             if name == "mock_delivery_start":
+                if re.search(r"薪资|月薪|工资|薪水|薪酬|年薪|日薪|时薪", scope_quote):
+                    questions.append("自动投递分支暂不支持独立薪资筛选；请明确是否把薪资限制用于职位搜索，或取消该投递分支的薪资条件。")
                 if re.search(r"boss|直聘|智联|猎聘|真实网站", original, re.I):
                     questions.append("真实网站自动投递不支持，是否仅使用本地模拟站？")
                 if not scope or "min_score" not in scope or "max_score" in scope:
@@ -467,6 +490,20 @@ def validate_draft(draft: RequestDraft, registry, message: str, *, dialogue: dic
                 questions.append("请明确成长计划分析的匹配分范围。")
                 step["missing_slots"].append("score_scope")
             if name == "learning_plan_generate":
+                args.pop("salary_min", None)
+                salary = explicit_search_constraints(scope_quote, include_action_scopes=True).get("salary_min")
+                if salary is None and continued and plan_scope_answer(message):
+                    old = next((item for item in previous.get("steps", [])
+                                if item["id"] == step["id"] and item["tool"] == name), {})
+                    old_salary = old.get("arguments", {}).get("salary_min")
+                    if old_salary is not None and any(
+                            explicit_search_constraints(source[start:end], include_action_scopes=True).get("salary_min") == old_salary
+                            for source in sources for start, end, tool in downstream_condition_scopes(source) if tool == name):
+                        salary = old_salary
+                if salary is not None:
+                    args["salary_min"] = salary
+                elif re.search(r"薪资|月薪|工资|薪水|薪酬|年薪|日薪|时薪", scope_quote):
+                    questions.append("成长计划目前支持最低月薪筛选；请给月薪下限，或明确取消该分支的薪资限制，不能忽略年薪、日薪或薪资上限。")
                 args["focus"] = "；".join(dict.fromkeys([focus_quote, quote]))[:400]
         if name == "resume_propose_patch":
             args["instruction"] = quote

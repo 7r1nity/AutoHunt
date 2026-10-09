@@ -348,7 +348,9 @@ class AgentToolRegistry:
                 "依据当前主简历搜索命中的真实 JD 生成可追溯的详细跨行业学习计划；仅用户明确要求时调用。",
                 obj({"focus": {"type": "string", "maxLength": 400},
                      "min_score": {"type": "integer", "minimum": 0, "maximum": 100},
-                     "max_score": {"type": "integer", "minimum": -1, "maximum": 100}}),
+                     "max_score": {"type": "integer", "minimum": -1, "maximum": 100},
+                     "salary_min": {"type": "integer", "minimum": 0, "maximum": 10000000,
+                                    "description": "仅分析月薪区间下限达到此值的JD，未知、面议、非月薪排除；不改变搜索条件"}}),
                 "write", self._learning_plan_generate,
             ))
         return specs
@@ -391,6 +393,13 @@ class AgentToolRegistry:
             focus = user_message if is_explicit_plan_request(user_message) else (
                 f"{request['message']}；范围更新：{user_message}" if request and scope is not None else user_message)
             arguments = {"focus": focus[:400], **(scope or {}), "_resume_stamp": stamp}
+            if is_explicit_plan_request(user_message):
+                arguments.update({key: value for key, value in explicit_search_constraints(
+                    user_message, include_action_scopes=True).items() if key == "salary_min"})
+            elif request and scope is not None:
+                # Score amendments replace the score range, not other filters.
+                if "salary_min" in request.get("scope", {}):
+                    arguments["salary_min"] = request["scope"]["salary_min"]
         if name == "job_search_start" and not planned:
             parsed = parse_search_message(user_message)
             if parsed.authorized:
@@ -628,7 +637,7 @@ class AgentToolRegistry:
     async def _learning_plan_generate(self, args: dict[str, Any]) -> Any:
         if self.learning_plans is None:
             raise ValueError("学习计划工具未启用")
-        scope = {key: args[key] for key in ("min_score", "max_score") if key in args}
+        scope = {key: args[key] for key in ("min_score", "max_score", "salary_min") if key in args}
         authority = active_run().action_authority if active_run() else None
         task_id = authority.get("evidence_task_id") if authority else None
         previous = (active_run().dialogue or {}).get("learning_request") if active_run() else None
@@ -647,7 +656,7 @@ class AgentToolRegistry:
                 user_message = active_run().user_message if active_run() else args.get("focus", "")
                 dialogue_change("learning_request", message=previous["message"] if previous and not is_explicit_plan_request(user_message) else user_message,
                     resume_stamp=resume_stamp(self.resume_workspace.read_document(), self.candidate_state), scope=scope, task_id=task_id)
-                raise MissingPlanScope("此分数范围内没有当前简历的有效 JD，没有生成计划。请调整范围，例如「那就90分以下的」；原生成请求保留，不需要重复说生成学习计划。")
+                raise MissingPlanScope("指定分数和薪资条件内没有当前简历的有效 JD，没有生成计划；不会擅自扩大范围。可调整分数范围，例如「那就90分以下的」；其他筛选条件和原生成请求保留。")
         dialogue_change("learning_consume")  # Consumed before the model call: failures never replay.
         result = await self.learning_plans.generate(str(args.get("focus") or "")[:400], task_id=task_id, **scope)
         if result.get("id"):
