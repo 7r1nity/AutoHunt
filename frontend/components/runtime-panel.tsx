@@ -16,6 +16,8 @@ function stepDescription(event: RunEvent): string {
   const data = event.data;
   if (event.kind === "tool_retry" || event.kind === "model_retry")
     return `${event.kind === "tool_retry" ? data.tool : "模型请求"} · ${data.code} · 第 ${data.next_attempt}/3 次尝试，退避 ${data.delay_seconds} 秒（仅安全读取/推理）`;
+  if (event.kind === "plan_repair" && data.repair_kind === "grounded_summary_read") return "补齐用户已要求的搜索结果总结：只读本次结果，不增加投递或写入动作";
+  if (event.kind === "plan_scope_resolved") return `${data.tool} · 已根据相邻分支补齐省略的匹配分范围`;
   if (event.kind === "plan_repair")
     return data.repair_kind === "draft_format" ? "规划格式无效，进行一次修复；尚未执行工具" : data.repair_kind === "transport_metadata" ? "移除格式元数据；仍校验目标、范围和授权" : `${data.tool} · 修复只读参数编码，不改变范围`;
   if (event.kind === "request_resolution") return `上下文续接 · ${data.action}${data.detail ? ` · ${data.detail}` : ""}`;

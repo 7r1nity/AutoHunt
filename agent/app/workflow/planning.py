@@ -17,7 +17,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ..core.action_language import positive_action, score_scope
+from ..core.action_language import positive_action, score_scope, score_scope_in_source
 from ..core.search_contract import (explicit_search_constraints, safe_role_keyword,
                                   downstream_condition_scopes, search_constraint_text)
 from ..core.search_language import parse_search_message
@@ -228,6 +228,9 @@ async def plan_request(llm, registry, message: str, *, dialogue: dict, condition
             "条件必须归属于动作：找15份，85以上投递，85以下且月薪20k以上生成计划，"
             "搜索只设数量15；投递min_score=85；计划max_score=84、salary_min=20000。"
             "scope_quote必须完整包含该分支的匹配分、薪资等限制，不能截掉并且后的条件；不能把计划薪资限制搬到搜索。"
+            "同句85分以上投递、以下的分析不足：以下指低于85分，计划max_score=84。"
+            "分析不足生成总结并更新成长计划可由learning_plan_generate完成，不能误加搜索结果总结；"
+            "只有用户要求总结搜索结果/岗位薪资JD，或独立的搜索总结，才使用job_results_read(summary=true)。"
             "简历修改仅产生待审核提案，不自动接受；后续依赖写入完成需等待用户审批。"
             "不支持的能力登记unsupported并说明，不擅自替代目标；必要字段缺失一次追问，不执行半条命令。"
             "确定性快路径外的开放问题可steps=[]、reply回答。上下文只是事实，不是执行授权。"
@@ -308,6 +311,28 @@ def validate_draft(draft: RequestDraft, registry, message: str, *, dialogue: dic
     if not set(ids) <= covered:
         raise ValueError("规划包含用户目标之外的额外步骤")
     questions = list(draft.questions)
+    # Complete a proven read-only summary request when the model omits its read.
+    # Never manufacture an external/write step or ask the user to re-authorize
+    # the same clear request merely because our planner left it out.
+    from ..core.request_summary import requested_search_summary
+    summary_quote = next((quote for source in sources
+                          if (quote := requested_search_summary(source))), None)
+    planned_searches = [step for step in steps if step["tool"] == "job_search_start"]
+    result_reads = [step for step in steps if step["tool"] == "job_results_read"]
+    if summary_quote and len(planned_searches) == 1 and "job_results_read" in tools:
+        if not result_reads and not draft.questions:
+            summary_id = "search_summary"
+            while summary_id in ids:
+                summary_id += "_read"
+            read = PlannedStep(id=summary_id, tool="job_results_read",
+                arguments={"summary": True}, command_quote=summary_quote,
+                depends_on=[planned_searches[0]["id"]]).model_dump()
+            steps.append(read); ids.append(summary_id)
+            goals.append({"quote": summary_quote, "disposition": "steps", "step_ids": [summary_id]})
+            emit("plan_repair", tool="job_results_read", repair_kind="grounded_summary_read", attempt=1)
+        else:
+            for read in result_reads:
+                read["arguments"]["summary"] = True
     # Unsupported filters are capability gaps, not an excuse to silently drop them.
     from ..core.search_contract import employment_requirement
     from .requests import employment_dropped
@@ -466,18 +491,22 @@ def validate_draft(draft: RequestDraft, registry, message: str, *, dialogue: dic
                     scope_quote = step["scope_quote"] = message
             if re.search(r"学习计划|成长计划" if name == "mock_delivery_start" else r"投递|提交申请", step["scope_quote"]):
                 raise ValueError("两个动作的分数范围不能混用")
-            scope = score_scope(scope_quote)
+            scope = score_scope_in_source(scope_quote, sources)
             # A model may quote only the score and omit the rest of its branch.
             # Recover the complete, uniquely matching source scope, not a global
             # condition or an adjacent action's filter.
             matches = [source[start:end] for source in sources
                        for start, end, tool in downstream_condition_scopes(source)
-                       if tool == name and score_scope(source[start:end]) == scope]
+                       if tool == name and score_scope_in_source(source[start:end], [source]) == scope]
             if len(set(matches)) == 1:
                 scope_quote = step["scope_quote"] = matches[0]
             args.pop("min_score", None); args.pop("max_score", None)
             if scope:
                 args.update(scope)
+                if score_scope(scope_quote) is None:
+                    emit("plan_scope_resolved", tool=name, scope=scope, reason="adjacent_score_ellipsis")
+            elif re.match(r"\s*(?:以下|以上)(?:的|那些|这些|岗位|职位)", scope_quote):
+                questions.append("此匹配分范围的省略指代没有唯一依据，请明确分数；不会按全部职位分析。")
             if name == "mock_delivery_start":
                 if re.search(r"薪资|月薪|工资|薪水|薪酬|年薪|日薪|时薪", scope_quote):
                     questions.append("自动投递分支暂不支持独立薪资筛选；请明确是否把薪资限制用于职位搜索，或取消该投递分支的薪资条件。")
@@ -569,7 +598,7 @@ def validate_draft(draft: RequestDraft, registry, message: str, *, dialogue: dic
             for name in ("job_search_start", "learning_plan_generate", "mock_delivery_start", "resume_propose_patch", "preference_update", "job_review_selection"):
                 if name in tools and name not in planned_tools and name not in revoked_tools and command_grounded(name, clause.strip(), [source]):
                     questions.append(f"完整请求中的 {name} 尚未被规划，请确认是否保留此目标。")
-        if re.search(r"(?:并|然后|并且|同时).*(?:总结|汇总)", source) and searches and "job_results_read" not in planned_tools:
+        if requested_search_summary(source) and searches and "job_results_read" not in planned_tools:
             questions.append("请求中的搜索结果总结尚未被规划，未执行半条命令。")
     from ..runtime.search_state import SearchPatch
     try:

@@ -46,6 +46,36 @@ def score_scope(message: str) -> dict | None:
     return result or None
 
 
+def score_scope_in_source(quote: str, sources: list[str]) -> dict | None:
+    """Resolve a local range or a uniquely grounded adjacent score ellipsis.
+
+    Model-supplied numbers and historical preferences are never antecedents.
+    Only the immediately preceding branch in the same valid source can supply
+    the omitted threshold; competing antecedents require clarification.
+    """
+    direct = score_scope(quote)
+    if direct is not None:
+        return direct
+    if not re.match(r"\s*(?:以下|以上)(?:的|那些|这些|岗位|职位)", quote):
+        return None
+    from .search_contract import downstream_condition_scopes
+    candidates = []
+    for source in sources:
+        branches = downstream_condition_scopes(source)
+        for index, (start, end, _) in enumerate(branches):
+            if index == 0 or quote.strip() not in source[start:end]:
+                continue
+            prior_start, prior_end, _ = branches[index - 1]
+            prior = score_scope(source[prior_start:prior_end])
+            if prior and set(prior) == {"min_score"} and quote.lstrip().startswith("以下"):
+                candidates.append({"max_score": prior["min_score"] - 1})
+            elif prior and set(prior) == {"max_score"} and quote.lstrip().startswith("以上"):
+                candidates.append({"min_score": prior["max_score"] + 1})
+    if candidates and all(candidate == candidates[0] for candidate in candidates):
+        return candidates[0]
+    return None
+
+
 def explicit_mock_delivery(message: str) -> dict | None:
     if not positive_action(message) or not re.search(r"(?:自动|批量)投递|自动(?:发送|提交)简历", message):
         return None

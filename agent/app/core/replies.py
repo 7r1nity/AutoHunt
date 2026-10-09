@@ -94,6 +94,10 @@ def tool_reply(tool: str, status: str, result) -> str:
             + (f"；最低月薪 {args['salary_min']:,} 元" if args.get("salary_min") is not None else "")
             + "。登录或验证码需人工接管；搜索尚未完成。")
     if tool == "job_results_read":
+        if isinstance(data.get("search_report"), dict) and isinstance(data.get("search_task"), dict):
+            from .models import BrowserTaskView
+            from ..jobs.search_reporting import render_search_report
+            return render_search_report(BrowserTaskView.model_validate(data["search_task"]), data["search_report"])
         jobs = data.get("jobs") or []
         return "职位简表（序号以此为准）：\n\n" + ("\n".join(
             f"{index}. {job.get('role', job.get('title', ''))} · {job.get('company', '')} · {job.get('location', '')} · {job.get('salary', '未注明')} · 匹配 {job.get('score', '未评分')}"

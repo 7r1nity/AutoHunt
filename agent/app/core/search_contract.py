@@ -125,10 +125,17 @@ def downstream_condition_scopes(message: str) -> list[tuple[int, int, str]]:
     parameter ownership; it never grants authority to execute an action.
     Ambiguous branches remain with the full-request planner.
     """
-    starts = list(re.finditer(
+    explicit_starts = list(re.finditer(
         r"(?<![\d.kK千万])(?:对于|针对|对)?\s*(?:匹配(?:度|分数|分)?|评分|分数)?\s*"
         r"(?:(?:低于|小于|高于|大于|不低于|至少|[<>]=?|[≤≥])\s*\d{1,3}(?![\d.kK千万])"
         r"|\d{1,3}(?![\d.kK千万])\s*(?:分)?\s*(?:及)?(?:以上|以下|之上|之下))", message))
+    # A following "以下的" can refer to the preceding score threshold. Do not
+    # split numeric scores (85分以下) or currency (25k以上) a second time.
+    elliptical_starts = [match for match in re.finditer(
+        r"(?<![\d分.kK千万元年月日天时])(?:以下|以上)(?:的|那些|这些|岗位|职位)", message)
+        if not any(start.start() <= match.start() < start.end() for start in explicit_starts)
+        and not re.search(rf"{NUMBER}\s*(?:[kK千万]|元)(?:/月|/年|/天)?\s*$", message[:match.start()])]
+    starts = sorted([*explicit_starts, *elliptical_starts], key=lambda match: match.start())
     scopes = []
     for index, start in enumerate(starts):
         end = starts[index + 1].start() if index + 1 < len(starts) else len(message)

@@ -32,6 +32,42 @@ def is_search_summary(message: str) -> bool:
                 or re.search(r"(?:搜索|检索|职位|岗位).*(?:总结|汇总|报告)|(?:总结|汇总|报告).*(?:搜索|检索|职位|岗位)", text))
 
 
+def requested_search_summary(message: str) -> str | None:
+    """Ground the summary's object; a gap/resume summary is not a results read."""
+    from .action_language import positive_action
+    from .search_contract import downstream_condition_scopes
+    learning_spans = [(start, end) for start, end, tool in downstream_condition_scopes(message)
+                      if tool == "learning_plan_generate"]
+    for match in re.finditer(r"总结|汇总|报告", message):
+        before = message[:match.start()]
+        prefix = re.split(r"[，,。；;\n]|然后|并且|同时|接着", before)[-1]
+        suffix = re.split(r"[，,。；;\n]|然后|并且|同时|接着", message[match.end():])[0]
+        clause = prefix + match.group() + suffix
+        if not positive_action(clause) or re.search(r"如果|假如|假设|举例|例如|我说过|上次说|[‘’`『』]", clause):
+            continue
+        # Explicit results objects still apply, even alongside a learning goal.
+        explicit_search = bool(re.search(
+            r"(?:总结|汇总)(?:一下)?(?:本次|这次|本轮|全部|所有)?(?:的)?(?:搜索结果|检索结果)"
+            r"|(?:搜索|检索)(?:结果|完成(?:之后|后)?)(?:的)?(?:总结|汇总|报告)", clause))
+        if not explicit_search and (any(start <= match.start() < end for start, end in learning_spans)
+                                    or re.search(r"劣势|不足|差距|学习|成长", clause)):
+            continue
+        explicit = bool(re.search(
+            r"(?:总结|汇总)(?:一下)?(?:本次|这次|本轮|全部|所有|这些|找到的|搜索到的)?(?:的)?"
+            r"(?:搜索结果|检索结果|职位信息|岗位信息|职位结果|岗位结果|职位列表|岗位列表)"
+            r"|(?:搜索|检索)(?:结果|完成(?:之后|后)?)(?:的)?(?:总结|汇总|报告)"
+            r"|(?:职位|岗位)(?:的)?(?:总结|汇总|报告)", clause))
+        if explicit:
+            return clause.strip()
+        if any(start <= match.start() < end for start, end in learning_spans):
+            continue
+        if re.search(r"劣势|不足|差距|简历|学习|成长|项目|经历|材料", clause):
+            continue
+        if re.search(r"生成|提供|给我|输出|总结|汇总", clause):
+            return clause.strip()
+    return None
+
+
 def search_summary(conditions: dict) -> str:
     queries = conditions.get("queries") or []
     locations = conditions.get("locations") or []

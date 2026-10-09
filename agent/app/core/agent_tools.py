@@ -240,6 +240,7 @@ class AgentToolRegistry:
                 "job_results_read",
                 "读取已经保存的职位搜索结果。用户说“职位搜索结果、找到哪些岗位、查看结果”时使用；绝不能用它启动浏览器。",
                 obj({
+                    "summary": {"type": "boolean", "description": "返回本次搜索全部结果的薪资、JD、福利和职位简表；仅普通列表受limit限制"},
                     "limit": {"type": "integer", "minimum": 1, "maximum": 30, "default": 10},
                     "stage": {"type": "string", "enum": ["review", "applying", "waiting", "interview", "outcome_indeterminate", "rejected"]},
                 }),
@@ -515,11 +516,16 @@ class AgentToolRegistry:
         context = active_run()
         task_id = (context.action_authority or {}).get("evidence_task_id") if context else None
         if task_id:
-            items = self.jobs.search_report(task_id).get("jobs", [])
-            items = [item for item in items if not args.get("stage") or item["stage"] == args["stage"]][:int(args.get("limit", 30))]
+            report = self.jobs.search_report(task_id)
+            items = report.get("jobs", [])
+            if not args.get("summary"):
+                items = [item for item in items if not args.get("stage") or item["stage"] == args["stage"]][:int(args.get("limit", 30))]
             snapshot = dialogue_change("snapshot", topic="applications", kind="job", version=task_id, displayed=False,
                 items=[{key: item[key] for key in ("id", "title", "company", "stage", "content_hash")} for item in items]) if items else None
-            return {"snapshot_id": snapshot["snapshots"][-1]["id"] if snapshot else None, "count": len(items), "jobs": items}
+            result = {"snapshot_id": snapshot["snapshots"][-1]["id"] if snapshot else None, "count": len(items), "jobs": items}
+            if args.get("summary"):
+                result.update(search_report=report, search_task=self.jobs.get_task(task_id).model_dump(mode="json"))
+            return result
         jobs = self.jobs.list_jobs(stage=args.get("stage"), limit=int(args.get("limit", 10)))
         snapshot = dialogue_change("snapshot", topic="applications", kind="job", displayed=False,
             items=[{"id": item.id, "title": item.role, "company": item.company, "stage": item.stage,

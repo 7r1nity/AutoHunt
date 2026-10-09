@@ -236,11 +236,15 @@ def resolve_continuation(saved: dict, browser, stamp: str, *, now: float | None 
     live = bool(owned and not browser_search_available(browser))
     if record and record.status in {"finished", "completed", "cancelled", "outcome_indeterminate"}:
         return Continuation("clarify", "所指原任务已经结束、取消或结果待核验；不会恢复另一个任务或重放历史操作。请明确新的请求，或先核对执行记录。")
-    if record and record.status == "clarifying":
-        questions = (saved.get("instruction_request") or {}).get("questions", [])
+    questions = (saved.get("instruction_request") or {}).get("questions", [])
+    planner_omission = bool(questions) and all(re.fullmatch(
+        r"请求中的搜索结果总结尚未被规划，未执行半条命令。"
+        r"|完整请求中的 [a-z_]+ 尚未被规划，请确认是否保留此目标。", question) for question in questions)
+    if record and record.status == "clarifying" and not planner_omission:
         return Continuation("clarify", "上文任务还有条件待确认，尚未执行。" + ("请补充：" + "；".join(questions) if questions else "请回答上一轮的追问。"))
     # An unresolved new request and an older live browser task are different referents.
-    if record and record.status in {"planning", "failed", "timed_out", "interrupted"} and not record.execution_started:
+    if record and (record.status in {"planning", "failed", "timed_out", "interrupted"}
+                   or record.status == "clarifying" and planner_omission) and not record.execution_started:
         if live:
             return Continuation("clarify", "上文请求尚未执行，但本会话还有浏览器任务在运行。请明确继续原请求还是处理浏览器任务。")
         if record.resume_stamp and record.resume_stamp != stamp:
