@@ -82,7 +82,9 @@ async def advance(plan: dict, registry) -> list[dict]:
             previous_message, previous_authority = context.user_message, context.action_authority
             context.user_message, context.action_authority = step["command_quote"], authority
             try:
-                timeout = 100 if step["tool"] == "learning_plan_generate" else 20
+                # A plan over 20 JDs needs the full analysis budget; a 100s cap cut
+                # it off mid-write and reported "结果未确认" instead of a plan.
+                timeout = 180 if step["tool"] == "learning_plan_generate" else 20
                 async with asyncio.timeout(timeout):
                     outcome = await registry.execute(step["tool"], step["arguments"],
                         user_message=step["command_quote"], state=ToolLoopState())

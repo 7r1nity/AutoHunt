@@ -161,7 +161,12 @@ class LearningPlanService:
                 f"<untrusted_jds>{json.dumps(source, ensure_ascii=False)}</untrusted_jds>"
             ),
             context="一次显式生成计划；只允许使用附带的当前主简历和 JD 数据。",
-        )), timeout=90)
+            # Detailed analysis of up to 20 JDs with thinking enabled repeatedly hit
+            # the previous 90s budget, and the step wrapper's 100s cap then reported
+            # an uncertain outcome: the user saw no plan at all. Run this extraction
+            # without the slow reasoning mode and give it the whole step budget.
+            fast=True,
+        )), timeout=150)
         plan = GeneratedPlan.model_validate(_json_object(result.text))
         by_id = {int(job["id"]): job for job in jobs}
         valid_gaps: list[dict] = []
