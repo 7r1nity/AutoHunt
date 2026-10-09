@@ -110,3 +110,4 @@ run_store = RunStore(settings.data_root / "runtime.db")
 agent_runtime = AgentRuntime(run_store, agent, job_store, browser_service, learning_plans, resume_workspace_store)
 agent_runtime.delivery = delivery_service
 mock_workflow.on_delivery_started = agent_runtime.track_delivery
+mock_workflow.delivery_owner = agent_runtime.delivery_owner

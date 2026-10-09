@@ -27,7 +27,7 @@ def build_rules(coordinator) -> list[Rule]:
         return "已处理一个等待招聘方回复的投递：检查回复后按需发送已授权简历"
 
     def has_authorised_waiting(observation: Observation) -> bool:
-        return bool(observation.get("reply_candidates"))
+        return bool(observation.get("reply_candidates")) and bool(observation.get("browser_idle", True))
 
     # ------------------------------------------------- recovery of failed starts
     async def recover_stalled_start(observation: Observation) -> str:
@@ -38,7 +38,7 @@ def build_rules(coordinator) -> list[Rule]:
     def has_stalled_replied_start(observation: Observation) -> bool:
         # A start that failed before the click, with the recruiter already asking for
         # the resume. Nothing was sent, so retrying cannot duplicate a submission.
-        return bool(observation.get("stalled_replied_runs"))
+        return bool(observation.get("stalled_replied_runs")) and bool(observation.get("browser_idle", True))
 
     # ------------------------------------------------------------ queue dispatch
     async def dispatch_queue(observation: Observation) -> str:
@@ -46,7 +46,7 @@ def build_rules(coordinator) -> list[Rule]:
         return "已派发一个已授权的投递队列任务"
 
     def queue_has_work(observation: Observation) -> bool:
-        return bool(observation.get("queue_depth")) and bool(observation.get("delivery_idle"))
+        return bool(observation.get("queue_depth")) and bool(observation.get("delivery_idle")) and bool(observation.get("browser_idle", True))
 
     # ------------------------------------------------------------------ site sync
     async def sync_site(observation: Observation) -> str:

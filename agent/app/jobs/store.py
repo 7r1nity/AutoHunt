@@ -1074,7 +1074,7 @@ class JobStore:
         """
         with self.lock, self._connect() as db:
             rows = db.execute(
-                "SELECT * FROM delivery_runs WHERE status IN ('waiting_for_reply','starting','running') "
+                "SELECT * FROM delivery_runs WHERE status='waiting_for_reply' "
                 "AND submitted=0 ORDER BY started_at LIMIT ?", (limit,)).fetchall()
         return [dict(row) for row in rows]
 

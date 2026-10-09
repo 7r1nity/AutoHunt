@@ -144,51 +144,6 @@ class MockJobSiteAdapter:
         )
 
     @staticmethod
-    async def _ensure_demo_resume(page: Page) -> None:
-        """Guarantee a sendable resume on the site, as the page itself would.
-
-        The mock site gates sending on having a resume and creates a demo one on
-        demand when a human clicks 发送简历. Automation never clicks that button
-        until the gate is open, so without this the send button stays disabled and
-        every delivery fails with "当前账号没有可用简历或发送按钮不可用".
-        Only ever adds a resume when the account has none, and then asks the page to
-        re-read its own list so the gate it renders matches the new state.
-        """
-        try:
-            existing = await page.evaluate(
-                """async () => {
-                  const id = localStorage.getItem('userId') || '';
-                  if (!id) return null;
-                  const response = await fetch('/api/resumes/mine', { headers: { 'X-User-Id': id, 'X-User-Role': 'applicant' } });
-                  if (!response.ok) return null;
-                  return await response.json();
-                }"""
-            )
-            if not isinstance(existing, list) or existing:
-                return
-            created = await page.evaluate(
-                """async () => {
-                  const id = localStorage.getItem('userId') || '';
-                  const response = await fetch('/api/resumes', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json', 'X-User-Id': id, 'X-User-Role': 'applicant' },
-                    body: JSON.stringify({
-                      name: '演示简历（自动生成）', education: '本科', experience_years: 3,
-                      summary: '本地模拟站演示用简历：用于验证招聘方回复后发送简历的流程，不代表真实候选人资料。',
-                      skills: ['沟通', '客户开发', '数据分析'], work_history: []
-                    })
-                  });
-                  return response.ok;
-                }"""
-            )
-            if created:
-                # The button is rendered by the page's own state, not by the server.
-                await page.evaluate("""() => { if (typeof loadResumes === 'function') return loadResumes(); }""")
-                await page.wait_for_timeout(500)
-        except Exception:  # noqa: BLE001 - never break a run over resume provisioning
-            return
-
-    @staticmethod
     async def _chat_open(page: Page) -> bool:
         try:
             return bool(await page.evaluate(
@@ -237,10 +192,8 @@ class MockJobSiteAdapter:
         if observation.direct_apply:
             if not await self._chat_open(page):
                 await page.locator("#job-hero").get_by_role("button", name="投递后沟通", exact=True).click(timeout=5_000)
-            await self._ensure_demo_resume(page)
             return await self.inspect(page)
         await self._open_communication(page)
-        await self._ensure_demo_resume(page)
         return await self.inspect(page)
 
     async def bind_resume(self, page: Page, payload: dict, *, applicant_id: int | None = None,

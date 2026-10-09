@@ -27,9 +27,15 @@ def safe_json(value) -> str:
         if isinstance(item, dict):
             return {name: sanitize(content, name) for name, content in item.items()}
         if isinstance(item, list):
-            return [sanitize(content) for content in item]
+            return [sanitize(content, key) for content in item]
         if isinstance(item, str):
-            if key in {"id", "run_id", "browser_id", "delivery_id", "tool_call_id", "proposal_id", "plan_id", "resume_stamp", "action_id", "snapshot_id", "source"} and re.fullmatch(r"[A-Za-z0-9_:-]{1,128}", item):
+            # These typed references are not free-form candidate text. Phone-like
+            # digit runs inside UUIDs/hashes must never corrupt a durable checkpoint.
+            if key in {"id", "run_id", "browser_id", "delivery_id", "task_id", "evidence_task_id",
+                       "tool_call_id", "proposal_id", "plan_id", "resume_stamp", "action_id", "snapshot_id",
+                       "session_id", "conversation_id", "parent_id", "request_id", "operation_id",
+                       "operation_ids", "selected_operation_ids", "evidence_ids", "entity_ids",
+                       "content_hash", "resume_digest", "request_hash", "source"} and re.fullmatch(r"[A-Za-z0-9_:-]{1,128}", item):
                 return item
             return redact_text(item)
         return item

@@ -54,6 +54,7 @@ class MockWorkflowCoordinator:
         self.queue_lock = asyncio.Lock()
         self.wakeup = asyncio.Event()
         self.on_delivery_started = None
+        self.delivery_owner = None
         self.stopping_sessions: set[str] = set()
         self.operations: dict[asyncio.Task, str] = {}
         self.operation_jobs: dict[asyncio.Task, int | None] = {}
@@ -99,7 +100,8 @@ class MockWorkflowCoordinator:
             except Exception as exc:
                 self.jobs.record_mock_workflow_error(f"{type(exc).__name__}: {exc}")
             try:
-                await asyncio.wait_for(self.wakeup.wait(), timeout=2 if self.jobs.mock_delivery_queue() else self.poll_seconds)
+                pending = self.jobs.mock_delivery_queue() or self.jobs.delivery_runs_waiting_reply()
+                await asyncio.wait_for(self.wakeup.wait(), timeout=2 if pending else self.poll_seconds)
             except TimeoutError:
                 pass
             self.wakeup.clear()
@@ -111,6 +113,7 @@ class MockWorkflowCoordinator:
         observation = await collect(self.jobs, settings)
         facts = dict(observation.facts)
         facts["delivery_idle"] = not (self.delivery.worker and not self.delivery.worker.done())
+        facts["browser_idle"] = not (self.browser.worker and not self.browser.worker.done())
         return type(observation)(at=observation.at, facts=facts)
 
     async def queue_deliveries(self, *, min_score: int, session_id: str, task_id: str | None = None) -> dict:
@@ -204,7 +207,8 @@ class MockWorkflowCoordinator:
         """
         recovered, skipped = 0, 0
         for run in self.jobs.delivery_runs_failed_before_submit():
-            if self.delivery.worker and not self.delivery.worker.done():
+            if ((self.delivery.worker and not self.delivery.worker.done())
+                    or (self.browser.worker and not self.browser.worker.done())):
                 break
             if int(run.get("attempts") or 0) >= self.delivery.retry_limit:
                 skipped += 1
@@ -253,23 +257,35 @@ class MockWorkflowCoordinator:
         from ..delivery.automation import wait_expired
         checked = submitted = 0
         for run in self.jobs.delivery_runs_waiting_reply():
-            if (self.delivery.worker and not self.delivery.worker.done()):
+            if ((self.delivery.worker and not self.delivery.worker.done())
+                    or (self.browser.worker and not self.browser.worker.done())):
                 break  # a dispatch or another reply check holds the slot
-            item = next((entry for entry in self.jobs.mock_delivery_queue()
+            item = next((entry for entry in self.jobs.mock_delivery_queue(active_only=False)
                          if entry["run_id"] == run["id"]), None)
-            if item is None:
+            if item is not None and item["status"] not in {"queued", "dispatched"}:
+                continue
+            # Single-job UI authorizations also release the browser while waiting.
+            # A site greeting alone is NOT authority: require an active tracked run
+            # plus the original preview/resume binding; never create a new preview.
+            owner = item["session_id"] if item else self.delivery_owner(run["id"]) if self.delivery_owner else None
+            binding = item["binding"] if item else {key: run.get(key) for key in
+                ("resume_document_id", "resume_version", "resume_digest")}
+            if (not owner or not run.get("preview_id") or run.get("action") != "submit_resume"
+                    or any(value is None for value in binding.values())):
                 continue
             if wait_expired(run["started_at"], self.delivery.watch_limits.reply):
                 continue  # expiry is owned by the run's own watchdog
             try:
-                view = await self._operation(item["session_id"],
-                    lambda: self.delivery.resume_authorized_run(run["id"], **item["binding"]), job_id=item["job_id"])
+                view = await self._operation(owner,
+                    lambda: self.delivery.resume_authorized_run(run["id"], **binding),
+                    job_id=run["job_id"], queued=item is not None)
                 if view is None:
                     continue
                 checked += 1
                 if view.submitted:
                     submitted += 1
-                    self._finish_queue_item(item, "completed", "已核实简历投递完成")
+                    if item:
+                        self._finish_queue_item(item, "completed", "已核实简历投递完成")
             except Exception as exc:  # noqa: BLE001 - one job must not stop the rest
                 self.jobs.record_mock_workflow_error(f"check_reply job={run['job_id']}: {type(exc).__name__}：{exc}")
             # Wait for the one-shot check to finish before touching the next job.

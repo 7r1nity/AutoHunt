@@ -33,6 +33,7 @@ class AgentRuntime:
     async def start(self):
         self.sessions.clear()
         self.slots = asyncio.Semaphore(2)
+        self.recover_search_summaries()
         # Re-enqueue only requests which never began. Side effects are not replayed.
         for run in reversed(self.store.list(active=True)):
             if run["cancel_requested"]:
@@ -115,6 +116,13 @@ class AgentRuntime:
             self.store.mutate_dialogue(session_id, {"op": "task", "source": run["id"], "kind": "browser_id", "id": task_id, "status": "running", "bind": True})
             self.schedule(run["id"], watch_only=True)
         return self.store.get(run["id"])
+
+    def delivery_owner(self, task_id: str) -> str | None:
+        """An active tracked authorization, not a manually opened site conversation."""
+        owners = {run["session_id"] for run in self.store.list(active=True)
+                  if run["kind"] == "delivery" and not run["cancel_requested"]
+                  and (run["checkpoint"] or {}).get("delivery_id") == task_id}
+        return next(iter(owners)) if len(owners) == 1 else None
 
     def finish(self, run_id: str, status: str, detail: str, **fields):
         previous = self.store.get(run_id)
@@ -383,6 +391,16 @@ class AgentRuntime:
         if plan["questions"]:
             self.finish(run_id, "completed", "参数尚待补充，没有执行动作")
             return
+        searches = [step for step in plan["steps"] if step["tool"] == "job_search_start"]
+        canonical_id = (run["checkpoint"] or {}).get("browser_id")
+        if (len(searches) == 1 and canonical_id and searches[0].get("task_id") != canonical_id
+                and "[REDACTED_" in str(searches[0].get("task_id", ""))):
+            # Legacy checkpoints may have redacted a task reference. Recover only
+            # from this run's trusted tool-finished ID, never a guessed/latest task.
+            self.jobs.get_task(canonical_id)
+            searches[0]["task_id"] = canonical_id
+            self.store.update(run_id, checkpoint={**run["checkpoint"], "plan": plan})
+            self.store.event(run_id, "checkpoint_reference_repaired", {"task_id": canonical_id})
         previous = {}
         while True:
             run = self.store.get(run_id)
@@ -593,7 +611,20 @@ class AgentRuntime:
                 self.delivery.state = view
         return view
 
-    def browser_summary(self, run_id: str, browser):
+    def recover_search_summaries(self) -> None:
+        """Backfill confirmed search reports only; never reopen a plan or authority."""
+        for run in self.store.list():
+            browser_id = (run["checkpoint"] or {}).get("browser_id")
+            if not browser_id or self.store.has_event(run["id"], "browser_summary"):
+                continue
+            try:
+                browser = self.jobs.get_task(browser_id)
+            except KeyError:
+                continue
+            if browser.status == "completed":
+                self.browser_summary(run["id"], browser, restore_display=False)
+
+    def browser_summary(self, run_id: str, browser, *, restore_display: bool = True):
         run = self.store.get(run_id)
         if any(event["kind"] == "browser_summary" and event["data"].get("task_id") == browser.id for event in self.store.events(run_id)):
             return
@@ -605,7 +636,7 @@ class AgentRuntime:
             message = "搜索已结束；部分详情尚未读取，可在看板核对已保存结果。"
             report = {"jobs": []}
         self.jobs.add_conversation_message("assistant", message, conversation_id=run["session_id"], run_id=f"summary:{run_id}:{browser.id}")
-        if report.get("jobs"):
+        if restore_display and report.get("jobs"):
             self.store.mutate_dialogue(run["session_id"], {"op": "snapshot", "source": run_id,
                 "topic": "applications", "kind": "job", "version": browser.id,
                 "items": [{key: item[key] for key in ("id", "title", "company", "stage", "content_hash")}

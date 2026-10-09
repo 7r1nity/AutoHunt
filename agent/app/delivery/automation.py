@@ -93,7 +93,7 @@ class DeliveryAutomationService:
             return authorization_id, job_id, expires_at, self.current()
 
     async def resume_authorized_run(self, run_id: str, **binding) -> DeliveryTaskView:
-        """Check one waiting batch item without minting/replaying a capability."""
+        """Check one waiting authorized run without minting/replaying a capability."""
         async with self.lifecycle_lock:
             if self.worker and not self.worker.done():
                 raise RuntimeError("已有投递任务正在运行")
@@ -233,15 +233,9 @@ class DeliveryAutomationService:
         await self._run_once_guarded(job_id, require_reply=batch)
         if self.state.status != DeliveryTaskStatus.WAITING_FOR_REPLY:
             return
-        # A batch item keeps its queue row so check_reply_queue can still find it.
-        if not batch:
-            self.jobs.update_delivery_run(
-                self.state.id,
-                detail="已发起沟通；后台按周期检查招聘方回复，收到回复后自动发送已授权简历",
-                mock_resume_id=self.state.mock_resume_id,
-                mock_applicant_id=self.state.mock_applicant_id,
-                attempts=self.state.attempts,
-            )
+        # The coordinator finds batch rows or an active, individually authorized run.
+        self._update(DeliveryTaskStatus.WAITING_FOR_REPLY,
+            "已发起沟通；后台按周期检查招聘方回复，收到回复后自动发送已授权简历")
 
     def expire_reply_wait(self, job_id: int) -> None:
         detail = "招聘方回复等待已过期，监测已停止；已确认的投递保留，未投递需重新核对授权"
