@@ -469,6 +469,12 @@ def _validate_draft(draft: RequestDraft, registry, message: str, *, dialogue: di
             goal["step_ids"] = list(dict.fromkeys(aliases.get(key, key) for key in goal["step_ids"]))
         ids = [step["id"] for step in steps]
     searches = [step for step in steps if step["tool"] == "job_search_start"]
+    # A salary floor stated anywhere in this request counts as known: the search
+    # branch applies it, and asking a later branch to restate it blocks the whole
+    # request on information the user already gave.
+    salary_known = any("salary_min" in step["arguments"] for step in steps)
+    if not salary_known:
+        salary_known = any("salary_min" in fields for fields in (explicit, current_fields))
     for step in steps:
         name, args, quote = step["tool"], step["arguments"], step["command_quote"]
         if len(steps) > 8 or len(goals) > 12:
@@ -654,7 +660,12 @@ def _validate_draft(draft: RequestDraft, registry, message: str, *, dialogue: di
                         salary = old_salary
                 if salary is not None:
                     args["salary_min"] = salary
-                elif re.search(r"薪资|月薪|工资|薪水|薪酬|年薪|日薪|时薪", scope_quote):
+                elif re.search(r"薪资|月薪|工资|薪水|薪酬|年薪|日薪|时薪", scope_quote) and not salary_known:
+                    # Only ask when this branch names a salary the plan cannot
+                    # resolve. In "薪资15k以上 … 生成成长计划" the floor belongs to
+                    # the search and is already verified: asking for it again
+                    # demands information the user has just supplied, and blocks the
+                    # whole request (search included) until they repeat themselves.
                     questions.append("成长计划目前支持最低月薪筛选；请给月薪下限，或明确取消该分支的薪资限制，不能忽略年薪、日薪或薪资上限。")
                 args["focus"] = "；".join(dict.fromkeys([focus_quote, scope_quote, quote]))[:400]
         if name == "resume_propose_patch":
