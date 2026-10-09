@@ -74,7 +74,12 @@ class MockWorkflowCoordinator:
                 (bool(self.jobs.mock_delivery_queue()), self.process_delivery_queue),
                 (bool(self.jobs.delivery_runs_waiting_reply(limit=1)), self.check_reply_queue),
                 (bool(self.jobs.delivery_runs_failed_before_submit(limit=1)), self.recover_failed_starts),
-                (settings["monitor_enabled"] and bool(settings["applicant_id"]), self.sync_once),
+                # Site sync is the only thing that can see what happens outside this
+                # agent: a recruiter reply, or a resume the user submitted by hand.
+                # It used to be gated on the daily-task switch, so with that off the
+                # board never learned about either and a manual submission stayed in
+                # 等待回复 forever. The gate is now the bound applicant account.
+                (bool(settings["applicant_id"]), self.sync_once),
                 (settings["daily_enabled"], self.run_daily_if_due),
             ):
                 if enabled:
