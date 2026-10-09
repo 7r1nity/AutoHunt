@@ -608,6 +608,49 @@ class AgentRuntime:
             self.finish(run_id, "outcome_indeterminate" if current["mutation_started"] else "failed",
                 f"停止清理未能确认：{type(exc).__name__}；请核对运行记录，不要重复提交")
 
+    async def stop_all(self, *, reason: str = "用户要求停止全部任务") -> dict:
+        """Stop every in-flight task, including ones waiting on a human or a reply.
+
+        Cancelling a single run is not enough when the user asks to stop while work
+        is in progress: runs waiting for takeover, the delivery worker, the mock
+        queue and the browser task all have to end before the system is idle again.
+        Returns a summary instead of raising, so the caller can report what happened.
+        """
+        stopped_runs, failed_runs = [], []
+        for run in self.store.list(active=True):
+            run_id = run["id"]
+            try:
+                await self.cancel(run_id)
+                stopped_runs.append(run_id)
+            except Exception:  # noqa: BLE001 - one stuck run must not block the rest
+                failed_runs.append(run_id)
+        # Runs that never had a task (waiting_for_user / waiting_for_reply) still need
+        # their bound browser and delivery work stopped and their state settled.
+        for run in self.store.list(active=True):
+            run_id = run["id"]
+            try:
+                await self._stop_bound_tasks(run_id)
+                stopped_runs.append(run_id)
+            except Exception:  # noqa: BLE001
+                failed_runs.append(run_id)
+        delivery_detail = ""
+        try:
+            view = await self.delivery.stop()
+            delivery_detail = view.detail
+        except Exception as exc:  # noqa: BLE001
+            delivery_detail = f"停止投递时未确认：{type(exc).__name__}"
+        try:
+            if self.agent.tool_registry and self.agent.tool_registry.mock_workflow:
+                await self.agent.tool_registry.mock_workflow.cancel_delivery_queue(self.store_default_session())
+        except Exception:  # noqa: BLE001 - the queue cleanup is best-effort
+            pass
+        return {"stopped_runs": len(set(stopped_runs)), "failed_runs": sorted(set(failed_runs)),
+                "delivery": delivery_detail}
+
+    def store_default_session(self) -> str:
+        sessions = self.store.sessions() if hasattr(self.store, "sessions") else []
+        return sessions[0]["id"] if sessions else "default"
+
     async def _stop_bound_tasks(self, run_id: str):
         task = self.tasks.get(run_id)
         if task:

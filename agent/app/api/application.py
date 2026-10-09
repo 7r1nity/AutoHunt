@@ -312,6 +312,16 @@ async def run_steps(run_id: str, after: int = Query(default=0, ge=0)) -> list[di
         raise HTTPException(status_code=404, detail="运行记录不存在") from exc
 
 
+@app.post("/api/v1/runs/cancel-all")
+async def cancel_all_runs() -> dict:
+    """Stop every in-flight task: runs, browser search, delivery and the mock queue.
+
+    Exposed as its own route so a stop request is never queued behind the work it is
+    meant to stop.
+    """
+    return await agent_runtime.stop_all()
+
+
 @app.post("/api/v1/runs/{run_id}/cancel")
 async def cancel_run(run_id: str) -> dict:
     try:
