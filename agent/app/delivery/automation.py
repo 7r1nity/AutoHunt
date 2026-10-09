@@ -278,8 +278,29 @@ class DeliveryAutomationService:
             elif self.state.submitted:
                 self._update(DeliveryTaskStatus.COMPLETED, str(exc), checkpoint=exc.code)
             else:
-                self.jobs.mark_delivery_failed(job_id, str(exc))
-                self._update(DeliveryTaskStatus.FAILED, str(exc), checkpoint=exc.code)
+                # The watchdog aborted a run that had not reached the submit click, so
+                # nothing was sent and a bounded retry cannot duplicate anything. This
+                # is the path a transient browser error actually takes; retrying only
+                # in _run_once's own handler never fired.
+                self._retry_or_fail(job_id, str(exc))
+
+    def _retry_or_fail(self, job_id: int, detail: str) -> None:
+        """Bounded retry for a run that failed before the submit click.
+
+        Nothing was sent, so retrying cannot duplicate a submission — the checkpoint
+        proves the action never began. The attempt count is persisted, so a restart
+        cannot reset the budget and loop forever.
+        """
+        attempts = self.jobs.bump_delivery_attempts(self.state.id) if self.state.id else self.retry_limit
+        if attempts <= self.retry_limit:
+            self._update(DeliveryTaskStatus.WAITING_FOR_REPLY,
+                         f"本次提交未能开始（{detail[:160]}）；第 {attempts}/{self.retry_limit} 次自动重试，无需重新授权",
+                         checkpoint="waiting_for_reply")
+        else:
+            self.jobs.mark_delivery_failed(
+                job_id, f"{detail[:300]}；已自动重试 {self.retry_limit} 次仍未成功，需人工核对")
+            self._update(DeliveryTaskStatus.FAILED, f"已自动重试 {self.retry_limit} 次仍未成功",
+                         checkpoint="retry_exhausted")
 
     async def _run_once(self, job_id: int, *, require_reply: bool = False) -> None:
         lock = BrowserExecutionLock(self.data_root / "private" / "browser-session.lock", self.state.id or f"delivery:{job_id}")
@@ -397,18 +418,7 @@ class DeliveryAutomationService:
                 self._update(DeliveryTaskStatus.COMPLETED, f"已确认的投递保留；回复监测停止：{detail}", checkpoint="reply_monitor_stopped")
             else:
                 # Nothing was clicked, so the resume was certainly not sent and a
-                # retry cannot duplicate a submission. Retry a bounded number of
-                # times before asking the user to re-authorise: a transient browser
-                # error used to park a job at "需要重新授权" even though its recruiter
-                # had already asked for the resume.
-                attempts = self.jobs.bump_delivery_attempts(self.state.id)
-                if attempts <= self.retry_limit:
-                    self._update(DeliveryTaskStatus.WAITING_FOR_REPLY,
-                                 f"本次提交未能开始（{detail}）；第 {attempts}/{self.retry_limit} 次自动重试，"
-                                 "无需重新授权", checkpoint="retry_pending")
-                else:
-                    self.jobs.mark_delivery_failed(
-                        job_id, f"{detail}；已自动重试 {self.retry_limit} 次仍未成功，需人工核对")
-                self._update(DeliveryTaskStatus.FAILED, detail, checkpoint="failed_before_submit")
+                # retry cannot duplicate a submission.
+                self._retry_or_fail(job_id, detail)
         finally:
             lock.release()
