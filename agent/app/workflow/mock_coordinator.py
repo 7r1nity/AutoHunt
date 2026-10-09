@@ -258,8 +258,14 @@ class MockWorkflowCoordinator:
                         continue
                     delivery_status = self.jobs.latest_delivery_status_for_job(job_id)
                     if delivery_status in {"failed", "outcome_indeterminate"}:
-                        # A failed/ambiguous browser action needs fresh human review.
-                        # Polling must not put it back into the waiting or auto-submit path.
+                        # A failed/ambiguous browser action needs fresh human review and
+                        # must not re-enter the auto-submit path. The recruiter's reply is
+                        # still a fact from the site, so it is recorded: otherwise the
+                        # conversation shows nothing to the applicant and the message is
+                        # silently dropped.
+                        if reply and reply != job.get("recruiter_reply"):
+                            self.jobs.mark_recruiter_reply(job_id, reply)
+                            counters["replied"] += 1
                         continue
                     if job["stage"] == "review":
                         self.jobs.mark_delivery_waiting_reply(

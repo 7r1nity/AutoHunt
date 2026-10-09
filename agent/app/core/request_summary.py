@@ -6,9 +6,16 @@ import re
 
 def is_request_summary(message: str) -> bool:
     text = re.sub(r"\s+", "", message).strip("。？！?!")
-    return bool(re.fullmatch(
+    if re.fullmatch(
         r"(?:请)?(?:(?:我的|我之前的|我刚才的|当前|目前)(?:需求|要求|搜索条件|求职条件)(?:是什么|有哪些)?"
-        r"|(?:总结|概括|回顾|查看|看看)(?:一下)?(?:我的|我之前的|当前|目前)(?:需求|要求|搜索条件|求职条件))", text))
+        r"|(?:总结|概括|回顾|查看|看看)(?:一下)?(?:我的|我之前的|当前|目前)(?:需求|要求|搜索条件|求职条件))", text):
+        return True
+    # A read-only follow-up about a finished search is still a state read, not an
+    # action to plan. Sending it to the planner asks the user to re-confirm goals
+    # they never stated ("完整请求中的 job_search_start 尚未被规划").
+    if re.search(r"投递|申请|简历|找|搜一下|生成|更新|制定|修改|停止|暂停|继续|取消", text):
+        return False
+    return bool(re.search(r"总结|汇总|报告", text) and re.fullmatch(r"[\u4e00-\u9fff\w\s]{0,24}[呢吗？?]?", text))
 
 
 def search_summary(conditions: dict) -> str:

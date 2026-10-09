@@ -134,6 +134,39 @@ class MockJobSiteAdapter:
             direct_apply=direct_apply,
         )
 
+    @staticmethod
+    async def _chat_open(page: Page) -> bool:
+        try:
+            return bool(await page.evaluate(
+                """() => {
+                  const panel = document.querySelector('#chat-panel');
+                  if (!panel) return false;
+                  const visible = getComputedStyle(panel).display !== 'none' &&
+                    !!(panel.offsetWidth || panel.offsetHeight || panel.getClientRects().length);
+                  return visible && panel.classList.contains('open');
+                }"""
+            ))
+        except Exception:  # noqa: BLE001 - a page probe must never break the flow
+            return False
+
+    async def _open_communication(self, page: Page) -> None:
+        """Open the chat panel once, without waiting 30s on an overlay.
+
+        Once the panel is open it covers the button's hit point, so a second
+        Playwright click waits for actionability until it times out. The DOM
+        handler is idempotent, so the fallback click is safe.
+        """
+        if await self._chat_open(page):
+            return
+        communicate = page.locator("button.communicate-btn")
+        if not await communicate.count() or not await communicate.first.is_visible():
+            return
+        try:
+            await communicate.first.click(timeout=5_000)
+        except Exception:  # noqa: BLE001 - overlay/scroll interception is expected
+            await communicate.first.click(force=True, timeout=5_000)
+        await page.wait_for_timeout(800)
+
     async def prepare(self, page: Page, job_url: str) -> MockApplyObservation:
         if page.url != job_url:
             await page.goto(job_url, wait_until="domcontentloaded", timeout=30_000)
@@ -149,10 +182,7 @@ class MockJobSiteAdapter:
         if observation.direct_apply:
             await page.locator("#job-hero").get_by_role("button", name="投递后沟通", exact=True).click()
             return await self.inspect(page)
-        communicate = page.locator("button.communicate-btn")
-        if await communicate.count() and await communicate.first.is_visible():
-            await communicate.first.click()
-            await page.wait_for_timeout(800)
+        await self._open_communication(page)
         return await self.inspect(page)
 
     async def submit(self, page: Page) -> MockSubmitResult:
@@ -166,7 +196,15 @@ class MockJobSiteAdapter:
         button = page.locator(selector)
         if not await button.count() or await button.is_disabled():
             return MockSubmitResult(False, False, "投递按钮不可用")
-        await button.click()
+        try:
+            await button.click(timeout=8_000)
+        except Exception:  # noqa: BLE001 - the chat panel can cover the hit point
+            # The outcome after a failed click is unknown; the status scan below
+            # decides from page evidence, and an unconfirmed click is never retried.
+            try:
+                await button.click(force=True, timeout=8_000)
+            except Exception as exc:  # noqa: BLE001
+                return MockSubmitResult(False, False, f"点击投递按钮失败：{type(exc).__name__}")
         deadline = time.monotonic() + self.submit_timeout_seconds
         while time.monotonic() < deadline:
             observation = await self.inspect(page)

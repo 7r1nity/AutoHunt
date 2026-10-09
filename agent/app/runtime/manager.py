@@ -273,8 +273,17 @@ class AgentRuntime:
                         "任务超过时间预算；已有执行记录保留，未自动重试", error_type="TimeoutError")
         except Exception as exc:
             current = self.store.get(run_id)
+            # A bare KeyError hides which key was missing, which makes the failure
+            # impossible to diagnose from the run record. Keep the key (or the
+            # first traceback frame) in the detail text.
+            if isinstance(exc, KeyError):
+                detail = f"任务执行失败：缺少必需字段 {exc!r}；请查看步骤记录"
+            elif isinstance(exc, (ValueError, RuntimeError)):
+                detail = str(exc)
+            else:
+                detail = f"任务执行失败：{type(exc).__name__}：{exc}；请查看步骤记录"
             self.finish(run_id, "outcome_indeterminate" if current["mutation_started"] and not current["result"] else "failed",
-                        str(exc) if isinstance(exc, (ValueError, RuntimeError)) else f"任务执行失败：{type(exc).__name__}；请查看步骤记录", error_type=type(exc).__name__)
+                        detail, error_type=type(exc).__name__)
 
     async def watch(self, run_id: str):
         run = self.store.get(run_id)
@@ -328,7 +337,19 @@ class AgentRuntime:
         """Observe asynchronous dependencies without holding model/session slots."""
         from ..workflow.execution import advance, DONE, persist, render_step
         run = self.store.get(run_id)
-        plan = copy.deepcopy(run["checkpoint"]["plan"])
+        # A missing plan checkpoint must not raise a bare KeyError that hides the
+        # reason. The clarifying questions survive in the dialogue state, so the
+        # request is still reported instead of silently failing.
+        plan = copy.deepcopy((run["checkpoint"] or {}).get("plan"))
+        if not plan:
+            pending = (self.store.dialogue_state(run["session_id"]).get("instruction_request") or {})
+            questions = pending.get("questions") or []
+            detail = ("已记录完整请求，尚未执行。请补充：\n\n" + "\n".join(
+                f"{index}. {question}" for index, question in enumerate(questions, 1))
+                if questions else "任务计划记录缺失；原始请求仍保留，请重新确认要执行的动作")
+            self.store.event(run_id, "watchdog_expired", {"code": "missing_plan_checkpoint", "detail": detail})
+            self.finish(run_id, "completed" if questions else "failed", detail)
+            return
         if plan["questions"]:
             self.finish(run_id, "completed", "参数尚待补充，没有执行动作")
             return
@@ -341,6 +362,16 @@ class AgentRuntime:
             waiting = False
             for step in plan["steps"]:
                 if step["status"] == "waiting_external":
+                    # Only job_search_start records a task_id. A step that reported a
+                    # wait without an external task can never be observed; fail it
+                    # explicitly instead of raising a bare KeyError that kills the run.
+                    if not step.get("task_id"):
+                        step.update(status="failed",
+                                    detail="该步骤没有可观察的外部任务标识，无法确认结果；不会自动重试")
+                        self.store.event(run_id, "watchdog_expired",
+                                         {"code": "missing_external_task", "step_id": step["id"]})
+                        changed = True
+                        continue
                     browser = self.observe_browser(step["task_id"])
                     if previous.get(step["id"]) != str(browser.status):
                         previous[step["id"]] = str(browser.status)
