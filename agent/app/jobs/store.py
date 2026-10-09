@@ -196,6 +196,13 @@ class JobStore:
             self._ensure_column(db, "delivery_runs", "mock_applicant_id", "INTEGER")
             self._ensure_column(db, "delivery_runs", "action", "TEXT NOT NULL DEFAULT 'submit_resume'")
         self._ensure_column(db, "delivery_runs", "attempts", "INTEGER NOT NULL DEFAULT 0")
+        db.execute(
+            """CREATE TABLE IF NOT EXISTS automation_decisions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                rule TEXT NOT NULL, result TEXT NOT NULL, considered TEXT NOT NULL DEFAULT '',
+                facts_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL
+            )"""
+        )
 
     @staticmethod
     def _ensure_column(db: sqlite3.Connection, table: str, column: str, declaration: str) -> None:
@@ -1010,6 +1017,42 @@ class JobStore:
                                (utc_now(), item["id"]))
                     inserted.append(item["id"])
         return inserted
+
+    def record_automation_decision(self, *, rule: str | None, result: str,
+                                   considered: tuple[str, ...], facts: dict) -> None:
+        """Persist what the automation loop noticed and decided.
+
+        Without this, "why did nothing happen" can only be answered by re-running the
+        loop; with it, each cycle is readable after the fact, together with the facts
+        the rules were matched against.
+        """
+        with self.lock, self._connect() as db:
+            db.execute("INSERT INTO automation_decisions(rule,result,considered,facts_json,created_at) "
+                       "VALUES (?,?,?,?,?)",
+                       (rule or "", result[:500], ",".join(considered),
+                        json.dumps(facts, ensure_ascii=False, default=str)[:6000], utc_now()))
+
+    def automation_decisions(self, *, limit: int = 20) -> list[dict[str, Any]]:
+        with self.lock, self._connect() as db:
+            rows = db.execute("SELECT * FROM automation_decisions ORDER BY id DESC LIMIT ?",
+                              (limit,)).fetchall()
+        output = []
+        for row in rows:
+            item = dict(row)
+            try:
+                item["facts"] = json.loads(item.pop("facts_json", "") or "{}")
+            except ValueError:
+                item["facts"] = {}
+            item["considered"] = [name for name in str(item.get("considered") or "").split(",") if name]
+            output.append(item)
+        return output
+
+    def all_delivery_runs(self, *, limit: int = 200) -> list[dict]:
+        """Every run, newest first, for the automation loop's observation."""
+        with self.lock, self._connect() as db:
+            rows = db.execute("SELECT * FROM delivery_runs ORDER BY started_at DESC LIMIT ?",
+                              (limit,)).fetchall()
+        return [dict(row) for row in rows]
 
     def delivery_runs_failed_before_submit(self, *, limit: int = 50) -> list[dict]:
         """Runs whose start failed before any click, so nothing was submitted.

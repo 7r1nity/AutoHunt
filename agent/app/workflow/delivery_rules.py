@@ -1,0 +1,81 @@
+"""The automation rules: what the agent notices, and what it does about it.
+
+Each rule is a condition over an :class:`~app.workflow.rules.Observation` plus the
+action to take when it holds. Priorities decide the order, and the reason a rule
+exists is written down next to it, so behaviour is changed by editing rules rather
+than by adding another branch to the loop.
+
+Safety rules keep the model agreed with the user: an action whose outcome is unknown
+is never retried, and a one-use authorisation is never invented — a rule may only use
+an authorisation that already exists.
+"""
+from __future__ import annotations
+
+from .rules import Observation, Rule
+
+
+def _replied(run: dict) -> bool:
+    return bool(str(run.get("recruiter_reply") or "").strip())
+
+
+def build_rules(coordinator) -> list[Rule]:
+    """Rules for the mock-site delivery flow, bound to a coordinator instance."""
+
+    # ---------------------------------------------------------------- delivery
+    async def submit_authorised(observation: Observation) -> str:
+        await coordinator.check_reply_queue()
+        return "已处理一个等待招聘方回复的投递：检查回复后按需发送已授权简历"
+
+    def has_authorised_waiting(observation: Observation) -> bool:
+        return bool(observation.get("reply_candidates"))
+
+    # ------------------------------------------------- recovery of failed starts
+    async def recover_stalled_start(observation: Observation) -> str:
+        result = await coordinator.recover_failed_starts()
+        return (f"重新尝试了此前未开始即失败的提交：恢复 {result.get('recovered', 0)} 个，"
+                f"跳过 {result.get('skipped', 0)} 个（无需重新授权）")
+
+    def has_stalled_replied_start(observation: Observation) -> bool:
+        # A start that failed before the click, with the recruiter already asking for
+        # the resume. Nothing was sent, so retrying cannot duplicate a submission.
+        return bool(observation.get("stalled_replied_runs"))
+
+    # ------------------------------------------------------------ queue dispatch
+    async def dispatch_queue(observation: Observation) -> str:
+        await coordinator.process_delivery_queue()
+        return "已派发一个已授权的投递队列任务"
+
+    def queue_has_work(observation: Observation) -> bool:
+        return bool(observation.get("queue_depth")) and bool(observation.get("delivery_idle"))
+
+    # ------------------------------------------------------------------ site sync
+    async def sync_site(observation: Observation) -> str:
+        counters = await coordinator.sync_once()
+        return (f"与模拟站同步：读取 {counters.get('conversations', 0)} 个会话，"
+                f"新回复 {counters.get('replied', 0)} 个，站点已投递 {counters.get('submitted', 0)} 个")
+
+    def has_bound_account(observation: Observation) -> bool:
+        return bool(observation.get("applicant_id"))
+
+    # ------------------------------------------------------------- daily reporting
+    async def run_daily(observation: Observation) -> str:
+        await coordinator.run_daily_if_due()
+        return "检查并执行了每日汇总"
+
+    def daily_enabled(observation: Observation) -> bool:
+        return bool((observation.get("settings") or {}).get("daily_enabled"))
+
+    return [
+        # A stalled job outranks routine work: it has already failed once, and leaving
+        # it parked is exactly the complaint this framework was built to fix.
+        Rule("recover_stalled_start", 90, has_stalled_replied_start, recover_stalled_start,
+             reason="提交未开始即失败且招聘方已回复，自动重试无需重新授权"),
+        Rule("submit_authorised_resume", 80, has_authorised_waiting, submit_authorised,
+             reason="已授权投递等待招聘方回复；回复到达后按钮解锁即发送简历"),
+        Rule("dispatch_delivery_queue", 60, queue_has_work, dispatch_queue,
+             reason="队列中有已授权的投递，且浏览器空闲"),
+        Rule("sync_with_site", 40, has_bound_account, sync_site,
+             reason="站点是唯一能看见人工操作与招聘方回复的来源"),
+        Rule("daily_report", 20, daily_enabled, run_daily,
+             reason="每日汇总开关打开时检查是否到点"),
+    ]

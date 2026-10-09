@@ -15,6 +15,8 @@ from ..jobs.store import JobStore
 from ..memory.candidate_state import CandidateStateStore
 from ..memory.resume_workspace import ResumeWorkspaceStore, resume_document_digest
 from ..runtime.resilience import safe_retry, wait_expired
+from .delivery_rules import build_rules
+from .rules import RuleEngine
 
 
 MOCK_ORIGIN = "http://127.0.0.1:8080"
@@ -53,6 +55,8 @@ class MockWorkflowCoordinator:
         self.wakeup = asyncio.Event()
         self.on_delivery_started = None
         self.poll_failures: dict[str, tuple[int, float]] = {}
+        #: Observation -> rule matching -> action -> recorded decision.
+        self.engine = RuleEngine(build_rules(self))
 
     def settings(self) -> dict:
         return self.jobs.mock_workflow_settings()
@@ -70,34 +74,23 @@ class MockWorkflowCoordinator:
     async def _loop(self) -> None:
         while True:
             settings = self.settings()
-            for enabled, action in (
-                (bool(self.jobs.mock_delivery_queue()), self.process_delivery_queue),
-                (bool(self.jobs.delivery_runs_waiting_reply(limit=1)), self.check_reply_queue),
-                (bool(self.jobs.delivery_runs_failed_before_submit(limit=1)), self.recover_failed_starts),
-                # Site sync is the only thing that can see what happens outside this
-                # agent: a recruiter reply, or a resume the user submitted by hand.
-                # It used to be gated on the daily-task switch, so with that off the
-                # board never learned about either and a manual submission stayed in
-                # 等待回复 forever. The gate is now the bound applicant account.
-                (bool(settings["applicant_id"]), self.sync_once),
-                (settings["daily_enabled"], self.run_daily_if_due),
-            ):
-                if enabled:
-                    name = action.__name__
-                    failures, retry_at = self.poll_failures.get(name, (0, 0))
-                    if time.monotonic() < retry_at:
-                        continue
-                    try:
-                        async with asyncio.timeout(120):
-                            await action()
-                        self.poll_failures.pop(name, None)
-                    except asyncio.CancelledError:
-                        raise
-                    except Exception as exc:
-                        failures += 1
-                        delay = min(300, 60 * 2 ** min(3, failures - 3)) if failures >= 3 else self.poll_seconds
-                        self.poll_failures[name] = failures, time.monotonic() + delay
-                        self.jobs.record_mock_workflow_error(f"{name}: {type(exc).__name__}；连续失败 {failures} 次，{delay:.0f} 秒后检查；已派发/未知写入不重放")
+            # One observation, then the rules decide. Conditions read facts only, so a
+            # cycle can be replayed from the recorded observation, and the reason a
+            # cycle did nothing is visible instead of inferred from a branch order.
+            try:
+                observation = await self.observe(settings)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                self.jobs.record_mock_workflow_error(f"采集状态失败：{type(exc).__name__}：{exc}")
+                observation = None
+            if observation is not None:
+                busy = bool(self.delivery.worker and not self.delivery.worker.done())
+                decision = await self.engine.step(observation, busy=busy)
+                if decision and decision.rule:
+                    self.jobs.record_automation_decision(
+                        rule=decision.rule, result=decision.result,
+                        considered=decision.considered, facts=observation.as_dict())
             try:
                 self._report_finished_daily_run()
             except Exception as exc:
@@ -107,6 +100,15 @@ class MockWorkflowCoordinator:
             except TimeoutError:
                 pass
             self.wakeup.clear()
+
+    async def observe(self, settings: dict | None = None):
+        """Capture board and site facts for one cycle."""
+        from .observations import observe as collect
+        settings = self.settings() if settings is None else settings
+        observation = await collect(self.jobs, settings)
+        facts = dict(observation.facts)
+        facts["delivery_idle"] = not (self.delivery.worker and not self.delivery.worker.done())
+        return type(observation)(at=observation.at, facts=facts)
 
     async def queue_deliveries(self, *, min_score: int, session_id: str, task_id: str | None = None) -> dict:
         """One explicit bounded batch, not a persistent rule for unseen future jobs."""
