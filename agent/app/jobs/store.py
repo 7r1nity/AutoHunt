@@ -431,6 +431,12 @@ class JobStore:
                     item["response"] = json.loads(row["response_json"])
                 except json.JSONDecodeError:
                     item["response"] = None
+            if item["role"] == "assistant":
+                # Read-only projection: old raw responses remain stored for diagnosis.
+                from ..core.replies import public_reply
+                item["content"] = public_reply(item["content"])
+                if isinstance(item.get("response"), dict) and isinstance(item["response"].get("message"), str):
+                    item["response"]["message"] = public_reply(item["response"]["message"])
             output.append(item)
         return output
 

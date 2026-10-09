@@ -9,7 +9,7 @@ from ..core.agent_tools import ToolLoopState
 from ..core.models import AgentLane, ChatResponse, ToolEvent
 from ..growth.requests import resume_stamp
 from ..runtime.context import active_run, dialogue_change, emit
-from ..runtime.dialogue import bounded_data
+from ..core.replies import tool_reply, tool_label, public_reply
 from ..runtime.resilience import classify_failure
 
 DONE = {"completed", "failed", "skipped", "blocked", "outcome_indeterminate"}
@@ -29,35 +29,8 @@ def persist(plan: dict) -> None:
 
 
 def render_step(step: dict) -> str:
-    result, tool = step.get("result"), step["tool"]
-    if step["status"] not in {"completed", "waiting_external", "waiting_confirmation"}:
-        return f"{tool}：{step.get('detail') or step['status']}"
-    if not isinstance(result, dict):
-        return f"{tool}：{str(result)[:800]}"
-    if tool == "search_state_read":
-        from ..core.request_summary import search_summary
-        return search_summary(result)
-    if tool == "job_search_start":
-        args = result.get("search_conditions", {})
-        return ("已启动搜索：" + " · ".join(args.get("queries") or [])
-            + ("；城市：" + "、".join(args["locations"]) if args.get("locations") else "")
-            + (f"；目标 {args['result_limit']} 个" if args.get("result_limit") else "")
-            + (f"；最低月薪 {args['salary_min']} 元" if args.get("salary_min") else "")
-            + "。登录/验证码需人工接管；后续依赖步骤等待搜索完成。")
-    if tool == "learning_plan_generate":
-        return f"已保存成长计划《{result.get('title', '成长计划')}》，依据 {result.get('jobs_analyzed', 0)} 份 JD。\n劣势分析：{result.get('summary', '')}"
-    if tool == "resume_propose_patch":
-        return "已生成简历修改提案，尚未写入；请核对并批准。" if result.get("proposal") else "没有生成可验证的简历修改提案。"
-    if tool == "job_results_read":
-        jobs = result.get("jobs") or []
-        return "职位简表（序号以此为准）：\n\n" + ("\n".join(
-            f"{index}. {job.get('role', job.get('title', ''))} · {job.get('company', '')} · {job.get('location', '')} · {job.get('salary', '未注明')} · 匹配 {job.get('score', '未评分')}"
-            for index, job in enumerate(jobs, 1)) or "暂无符合条件的已保存职位。")
-    if isinstance(result.get("message"), str):
-        return result["message"]
-    if tool == "job_review_selection":
-        return f"已通过 {len(result.get('reviewed_ids', []))} 个职位的本地审核，未自动投递。"
-    return f"{tool}：\n{bounded_data(result, budget=1800)}"
+    result = step.get("result") if step["status"] in {"completed", "waiting_external", "waiting_confirmation"} else step.get("detail")
+    return public_reply(tool_reply(step["tool"], step["status"], result))
 
 
 async def advance(plan: dict, registry) -> list[dict]:
@@ -162,7 +135,7 @@ async def begin(plan: dict, registry) -> ChatResponse:
     pending = [step["tool"] for step in plan["steps"] if step["status"] == "pending"]
     text = "\n\n".join(render_step(step) for step in observed) or plan["reply"] or "没有识别到可执行目标，请说明希望完成的操作。"
     if pending:
-        text += "\n\n待前置步骤完成后：" + "、".join(pending) + "。不会把启动、入队或提案视为最终完成。"
+        text += "\n\n待前置步骤完成后：" + "、".join(tool_label(tool) for tool in pending) + "。不会把启动、入队或提案视为最终完成。"
     return ChatResponse(message=text, lane=AgentLane.APPLICATION,
         action="resume_proposal" if proposal else None, resume_proposal=proposal,
         tool_events=[ToolEvent(tool=step["tool"], status=step["status"], detail=step.get("detail", "")[:300]) for step in observed])

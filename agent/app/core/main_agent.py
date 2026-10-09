@@ -8,6 +8,7 @@ from .models import AgentLane, BrowserTaskStatus, ChatResponse, JobPreferenceUpd
 from .agent_tools import AgentToolRegistry, ToolLoopState
 from .search_contract import explicit_search_constraints, simple_search_patch, safe_role_keyword
 from .search_language import parse_search_message, SEARCH_CITIES, role_fragments
+from .replies import public_reply, tool_reply
 from ..intent.catalog import DEFAULT_DIRECT_INTENTS
 from ..intent.router import RouteOutcome
 from ..jobs.store import JobStore
@@ -17,7 +18,7 @@ from ..memory.candidate_state import CandidateEvidenceExtractor, CandidateStateS
 from ..memory.stores import MemoryStore, SkillStore
 from ..memory.resume_workspace import ResumeWorkspaceStore
 from ..runtime.context import RunContext, current_run, active_run, checkpoint, emit, dialogue_change, save_search_state, scoped_browser, browser_availability
-from ..runtime.dialogue import CONFIRM, REJECT, pending_action, assemble_context, bounded_data, slot_answer_patch
+from ..runtime.dialogue import CONFIRM, REJECT, pending_action, assemble_context, slot_answer_patch
 from ..runtime.search_state import bounded_history, prepare_search_state
 
 
@@ -464,6 +465,10 @@ class AutoHuntAgent:
             emit("turn_understanding", role=role.kind, new_task=role.new_task,
                  detail="输入角色与执行授权分离；仅实际工具结果更新执行事实")
             response = await self._dispatch_contextual_message(message, patch)
+        displayed = public_reply(response.message)
+        if displayed != response.message:
+            emit("reply_normalized", detail="内部工具数据已转换为对话说明；结构化结果保留在运行记录")
+            response.message = displayed
         self._conversation_history.extend([
             {"role": "user", "content": message},
             {"role": "assistant", "content": response.message},
@@ -765,9 +770,7 @@ class AutoHuntAgent:
                     confirmed_action_id=item["id"]))
             dialogue_change("settle", action_id=item["id"], status=outcome.status)
             event = ToolEvent(tool=outcome.tool, status=outcome.status, detail=str(outcome.content)[:300])
-            return ChatResponse(message=(str(outcome.content) if item["tool"] == "job_search_start" and outcome.status == "awaiting_user"
-                else f"已执行：{item['description']}。" if outcome.status in {"ok", "awaiting_user"}
-                else f"动作未完成：{outcome.content}；不会自动重试。"), lane=self._lane_from_tools([event], authorization),
+            return ChatResponse(message=tool_reply(outcome.tool, outcome.status, outcome.content), lane=self._lane_from_tools([event], authorization),
                 action=outcome.action, resume_proposal=outcome.resume_proposal,
                 tool_events=[event])
         except ValueError as exc:
@@ -1029,30 +1032,10 @@ class AutoHuntAgent:
         scoped_browser(browser)
         tool = {"pause_search": "browser_task_pause", "resume_search": "browser_task_resume", "stop_search": "browser_task_stop"}[intent]
         outcome = await self.tool_registry.execute(tool, {}, user_message=active_run().user_message, state=ToolLoopState())
-        if outcome.status != "ok":
-            return ChatResponse(message=str(outcome.content), lane=AgentLane.APPLICATION,
-                tool_events=[ToolEvent(tool=tool, status=outcome.status, detail=str(outcome.content)[:300])])
-        view = self.tool_registry.browser.current()
-        if intent == "resume_search" and view.status not in {BrowserTaskStatus.RUNNING, BrowserTaskStatus.STARTING}:
-            return ChatResponse(message=f"未恢复浏览器任务：当前状态 {view.status}，没有可恢复的执行器。请明确重新搜索或继续上文尚未执行的请求。",
-                lane=AgentLane.APPLICATION, tool_events=[ToolEvent(tool=tool, status="error", detail=str(view.status))])
-        verb = {"pause_search": "已暂停", "resume_search": "已继续", "stop_search": "已中断"}[intent]
-        if intent == "stop_search":
-            message = (
-                f"{verb}职位搜索。\n"
-                f"- 已发现：**{view.discovered}** 个链接\n"
-                f"- 已保存到看板：**{view.stored}** 个\n"
-                f"- 建议审核：**{view.matched}** 个\n"
-                f"- 重复跳过：**{view.duplicates}** 个\n"
-                f"- 当前状态：**{view.status}**"
-            )
-        else:
-            message = (f"已收到继续请求，执行器正在重新核验页面登录与验证码状态；尚未确认验证通过。当前状态：**{view.status}**。"
-                if intent == "resume_search" else f"{verb}浏览器任务。当前状态：**{view.status}**。")
         return ChatResponse(
-            message=message,
+            message=tool_reply(tool, outcome.status, outcome.content),
             lane=AgentLane.APPLICATION,
-            tool_events=[ToolEvent(tool="browser_control", status="ok", detail=f"{intent}: {view.status}")],
+            tool_events=[ToolEvent(tool=tool, status=outcome.status, detail=str(outcome.content)[:300])],
         )
 
     async def _generate_guarded(self, request: LLMRequest) -> LLMResult:
@@ -1153,6 +1136,8 @@ class AutoHuntAgent:
         search_hint = _search_command(message)
         instructions = (
             "你是 AutoHunt 主 Agent。根据用户真实意图选择高层工具，并在每次工具 Observation 后决定继续调用或回答。"
+            "对用户用自然语言解释结果，禁止照搬工具名、JSON、Python字典、内部槽位或检查点；这些只保留在运行记录。"
+            "只读成功不等于执行任务完成；启动、入队、提案、等待确认必须明确说明实际阶段。"
             "“我想找X工作/职位”“帮我找X”“搜索X岗位”都是明确搜索命令：立即调用 job_search_start，不要再询问是否开始。"
             "用户在紧接搜索请求后补充关键词或城市，是本次搜索条件，不是持久化偏好；除非明确说保存、设置或修改偏好，否则禁止调用 preference_update。"
             "浏览器是否占用以 can_start_search/shared_browser_busy 为准：旧任务归属不同不代表忙碌，已结束或无存活执行器的旧记录不阻止搜索。"
@@ -1240,7 +1225,16 @@ class AutoHuntAgent:
             )
             messages.append(result.assistant_message)
             if not result.tool_calls:
-                text = result.text.strip() or "任务已处理，但模型没有返回可展示的说明。"
+                observed = []
+                for item in messages:
+                    if item.get("role") == "tool":
+                        try:
+                            value = json.loads(item.get("content", ""))
+                        except (TypeError, ValueError):
+                            continue
+                        if isinstance(value, dict) and "tool" in value and "status" in value:
+                            observed.append(value)
+                text = public_reply(result.text.strip(), observations=observed) or "模型没有返回可展示的说明；请查看运行记录，不能据此确认任务完成。"
                 # Canonical order is a rendered contract; a tool observation alone is not a displayed list.
                 context = active_run()
                 new_snapshots = [item for item in (context.dialogue or {}).get("snapshots", [])
@@ -1258,7 +1252,7 @@ class AutoHuntAgent:
                     if item["status"] == "pending" and item["turn"] == context.dialogue["turn"]]
                 if pending:
                     item = pending[-1]
-                    text += f"\n\n待确认动作：{item['description']}\n实际参数：{bounded_data(item['arguments'], budget=2500)}\n确认才执行；投递简历仍需专用授权。"
+                    text += f"\n\n待确认动作：{item['description']}\n尚未执行，请确认。投递简历仍需专用授权；实际参数可在运行记录查看。"
                 if any(event.tool == "context_question_ask" and event.status == "ok" for event in events):
                     frame = (context.dialogue or {}).get("frames", {}).get(context.dialogue["active_intent"], {})
                     if frame.get("last_question"):

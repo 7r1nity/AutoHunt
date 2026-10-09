@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from .base import LLMProvider, LLMRequest, LLMResult, LLMToolCall, LLMToolResult
+from ..core.replies import public_reply
 
 
 class MockLLMProvider(LLMProvider):
@@ -36,10 +37,10 @@ class MockLLMProvider(LLMProvider):
         if observations:
             content = observations[-1].get("content", "")
             return LLMToolResult(
-                text=f"工具执行完成：{content}",
+                text=public_reply(str(content)),
                 provider=self.name,
                 model=self.model,
-                assistant_message={"role": "assistant", "content": f"工具执行完成：{content}"},
+                assistant_message={"role": "assistant", "content": public_reply(str(content))},
             )
         names = {item["function"]["name"] for item in tools}
         compact = user_text.replace(" ", "")

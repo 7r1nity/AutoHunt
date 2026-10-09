@@ -3,6 +3,7 @@
 import { useState } from "react";
 import type { AgentRun, RunEvent } from "@/lib/agent-runtime";
 import { terminalRun } from "@/lib/agent-runtime";
+import { chatDisplay } from "@/lib/chat-display";
 import type { useAgentRuntime } from "@/lib/use-agent-runtime";
 
 const labels: Record<string, string> = { queued: "排队中", running: "执行中", waiting_user: "等待接管",
@@ -86,7 +87,7 @@ export function RuntimePanel({ runtime, notice, showSession = true }: { runtime:
         {!!run.plan_steps?.length && <ol>{run.plan_steps.map((step) => <li key={step.id}>
           {step.tool} · {labels[step.status] ?? step.status}{step.depends_on.length > 0 && ` · 依赖 ${step.depends_on.join("、")}`}
         </li>)}</ol>}
-        {typeof run.result?.message === "string" && <details><summary>查看回复</summary><p>{run.result.message}</p></details>}
+        {typeof run.result?.message === "string" && <details><summary>查看回复</summary><p>{chatDisplay(run.result.message)}</p></details>}
         <div className="runtime-actions">
           {!terminalRun(run.status) && <button className="button secondary compact" onClick={() => void runtime.control(run, "cancel").catch((error) => notice(error.message))}>停止任务</button>}
           {run.can_resume && <button className="button primary compact" onClick={() => void runtime.control(run, "resume").catch((error) => notice(error.message))}>{run.status === "waiting_user" ? "确认登录，继续" : run.status === "waiting_reply" ? "检查回复" : "恢复执行"}</button>}

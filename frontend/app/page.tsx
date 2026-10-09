@@ -6,6 +6,7 @@ import { useAgentRuntime } from "@/lib/use-agent-runtime";
 import { RuntimePanel } from "@/components/runtime-panel";
 import { interruptionCommand, terminalRun } from "@/lib/agent-runtime";
 import { createChatTurn, createMessageId } from "@/lib/chat-message";
+import { chatDisplay } from "@/lib/chat-display";
 import { inventoryRequest, inventoryError } from "@/lib/inventory-request";
 import { shortJobDate } from "@/lib/job-display";
 import type { AgentStatus, AutomationStats, BrowserTask, CandidateMaterial, CandidateState, ClarifyOption, DeliveryPreview, DeliveryTask, Insights, Job, JobStage, LearningPlan, Material, MaterialIngestResult, DocumentIngestResult, Message, MockWorkflowSettings, ResumeDocumentMeta, ResumeIngestResult, ResumeProfile, ResumeProposal, SearchReport } from "@/lib/types";
@@ -51,7 +52,7 @@ function inlineRichText(text: string) {
 }
 
 function renderRichText(text: string) {
-  const blocks = text.split(/\n+/);
+  const blocks = chatDisplay(text).split(/\n+/);
   return blocks.map((block, index) => {
     const trimmed = block.trim();
     if (!trimmed) return null;
