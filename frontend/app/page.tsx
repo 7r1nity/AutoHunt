@@ -1074,7 +1074,7 @@ export default function Home() {
     ]);
     try {
       const uploaded: ResumeProfile[] = [];
-      for (const file of files) {
+      for (const [index, file] of files.entries()) {
         const form = new FormData();
         form.set("file", file);
         const response = await fetch("/api/agent/resumes", { method: "POST", body: form });
@@ -1082,6 +1082,11 @@ export default function Home() {
         if (!response.ok) throw new Error(response.status === 503 ? "Agent 后端不可用，请启动后端后重新选择文件" : String(payload.detail ?? `${file.name} 上传失败`));
         const result = payload as ResumeIngestResult;
         uploaded.push(result.resume);
+        setResumes((current) => [result.resume, ...current.filter((item) => item.id !== result.resume.id)]);
+        setMaterials((current) => current.filter((item) => item.id !== result.resume.id).map((item) =>
+          item.id === `${pendingPrefix}-${index}`
+            ? { id: result.resume.id, name: result.resume.filename, type: "简历", status: "已解析" as const }
+            : item));
         setCandidateState(result.candidate_state);
         setSearchQuery(preferredSearchQuery(result.candidate_state));
         setResumeSourceMode("verbatim");
@@ -1092,7 +1097,7 @@ export default function Home() {
       setResumes((current) => [...newestFirst, ...current.filter((item) => !uploaded.some((next) => next.id === item.id))]);
       setMaterials((current) => [
         ...newestFirst.map((resume) => ({ id: resume.id, name: resume.filename, type: "已上传简历", status: "已解析" as const })),
-        ...current.filter((item) => !String(item.id).startsWith(pendingPrefix)),
+        ...current.filter((item) => !String(item.id).startsWith(pendingPrefix) && !uploaded.some((resume) => resume.id === item.id)),
       ]);
       const latest = newestFirst[0];
       setNotice(`简历内容已导入并自动排版；通用找工作指令将优先参考当前主简历的岗位方向，具体搜索词仍可修改`);
@@ -1232,7 +1237,7 @@ export default function Home() {
     try {
       const uploaded: CandidateMaterial[] = [];
       const proposals: ResumeProposal[] = [];
-      for (const file of files) {
+      for (const [index, file] of files.entries()) {
         const form = new FormData();
         form.set("file", file);
         form.set("kind", materialKind);
@@ -1241,14 +1246,19 @@ export default function Home() {
         if (!response.ok) throw new Error(response.status === 503 ? "Agent 后端不可用，请启动后端后重新选择文件" : String(payload.detail ?? `${file.name} 解析失败`));
         const result = payload as MaterialIngestResult;
         uploaded.push(result.material);
+        setCandidateMaterials((current) => [result.material, ...current.filter((item) => item.id !== result.material.id)]);
+        setMaterials((current) => current.filter((item) => item.id !== result.material.id).map((item) =>
+          item.id === `${pendingPrefix}-${index}`
+            ? { id: result.material.id, name: result.material.filename, type: materialKind === "course" ? "课程报告" : materialKind === "code" ? "代码" : "项目材料", status: "已解析" as const }
+            : item));
         if (result.resume_proposal) proposals.push(result.resume_proposal);
         setCandidateState(result.candidate_state);
       }
       const newestFirst = [...uploaded].reverse();
-      setCandidateMaterials((current) => [...newestFirst, ...current]);
+      setCandidateMaterials((current) => [...newestFirst, ...current.filter((item) => !uploaded.some((material) => material.id === item.id))]);
       setMaterials((current) => [
         ...newestFirst.map((material) => ({ id: material.id, name: material.filename, type: material.kind === "course" ? "课程报告" : material.kind === "code" ? "代码" : "项目材料", status: "已解析" as const })),
-        ...current.filter((item) => !String(item.id).startsWith(pendingPrefix)),
+        ...current.filter((item) => !String(item.id).startsWith(pendingPrefix) && !uploaded.some((material) => material.id === item.id)),
       ]);
       if (proposals.length) {
         setMessages((current) => [
@@ -1923,15 +1933,15 @@ export default function Home() {
           <section className="detail-layout">
             <div className="panel profile-hero"><span className="avatar large">AI</span><div><span className="eyebrow">候选人结构化画像</span><h2>{candidateState?.profile.role_suggestions[0] ?? "等待简历解析"}</h2><p>{candidateState?.profile.summary ?? "上传简历后，Agent 将提取有证据支持的职业信息。"}</p><div className="tags">{candidateState?.profile.skills.slice(0, 8).map((skill) => <span key={skill}>{skill}</span>)}</div></div><span className="preference-version">偏好 v{candidateState?.preferences.version ?? 0}</span></div>
             <div className="two-columns">
-              <div className="panel">
+              <div className="panel candidate-material-panel">
                 <div className="panel-heading"><div><h2>候选人材料中心</h2><p>{resumes.length} 份简历 · {candidateMaterials.length} 份课程/项目/代码材料</p></div><div className="material-actions"><button className="button secondary compact" onClick={() => uploadRef.current?.click()} disabled={resumeBusy}>{resumeBusy ? "上传中…" : "上传简历"}</button><select value={materialKind} onChange={(event) => setMaterialKind(event.target.value as "course" | "project" | "code")} disabled={resumeBusy} aria-label="材料类型"><option value="course">课程报告</option><option value="project">项目材料</option><option value="code">代码/ZIP</option></select><button className="button primary compact" onClick={() => materialUploadRef.current?.click()} disabled={resumeBusy}>{resumeBusy ? "解析中…" : "上传材料"}</button></div></div>
-                {uploadFeedback && <div className={`material-upload-feedback ${uploadFeedback.kind}`} role={uploadFeedback.kind === "error" ? "alert" : "status"}>{uploadFeedback.text}</div>}
+                {uploadFeedback && <div className={`material-upload-feedback is-${uploadFeedback.kind}`} role={uploadFeedback.kind === "error" ? "alert" : "status"}>{uploadFeedback.text}</div>}
                 <div className="material-list">
                   {materials.map((item) => {
                     const resume = resumes.find((candidate) => candidate.id === item.id);
                     const isActive = resume?.id === candidateState?.profile.resume_id;
                     const material = candidateMaterials.find((candidate) => candidate.id === item.id);
-                    return <div key={item.id} className="material-row"><span className="file-icon">□</span><div><strong>{item.name}</strong><small>{isActive ? `${item.type} · 当前主简历` : item.type}</small></div>{resume ? <div className="material-row-actions"><a className="text-button" href={`/api/agent/resumes?id=${encodeURIComponent(resume.id)}&original=1`} target="_blank" rel="noreferrer">查看原件</a>{isActive ? <button className="text-button" type="button" onClick={editResumeText}>编辑文本版</button> : <button className="text-button" type="button" onClick={() => void activateUploadedResume(resume)} disabled={resumeBusy}>设为主简历</button>}<button className="text-button danger" type="button" onClick={() => void deleteUploadedResume(resume)} disabled={resumeBusy}>删除</button></div> : material ? <div className="material-row-actions material-repair-actions">
+                    return <div key={item.id} className="material-row"><span className="file-icon">□</span><div className="material-file"><strong>{item.name}</strong><small>{isActive ? `${item.type} · 当前主简历` : item.type}</small></div>{resume ? <div className="material-row-actions"><a className="text-button" href={`/api/agent/resumes?id=${encodeURIComponent(resume.id)}&original=1`} target="_blank" rel="noreferrer">查看原件</a>{isActive ? <button className="text-button" type="button" onClick={editResumeText}>编辑文本版</button> : <button className="text-button" type="button" onClick={() => void activateUploadedResume(resume)} disabled={resumeBusy}>设为主简历</button>}<button className="text-button danger" type="button" onClick={() => void deleteUploadedResume(resume)} disabled={resumeBusy}>删除</button></div> : material ? <div className="material-row-actions material-repair-actions">
                       <select aria-label={`重新解析 ${item.name} 的写入位置`} value={materialRepairTargets[material.id] ?? ""} disabled={resumeBusy} onChange={(event) => setMaterialRepairTargets((current) => ({ ...current, [material.id]: event.target.value }))}>
                         <option value="">作为新项目提案</option>
                         {(resumeDocument?.entries ?? []).map((entry) => <option key={entry.id} value={entry.id}>替换：{entry.title} · {entry.summary.slice(0, 45)}</option>)}
