@@ -19,6 +19,34 @@ from .security import redact, secure_compare
 logger = logging.getLogger(__name__)
 
 
+class HistoryMaintenanceMiddleware(BaseHTTPMiddleware):
+    """Single-process local gate: no uploads/commands racing a history reset."""
+    def __init__(self, app):
+        super().__init__(app)
+        self.writers = 0
+        self.clearing = False
+
+    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
+        from ..runtime.history_reset import RESET_PATH
+        maintenance = request.method == "POST" and request.url.path == RESET_PATH
+        mutation = request.method in {"POST", "PUT", "PATCH", "DELETE"}
+        if request.url.path.startswith("/api/") and self.clearing:
+            return JSONResponse({"detail": "正在清除历史，请稍后再操作"}, status_code=409)
+        if maintenance and self.writers:
+            return JSONResponse({"detail": "正在上传或处理操作，请等待完成后再清理"}, status_code=409)
+        if maintenance:
+            self.clearing = True
+        elif mutation:
+            self.writers += 1
+        try:
+            return await call_next(request)
+        finally:
+            if maintenance:
+                self.clearing = False
+            elif mutation:
+                self.writers -= 1
+
+
 class RequestIdMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
         request_id = request.headers.get("X-Request-ID", uuid.uuid4().hex)

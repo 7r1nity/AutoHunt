@@ -1463,3 +1463,11 @@ nav { display: grid; gap: 5px; }
 .standalone-board .job-card footer { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 10px; }
 .standalone-board .job-card footer small { min-width: 0; overflow-wrap: anywhere; }
 .standalone-board .job-card footer button { white-space: nowrap; }
+
+.topbar-actions { display: flex; align-items: center; flex-wrap: wrap; justify-content: flex-end; gap: 10px; }
+.history-reset-button { color: #d9a19a; white-space: nowrap; }
+.history-reset-modal .history-reset-scope { align-items: flex-start; font-size: 13px; line-height: 1.7; color: var(--muted); }
+.history-reset-confirm { background: #683a37; color: #fff1ee; border: 1px solid #995d56; }
+.history-reset-confirm:hover { background: #7a433e; }
+.history-reset-modal .history-reset-error { color: #e9a69c; }
+@media (max-width: 680px) { .topbar-actions { gap: 6px; } .history-reset-button { padding: 7px 9px; font-size: 11px; } }

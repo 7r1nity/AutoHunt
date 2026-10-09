@@ -370,6 +370,16 @@ export default function Home() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [chatText, setChatText] = useState("");
   const [notice, setNotice] = useState("在 Agent 对话中发送「搜索岗位」或「搜索 + 关键词」即可开始；浏览器会自动拉起");
+  const [historyResetOpen, setHistoryResetOpen] = useState(false);
+  const [historyResetBusy, setHistoryResetBusy] = useState(false);
+  const [historyResetError, setHistoryResetError] = useState("");
+  const [historyResetUncertain, setHistoryResetUncertain] = useState(false);
+  const [historyResetOptions, setHistoryResetOptions] = useState<{ enabled: boolean; mock_available: boolean } | null>(null);
+  const [historyResetMock, setHistoryResetMock] = useState(false);
+  useEffect(() => {
+    const completed = sessionStorage.getItem("autohunt-history-reset");
+    if (completed) { setNotice(completed); sessionStorage.removeItem("autohunt-history-reset"); }
+  }, []);
   const [llmProvider, setLlmProvider] = useState<"mock" | "deepseek">("mock");
   const [llmModel, setLlmModel] = useState("mock-autohunt-v1");
   const [llmApiKey, setLlmApiKey] = useState("");
@@ -1569,6 +1579,45 @@ export default function Home() {
     }
   }
 
+  async function openHistoryReset() {
+    setHistoryResetOpen(true);
+    setHistoryResetOptions(null);
+    setHistoryResetError("");
+    setHistoryResetUncertain(false);
+    try {
+      const response = await fetch("/api/agent/history", { cache: "no-store" });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.detail ?? "无法读取清理设置");
+      setHistoryResetOptions(payload);
+      setHistoryResetMock(payload.mock_available);
+    } catch (error) {
+      setHistoryResetError(error instanceof Error ? error.message : "无法连接后端");
+    }
+  }
+
+  async function clearHistory() {
+    if (historyResetBusy || historyResetUncertain) return;
+    setHistoryResetBusy(true);
+    setHistoryResetError("");
+    try {
+      const response = await fetch("/api/agent/history", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ confirmation: "CLEAR_HISTORY", include_mock: historyResetMock }),
+      });
+      if (response.status >= 500) setHistoryResetUncertain(true);
+      const payload = await response.json();
+      if (!response.ok || payload.cleared !== true) throw new Error(payload.detail ?? "清理结果未确认，请刷新核对");
+      localStorage.removeItem("autohunt-conversation");
+      sessionStorage.setItem("autohunt-history-reset", payload.message);
+      window.location.reload();
+    } catch (error) {
+      if (error instanceof TypeError || error instanceof SyntaxError) setHistoryResetUncertain(true);
+      setHistoryResetError(error instanceof Error ? error.message : "清理结果未确认，请刷新核对");
+    } finally {
+      setHistoryResetBusy(false);
+    }
+  }
+
   return (
     <main className={`app-shell${activeView === "chat" ? " chat-layout" : ""}`}>
       <aside className="sidebar">
@@ -1602,11 +1651,14 @@ export default function Home() {
             <h1>{activeView === "overview" ? "你的求职工作台" : navItems.find((item) => item[0] === activeView)?.[2]}</h1>
             <p>{activeView === "chat" ? "规划、搜索与申请，围绕你的目标展开。" : activeView === "overview" ? "你的求职 Agent 已准备好继续工作。" : "Demo 数据会在当前页面会话中即时更新。"}</p>
           </div>
+          <div className="topbar-actions">
+          <button type="button" className="button secondary compact history-reset-button" onClick={() => void openHistoryReset()}>清除历史数据</button>
           <div className="agent-control">
             <span className={`pulse ${agentStatus}`} />
             <div><small>Agent 状态</small><strong>{statusText}</strong></div>
             {activeView === "chat" && <span className="chat-mobile-status">{agentStatus === "idle" ? "空闲" : agentStatus === "running" ? "搜索中" : agentStatus === "waiting" ? "等待接管" : "已暂停"}</span>}
             {agentStatus !== "idle" && <button className="stop-agent" onClick={stopAgent} disabled={browserActionBusy}>停止</button>}
+          </div>
           </div>
         </header>
 
@@ -2020,6 +2072,23 @@ export default function Home() {
             <div className="panel security-note"><span>🔒</span><div><h3>本地安全边界</h3><p>前端只调用 Next.js 同源接口；真正的 DeepSeek 请求由 FastAPI 后端发出。后端仅允许官方固定地址和两个模型 ID。</p></div></div>
           </section>
         )}
+
+        {historyResetOpen && <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="history-reset-title" aria-describedby="history-reset-description" onKeyDown={(event) => { if (event.key === "Escape" && !historyResetBusy) setHistoryResetOpen(false); }}>
+          <div className="delivery-modal panel history-reset-modal">
+            <span className="eyebrow">TEMPORARY · LOCAL MAINTENANCE</span>
+            <h2 id="history-reset-title">清除历史数据？</h2>
+            <p id="history-reset-description">清空所有会话、简历与上传材料、求职偏好与搜索条件、搜索记录、申请看板及成长计划。同时关闭监测和每日任务。</p>
+            <p>保留模型配置、API Key、浏览器登录、规则及技能。清理前自动备份到本地；有任务运行时不会清理。</p>
+            {historyResetOptions?.mock_available && <label className="workflow-toggle history-reset-scope"><input type="checkbox" checked={historyResetMock} disabled={historyResetBusy} onChange={(event) => setHistoryResetMock(event.target.checked)} />同时清空模拟招聘网站的简历、沟通、投递和表单作答；保留账号与职位库</label>}
+            {historyResetOptions && !historyResetOptions.mock_available && <p>未配置模拟站数据库：本次仅清空 AutoHunt，不会修改模拟网站。</p>}
+            {historyResetOptions && !historyResetOptions.enabled && <p role="alert">临时清理功能已在后端关闭。</p>}
+            {historyResetError && <p className="history-reset-error" role="alert">{historyResetError}</p>}
+            <div className="modal-actions">
+              <button type="button" className="button secondary" autoFocus disabled={historyResetBusy} onClick={() => setHistoryResetOpen(false)}>取消</button>
+              {historyResetUncertain ? <button type="button" className="button secondary" onClick={() => window.location.reload()}>刷新核对结果</button> : <button type="button" className="button history-reset-confirm" disabled={historyResetBusy || !historyResetOptions?.enabled} onClick={() => void clearHistory()}>{historyResetBusy ? "正在备份并清理…" : "确认清除历史"}</button>}
+            </div>
+          </div>
+        </div>}
 
         {detailJob && (
           <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label="职位详情" onClick={() => setDetailJobId(null)}>

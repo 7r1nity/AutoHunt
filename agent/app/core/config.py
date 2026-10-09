@@ -35,6 +35,9 @@ class Settings:
     router_small_api_key: str | None = os.getenv("AUTOHUNT_ROUTER_SMALL_API_KEY")
     router_small_base_url: str = os.getenv("AUTOHUNT_ROUTER_SMALL_BASE_URL", "https://api.siliconflow.cn/v1")
     router_small_model: str = os.getenv("AUTOHUNT_ROUTER_SMALL_MODEL", "")
+    # Temporary, authenticated local maintenance. No path is accepted from UI.
+    history_reset_enabled: bool = os.getenv("AUTOHUNT_HISTORY_RESET_ENABLED", "false").lower() == "true"
+    mock_history_database: str | None = os.getenv("AUTOHUNT_MOCK_HISTORY_DATABASE") or None
 
 
 settings = Settings()

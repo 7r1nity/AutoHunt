@@ -87,6 +87,10 @@ class RunStore:
         with self.connect() as db:
             return [dict(row) for row in db.execute("SELECT * FROM agent_sessions ORDER BY created_at DESC")]
 
+    def ensure_default_session(self) -> None:
+        with self.lock, self.connect() as db:
+            db.execute("INSERT OR IGNORE INTO agent_sessions VALUES (?,?,?)", ("default", "默认会话", now()))
+
     def create_session(self, title: str) -> dict:
         session = {"id": uuid.uuid4().hex, "title": redact_text(title.strip())[:80] or "新会话", "created_at": now()}
         with self.lock, self.connect() as db:

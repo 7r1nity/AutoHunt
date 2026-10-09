@@ -12,6 +12,8 @@ from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import Response, StreamingResponse
+from pydantic import BaseModel, ConfigDict
+from typing import Literal
 
 from ..core.config import settings
 from ..llm.base import LLMRequest
@@ -41,6 +43,8 @@ from ..core.dependencies import (
     run_store,
     agent_runtime,
 )
+from ..core.dependencies import router_store
+from ..runtime.history_reset import HistoryResetter, ResetBusy, RESET_PATH
 from ..runtime.models import RunCreate, SessionCreate, public_run
 from ..delivery.automation import UnsupportedDeliverySite
 from ..jobs.analysis import analyze_job
@@ -51,6 +55,7 @@ from ..core.middleware import (
     RateLimitMiddleware,
     RequestIdMiddleware,
     SecurityHeadersMiddleware,
+    HistoryMaintenanceMiddleware,
 )
 from ..core.models import (
     AgentLane,
@@ -113,6 +118,7 @@ app = FastAPI(title="AutoHunt API", version="0.1.0", lifespan=lifespan, docs_url
 
 # Starlette executes the most recently added middleware first. Authentication and limits
 # remain outside audit/business logic, while every response receives security headers.
+app.add_middleware(HistoryMaintenanceMiddleware)
 app.add_middleware(ApiKeyMiddleware, api_key=settings.api_key)
 app.add_middleware(BodyLimitMiddleware, max_bytes=settings.max_body_bytes)
 app.add_middleware(RateLimitMiddleware, requests_per_minute=settings.rate_limit,
@@ -128,6 +134,34 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "DELETE"],
     allow_headers=["Content-Type", "X-AutoHunt-Key", "X-Request-ID"],
 )
+
+
+history_resetter = HistoryResetter(settings.data_root, job_store, run_store, router_store, agent,
+    browser_service, delivery_service, mock_workflow, agent_runtime, mock_database=settings.mock_history_database)
+
+
+class HistoryResetRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    confirmation: Literal["CLEAR_HISTORY"]
+    include_mock: bool = False
+
+
+@app.get(RESET_PATH)
+async def history_reset_options() -> dict:
+    return {"enabled": settings.history_reset_enabled,
+        "mock_available": bool(history_resetter.mock_database and history_resetter.mock_database.is_file())}
+
+
+@app.post(RESET_PATH)
+async def clear_history(request: HistoryResetRequest) -> dict:
+    if not settings.history_reset_enabled:
+        raise HTTPException(status_code=403, detail="临时历史清理功能已关闭")
+    try:
+        return await history_resetter.clear(include_mock=request.include_mock)
+    except (ResetBusy, ValueError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="历史清理未完成，请核对本地备份；不要自动重试") from exc
 
 
 @app.post("/api/v1/chat", response_model=ChatResponse)
