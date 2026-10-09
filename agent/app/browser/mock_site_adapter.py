@@ -81,14 +81,50 @@ class MockJobSiteSearchAdapter:
             await button.first.click()
         await page.wait_for_timeout(200)
 
-    async def search(self, page: Page, query: str, city: str | None, *, max_cards: int = 200) -> list[dict]:
-        # The site matches titles by literal substring; a compound label such as
-        # "AI/LLM 算法工程师" matches zero titles. Normalise at the last possible
-        # moment so every caller benefits.
+    @staticmethod
+    def _keyword_variants(query: str) -> list[str]:
+        """Search terms for one role label, most specific first.
+
+        The site matches a literal substring over title, company and description, so
+        a spaced or slash-joined label misses titles that exist ('NLP 算法工程师'
+        vs 'NLP算法工程师'). Every specialisation the label carries is kept as long
+        as it still finds something; widening to the bare role word is the last
+        resort, because dropping the direction silently changes what was asked for.
+        """
         from ..core.search_contract import browser_search_keyword
-        query = browser_search_keyword(query) or query
+        text = re.sub(r"\s+", " ", str(query or "")).strip()
+        if not text:
+            return []
+        variants: list[str] = [text]
+        joined = re.sub(r"\s+", "", text)
+        if joined != text:
+            variants.append(joined)
+        directions = [item for item in re.findall(r"[A-Za-z][A-Za-z0-9+.#]*", text) if len(item) >= 2]
+        broad = browser_search_keyword(text)
+        for direction in directions:
+            if direction not in variants:
+                variants.append(direction)
+        if broad and broad not in variants:
+            variants.append(broad)
+        ordered: list[str] = []
+        for item in variants:
+            if not item or item in ordered:
+                continue
+            # A fragment that keeps neither the direction nor the full role phrase is
+            # a different job family ('Agent开发工程师' must not become '开发工程师').
+            if broad and directions and item != broad and item not in directions:
+                if item not in text or not re.search(r"[\u4e00-\u9fff]", item):
+                    continue
+            ordered.append(item)
+        return ordered
+
+    async def _result_count(self, page: Page) -> int:
+        text = await page.locator("#result-count").text_content() or ""
+        match = re.search(r"(\d+)", text.replace(",", ""))
+        return int(match[1]) if match else 0
+
+    async def search(self, page: Page, query: str, city: str | None, *, max_cards: int = 200) -> list[dict]:
         await page.locator("#keyword").wait_for(state="visible", timeout=10_000)
-        await page.locator("#keyword").fill(query)
         category_select = page.locator("#category")
         if await category_select.count():
             await category_select.select_option(value="")
@@ -102,13 +138,40 @@ class MockJobSiteSearchAdapter:
                 await city_select.select_option(value="")
         else:
             await page.locator("#city").select_option(value="")
-        await page.locator("button.search-btn").click()
-        await page.wait_for_function(
-            "() => (document.querySelector('#result-count')?.textContent || '').includes('为你找到')",
-            timeout=10_000,
-        )
-        await page.wait_for_timeout(250)
-        cards = await self.extract_search_cards(page)
+        cards = []
+        restricted = False
+        for variant in self._keyword_variants(query):
+            if restricted:
+                # A direction was asked for and the site has no job in it. Returning
+                # a different job family instead would silently answer a question the
+                # user did not ask, so the direction is reported as unavailable.
+                break
+            await page.locator("#keyword").fill(variant)
+            await page.locator("button.search-btn").click()
+            await page.wait_for_function(
+                "() => (document.querySelector('#result-count')?.textContent || '').includes('为你找到')",
+                timeout=10_000,
+            )
+            await page.wait_for_timeout(250)
+            cards = await self.extract_search_cards(page)
+            if not cards:
+                continue
+            # A widened direction token also matches description prose and even
+            # unrelated words ("Agent" hits 配送 because those titles contain the
+            # letters). When the variant is not a role label, the direction has to
+            # be in the title for the job to count as that direction.
+            if re.fullmatch(r"[A-Za-z][A-Za-z0-9+.#]*", variant):
+                matched = [card for card in cards
+                           if variant.lower() in str(card.get("title", "")).lower()]
+                if matched:
+                    cards = matched
+                    break
+                cards = []
+                restricted = True
+                continue
+            break
+        if not cards:
+            return []
         seen = {card["url"] for card in cards}
         # Follow the simulator's visible pagination controls, not its API.
         # A bounded page budget and duplicate-page guard prevent refresh loops.
