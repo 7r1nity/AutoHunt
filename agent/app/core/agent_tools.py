@@ -102,6 +102,9 @@ class AgentToolPolicy:
         if authority:
             from ..workflow.planning import command_grounded
             from ..growth.requests import resume_stamp
+            instruction = (context.dialogue or {}).get("instruction_request") or {}
+            if instruction.get("id") == authority.get("plan_id") and spec.name in instruction.get("revoked_tools", []):
+                return False, "用户已撤回该工作流动作，不能沿用原授权"
             if (authority.get("tool") != spec.name or authority.get("arguments") != arguments
                     or authority.get("command") != user_message
                     or authority.get("expires_at", 0) < time.time()
@@ -590,7 +593,7 @@ class AgentToolRegistry:
                 "result_limit": request.result_limit, "salary_min": request.salary_min,
             }, state, self.resume_workspace.read_document().version)
             updated["query_source"] = conditions["query_source"]
-            persisted = save_search_state(updated)
+            persisted = save_search_state(updated, user_edit=True)
             request.search_state_revision = persisted["revision"]
         task = await self.browser.start(request)
         return {**task.model_dump(mode="json"), "search_conditions": {
@@ -613,7 +616,7 @@ class AgentToolRegistry:
         from .search_contract import safe_role_keyword
         if "queries" in args and any(not safe_role_keyword(keyword) for keyword in state["queries"]):
             raise ValueError("岗位关键词包含未解析的描述；请提供简短的岗位名称")
-        return save_search_state(state)
+        return save_search_state(state, user_edit=args)
 
     async def _preference_read(self, _args: dict[str, Any]) -> Any:
         return self.candidate_state.read().preferences.model_dump(mode="json")

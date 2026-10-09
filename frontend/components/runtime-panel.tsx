@@ -19,6 +19,7 @@ function stepDescription(event: RunEvent): string {
     return data.repair_kind === "draft_format" ? "规划格式无效，进行一次修复；尚未执行工具" : data.repair_kind === "transport_metadata" ? "移除格式元数据；仍校验目标、范围和授权" : `${data.tool} · 修复只读参数编码，不改变范围`;
   if (event.kind === "request_resolution") return `上下文续接 · ${data.action}${data.detail ? ` · ${data.detail}` : ""}`;
   if (event.kind === "request_anchor") return `原请求定位 · ${data.status} · ${data.detail}`;
+  if (event.kind === "turn_understanding") return `输入理解 · ${data.role} · ${data.new_task ? "新任务" : "不替换原任务"}`;
   if (event.kind === "request_understanding") return "已按结构化上下文理解请求；无需模型调用，尚未执行";
   if (event.kind === "watchdog_expired") return `安全停止 · ${data.code}；未自动重放动作`;
   if (event.kind === "plan_failed") return `规划未执行 · ${data.code} · ${data.detail}`;

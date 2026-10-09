@@ -164,7 +164,7 @@ class IntentRouter:
             return outcome
 
         # --- P5: clarify memory ---------------------------------------------
-        remembered = self.store.lookup_clarify(qhash)
+        remembered = self.store.lookup_clarify(self._clarify_key(message))
         if remembered is not None:
             outcome = RouteOutcome(
                 decision=self._decision_for(remembered),
@@ -267,7 +267,7 @@ class IntentRouter:
         )
         if chosen is None:
             return None
-        self.store.remember_clarify(self._scoped_hash(previous_message), chosen, source="user_choice")
+        self.store.remember_clarify(self._clarify_key(previous_message), chosen, source="user_choice")
         return chosen
 
     # --------------------------------------------------------------- drift log
@@ -290,6 +290,21 @@ class IntentRouter:
             self._last_decision.clear()
 
     # ---------------------------------------------------------------- helpers
+    @staticmethod
+    def _clarify_key(message: str) -> str:
+        # A remembered label is local to its task/focus/conditions, not forever
+        # attached to the same short phrase across unrelated contexts.
+        import json
+        from ..runtime.context import active_run
+        context = active_run()
+        if not context:
+            return query_hash(message)
+        state = context.dialogue or {}
+        basis = {"session": context.session_id, "topic": state.get("active_intent"),
+            "root": (state.get("task_request") or {}).get("id"),
+            "focus": state.get("selected_job"), "conditions": context.search_state}
+        return query_hash(message + "::" + json.dumps(basis, ensure_ascii=False, sort_keys=True))
+
     @staticmethod
     def _scoped_hash(message: str) -> str:
         from ..runtime.context import active_run

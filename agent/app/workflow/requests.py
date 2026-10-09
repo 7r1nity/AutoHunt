@@ -22,6 +22,9 @@ class TaskRequest(BaseModel):
     status: str = "planning"
     resume_stamp: str = ""
     conditions: dict = Field(default_factory=dict)
+    amendments: list[dict] = Field(default_factory=list, max_length=12)
+    revoked_tools: list[str] = Field(default_factory=list, max_length=12)
+    condition_overrides: dict = Field(default_factory=dict)
     execution_started: bool = False
     failure: str = ""
     updated_at: float = Field(default_factory=time.time)
@@ -53,6 +56,56 @@ def action_request(message: str) -> bool:
 
 def request_selector(message: str) -> str:
     return "first" if is_continuation(message) and re.search(r"第(?:一|1)(?:次|个|条)|最初|最开始", message) else "recent"
+
+
+def capture_request(saved: dict, message: str, run_id: str, stamp: str, conditions: dict, *, retry: bool = False) -> TaskRequest:
+    """All execution paths use the same immutable user-task anchor.
+
+    Retrying the same never-executed task keeps its identity and amendments.
+    A new command, including re-search, is a new task, not old write authority.
+    """
+    old = saved.get("task_request") or {}
+    if old.get("original") == message and (retry or old.get("run_id") == run_id) and not old.get("execution_started") and old.get("status") not in {"finished", "cancelled", "outcome_indeterminate"}:
+        return TaskRequest.model_validate({**old, "run_id": run_id, "status": "planning", "failure": "",
+            "resume_stamp": old.get("resume_stamp") or stamp})
+    from ..core.search_contract import explicit_search_constraints
+    try:
+        explicit = explicit_search_constraints(message)
+    except ValueError:
+        explicit = {}  # Conflict remains for the planner/executor to reject.
+    return TaskRequest(original=message, run_id=run_id, origin_run_id=run_id,
+        resume_stamp=stamp, conditions={**conditions, **explicit})
+
+
+def amended_request(saved: dict, conditions: dict, message: str, source: str, fields: set[str] | None = None) -> TaskRequest | None:
+    """Only an observed, validated session edit updates requirements; no authority."""
+    from ..core.search_language import parse_search_message
+    root = saved.get("task_request") or {}
+    if not root or not parse_search_message(root.get("original", "")).authorized:
+        return None
+    changed = {key: value for key, value in conditions.items()
+        if key in {"queries", "locations", "result_limit", "salary_min", "max_jobs", "query_source", "resume_stamp"}
+        and (fields is None or key in fields)
+        and root.get("conditions", {}).get(key) != value}
+    if not changed:
+        return None
+    amendments = root.get("amendments", [])
+    if message and source != root.get("run_id"):
+        amendments = [*amendments, {"message": message, "source": source, "fields": changed}][-12:]
+    return TaskRequest.model_validate({**root, "conditions": {**root.get("conditions", {}), **changed},
+        "condition_overrides": {**root.get("condition_overrides", {}), **changed}, "amendments": amendments})
+
+
+def withdrawn_request(saved: dict, message: str) -> TaskRequest | None:
+    from .planning import MUTATION_CUES, command_grounded, revoked
+    root = saved.get("task_request") or {}
+    if not root:
+        return None
+    clauses = re.split(r"[，,。；;\n]|然后|并且|同时|接着", root.get("original", ""))
+    withdrawn = {tool for tool in MUTATION_CUES if revoked(tool, [root["original"], message])
+        and any(command_grounded(tool, clause.strip(), [root["original"]]) for clause in clauses)}
+    new = withdrawn - set(root.get("revoked_tools", []))
+    return TaskRequest.model_validate({**root, "revoked_tools": sorted(set(root.get("revoked_tools", [])) | new)}) if new else None
 
 
 def proven_idle_resume(events: list[dict]) -> bool:

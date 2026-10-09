@@ -89,9 +89,14 @@ def bounded_history(messages: list[dict], *, max_messages=20, max_chars=18_000) 
         if item.get("role") not in {"user", "assistant"} or not item.get("content"):
             continue
         content = str(item["content"])
-        if result and len(content) > remaining:
+        # Long assistant reports must not crowd out the preceding user intent.
+        # This is optional prose context, not a source of execution authority.
+        limit = min(remaining, max_chars // 4 if item["role"] == "assistant" else max_chars // 2)
+        if limit <= 0:
             break
-        content = content[:remaining]
+        if len(content) > limit:
+            marker = "…[历史片段省略；原文可检索]"
+            content = content[:max(0, limit-len(marker))] + marker[:limit]
         result.append({"role": item["role"], "content": content})
         remaining -= len(content)
         if len(result) >= max_messages or remaining <= 0:

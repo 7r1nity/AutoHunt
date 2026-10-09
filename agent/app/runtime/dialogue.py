@@ -93,6 +93,9 @@ class DialogueState(Strict):
 
 def topic_for(message: str, previous: str = "general") -> str:
     # This is a coarse focus hint, NOT an intent router or authorization check.
+    from .understanding import turn_role
+    if turn_role(message).kind in {"recall", "repair", "reference"}:
+        return previous
     if CONFIRM.fullmatch(message.strip()) or REJECT.fullmatch(message.strip()):
         return previous
     if message.strip().strip("。!?！？") in {"看看我的情况", "看看情况", "现在呢", "怎么样", "这样是否合理", "进展怎么样", "这个怎么样"}:
@@ -185,10 +188,18 @@ def apply_operation(saved: dict | None, operation: dict, *, clock: float | None 
             for key, value in conditions.items()}
         if previous.slots == conditions:
             return state.model_dump(mode="json")
-        state.frames["search"] = Frame(slots=conditions,
-            missing_slots=[] if conditions.get("queries") else ["queries"],
-            last_question="请说明目标岗位，或上传简历以提供方向。" if not conditions.get("queries") else "",
-            slot_sources=sources)
+        changed = {key for key, value in conditions.items() if previous.slots.get(key) != value}
+        answered = bool(previous.missing_slots and set(previous.missing_slots) <= changed
+            and all(conditions.get(key) is not None for key in previous.missing_slots))
+        if previous.last_question and not answered:
+            # Synchronizing search data is not a new question. Keep question
+            # provenance/TTL and the exact missing slots across unrelated edits.
+            state.frames["search"] = previous.model_copy(update={"slots": conditions, "slot_sources": sources})
+        else:
+            state.frames["search"] = Frame(slots=conditions,
+                missing_slots=[] if conditions.get("queries") else ["queries"],
+                last_question="请说明目标岗位，或上传简历以提供方向。" if not conditions.get("queries") else "",
+                slot_sources=sources)
         if previous.slots != conditions:
             trace(state, "condition_update", source, slots=conditions)
     elif op == "snapshot":
@@ -236,6 +247,8 @@ def apply_operation(saved: dict | None, operation: dict, *, clock: float | None 
         frame.question_turn, frame.question_expires_at = state.turn, now + 600
         frame.missing_slots = operation.get("missing_slots", [])[:12]
         state.active_intent = operation["topic"]
+        if state.task_request and state.task_request.get("run_id") == source and not state.task_request.get("execution_started"):
+            state.task_request["status"] = "clarifying"
     elif op == "clarify":
         state.clarification = {"message": str(operation["message"])[:2000],
             "options": operation["options"], "source": source, "expires_at": now + 600, "turn": state.turn}
@@ -290,6 +303,20 @@ def apply_operation(saved: dict | None, operation: dict, *, clock: float | None 
         if operation.get("bind") or key not in state.tasks or state.tasks[key] == operation["id"]:
             state.tasks[key] = operation["id"]
         trace(state, "task", source, task_id=operation["id"], status=operation.get("status", "unknown"))
+    elif op == "abandon":
+        # Reject execution, not the user's remembered conditions or raw history.
+        for item in state.pending:
+            if item.status == "pending":
+                item.status = "rejected"
+        for frame in state.frames.values():
+            frame.last_question, frame.missing_slots = "", []
+        if state.task_request:
+            state.task_request["status"] = "cancelled"
+        if state.instruction_request:
+            state.instruction_request = {**state.instruction_request, "status": "cancelled", "expires_at": 0}
+        state.learning_request, state.workflow_request = None, None
+        state.tasks["plan_id"] = ""
+        trace(state, "rejection", source)
     elif op == "reset":
         # Clear dialogue scope only, not resume, preference, board, raw history or external jobs.
         refusals = [item for item in state.trace if item["kind"] == "rejection"][-3:]

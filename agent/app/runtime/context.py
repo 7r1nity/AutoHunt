@@ -49,13 +49,23 @@ def checkpoint(data: dict) -> None:
         context.save(data)
 
 
-def save_search_state(value: dict) -> dict:
+def save_search_state(value: dict, *, user_edit: bool | dict = False) -> dict:
     context = active_run()
     if not context:
         return value
     context.search_state = context.persist_search(value) if context.persist_search else value
     emit("search_state", conditions=context.search_state)
     dialogue_change("slots", conditions=context.search_state)
+    if user_edit is not False:
+        from ..workflow.requests import amended_request
+        fields = set(user_edit) if isinstance(user_edit, dict) else None
+        if fields is not None and "use_resume_profile" in fields:
+            fields.update({"queries", "query_source", "resume_stamp"})
+        if fields is not None and "queries" in fields:
+            fields.update({"query_source", "resume_stamp"})
+        amended = amended_request(context.dialogue or {}, context.search_state, context.user_message, context.run_id, fields)
+        if amended:
+            dialogue_change("request_state", request=amended.model_dump())
     return context.search_state
 
 

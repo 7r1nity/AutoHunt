@@ -37,9 +37,9 @@ def request_context(saved: dict) -> dict:
         "active_intent": saved.get("active_intent", "general"),
         "turn": saved.get("turn", 0), "revision": saved.get("revision", 0),
         "task_request": {key: request.get(key) for key in
-            ("id", "original", "status", "execution_started", "failure")} if request else None,
+            ("id", "origin_run_id", "original", "conditions", "amendments", "revoked_tools", "status", "execution_started", "failure")} if request else None,
         "instruction": {key: instruction.get(key) for key in
-            ("id", "original", "status", "questions", "answers")} if instruction else None,
+            ("id", "original", "status", "questions", "answers", "revoked_tools")} if instruction else None,
         "tasks": saved.get("tasks", {}),
         "missing_slots": {name: frame.get("missing_slots", []) for name, frame in saved.get("frames", {}).items()
             if frame.get("missing_slots")},
@@ -66,11 +66,18 @@ def request_summary(saved: dict, conditions: dict, history: list[dict] | None = 
         # browser ran or that session defaults were already updated.
         from .search_contract import explicit_search_constraints
         try:
-            requirements = {**request.get("conditions", {}), **explicit_search_constraints(original)}
+            requirements = {**explicit_search_constraints(original), **{key: value for key, value in request.get("conditions", {}).items()
+                if value is not None or key in request.get("condition_overrides", {}) or any(key in item.get("fields", {}) for item in request.get("amendments", []))}}
         except ValueError:
             requirements = {}
         if not request.get("execution_started") and requirements:
             conditions = {**conditions, **requirements}
+        amendments = request.get("amendments", [])
+        if amendments:
+            lines += ["后续已记录的补充：", *["- " + item.get("message", "")[:600] for item in amendments[-4:] if item.get("message")]]
+        if request.get("revoked_tools"):
+            labels = {"mock_delivery_start": "投递", "learning_plan_generate": "生成成长计划", "job_search_start": "搜索"}
+            lines.append("已撤回的动作：" + "、".join(labels.get(name, name) for name in request["revoked_tools"]) + "；不会因继续任务而恢复授权。")
         if status in {"failed", "timed_out", "interrupted", "planning"} and not request.get("execution_started"):
             lines.append("这项请求尚未执行；可以继续重新规划，不代表浏览器已启动或登录已验证。")
         elif status == "clarifying":

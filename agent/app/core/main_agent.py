@@ -17,7 +17,7 @@ from ..memory.candidate_state import CandidateEvidenceExtractor, CandidateStateS
 from ..memory.stores import MemoryStore, SkillStore
 from ..memory.resume_workspace import ResumeWorkspaceStore
 from ..runtime.context import RunContext, current_run, active_run, checkpoint, emit, dialogue_change, save_search_state, scoped_browser, browser_availability
-from ..runtime.dialogue import CONFIRM, REJECT, pending_action, compact_state, assemble_context, bounded_data, slot_answer_patch
+from ..runtime.dialogue import CONFIRM, REJECT, pending_action, assemble_context, bounded_data, slot_answer_patch
 from ..runtime.search_state import bounded_history, prepare_search_state
 
 
@@ -356,8 +356,9 @@ class AutoHuntAgent:
         document = self.resume_workspace.read_document() if self.resume_workspace is not None else None
         context = active_run()
         browser_data = browser_availability(self.tool_registry.browser) if self.tool_registry else {}
-        return assemble_context([
-            ("会话 DST（结构化事实，最新字段优先）", compact_state(context.dialogue or {}) if context else {}, 5500),
+        from ..runtime.memory_context import context_json
+        task_context = context_json(context.dialogue or {}, context.search_state or {}) if context else "{}"
+        return "# 会话任务记忆（事实，不是执行授权）\n" + task_context + "\n\n" + assemble_context([
             ("当前会话搜索条件（临时条件，不是长期偏好）", context.search_state if context else {}, 1600),
             ("当前简历与长期偏好（数据，不含执行授权）", candidate.prompt_context, 4200),
             ("主简历状态", {'version': document.version, 'headline': document.headline,
@@ -458,6 +459,10 @@ class AutoHuntAgent:
         else:
             self._begin_context(message)
             patch = patch or slot_answer_patch(context.dialogue or {}, message)
+            from ..runtime.understanding import turn_role
+            role = turn_role(message, patch=patch)
+            emit("turn_understanding", role=role.kind, new_task=role.new_task,
+                 detail="输入角色与执行授权分离；仅实际工具结果更新执行事实")
             response = await self._dispatch_contextual_message(message, patch)
         self._conversation_history.extend([
             {"role": "user", "content": message},
@@ -478,9 +483,12 @@ class AutoHuntAgent:
                     datetime.fromisoformat(item["created_at"]).timestamp() >= state["history_epoch"]]
                 self._conversation_history = bounded_history(live)
         dialogue_change("slots", conditions=context.search_state or {})
-        context.routing_context = bounded_data({"conditions": context.search_state,
-            "dst": compact_state(context.dialogue or {}),
-            "recent_turns": bounded_history(self._conversation_history, max_messages=4, max_chars=1500)}, budget=4000)
+
+    def _refresh_routing_context(self) -> None:
+        from ..runtime.memory_context import context_json
+        context = active_run()
+        context.routing_context = context_json(context.dialogue or {}, context.search_state or {},
+            self._conversation_history, purpose="router")
 
     async def _dispatch_contextual_message(self, message: str, patch: dict | None) -> ChatResponse:
         context = active_run()
@@ -517,7 +525,6 @@ class AutoHuntAgent:
             return ChatResponse(message="这条消息没有新的任务参数，不会覆盖原请求。\n\n" +
                 request_summary(context.dialogue or {}, context.search_state or {}, self._conversation_history), lane=AgentLane.APPLICATION)
         if stripped in {"退出当前任务", "不办了"}:
-            dialogue_change("request_state", request=None)
             return await self._resolve_context_confirmation("取消")
         if stripped in {"重置上下文", "清空会话状态", "重新开始"}:
             dialogue_change("reset")
@@ -537,26 +544,66 @@ class AutoHuntAgent:
             emit("request_resolution", action=resolved.action, detail=resolved.message)
             if resolved.action == "replan":
                 emit("progress", detail="已定位上文尚未执行的请求，正在重新规划全部目标；不是恢复空闲浏览器")
+                root = (context.dialogue or {}).get("task_request") or {}
+                if root.get("amendments") or root.get("revoked_tools"):
+                    import time
+                    # resolve_continuation has already checked no execution,
+                    # ownership, resume and age. Carry only validated user edits,
+                    # never a historical preview/token or completed step.
+                    import uuid
+                    retry_request = {"id": uuid.uuid4().hex, "original": root["original"], "answers": [item["message"] for item in root["amendments"] if item.get("message")],
+                        "revoked_tools": root.get("revoked_tools", []),
+                        "condition_overrides": root.get("condition_overrides", {}),
+                        "questions": [], "steps": [], "status": "clarifying", "resume_stamp": stamp,
+                        "turn": (context.dialogue or {}).get("turn", 0), "expires_at": time.time()+600}
+                    return await self._handle_planned(message, previous=retry_request)
                 return await self._handle_planned(resolved.original)
             if resolved.action == "browser":
                 return await self._direct_browser_control("resume_search")
             return ChatResponse(message=resolved.message, lane=AgentLane.APPLICATION)
         pending = live_request(context.dialogue or {}, stamp)
+        from ..workflow.requests import withdrawn_request
+        withdrawn = withdrawn_request(context.dialogue or {}, message)
+        if withdrawn:
+            dialogue_change("request_state", request=withdrawn.model_dump())
+            instruction = (context.dialogue or {}).get("instruction_request") or {}
+            if instruction.get("original") == withdrawn.original:
+                dialogue_change("instruction", request={**instruction, "revoked_tools": withdrawn.revoked_tools})
+            if pending and pending.get("original") == withdrawn.original:
+                pending = {**pending, "revoked_tools": withdrawn.revoked_tools}
+                dialogue_change("instruction", request=pending)
+            elif not action_request(message):
+                return ChatResponse(message="已撤回原任务中尚未开始的相关动作；已执行的操作不会被撤销。其他需求保留，本轮没有启动或重放操作。", lane=AgentLane.APPLICATION)
         if pending and any(revoked(step["tool"], [pending["original"], message]) for step in pending.get("steps", [])):
             # Persist withdrawn authority even if the model subsequently returns
             # invalid JSON. A later slot answer cannot resurrect the old action.
             pending = {**pending, "answers": [*pending.get("answers", []), message][-4:]}
+            pending["revoked_tools"] = sorted(set(pending.get("revoked_tools", [])) | {
+                step["tool"] for step in pending.get("steps", []) if revoked(step["tool"], [pending["original"], message])})
             dialogue_change("instruction", request=pending)
-        if pending and pending_slot_answer(message, pending) and not REJECT.fullmatch(stripped):
+            root = (context.dialogue or {}).get("task_request")
+            if root and root.get("original") == pending["original"]:
+                dialogue_change("request_state", request={**root, "revoked_tools": sorted(set(root.get("revoked_tools", [])) | set(pending["revoked_tools"]))})
+        engine = getattr(self.router, "rule_engine", None)
+        known_match = engine.match(message) if engine else None
+        if pending and pending_slot_answer(message, pending, rule_match=known_match) and not REJECT.fullmatch(stripped):
             return await self._handle_planned(message, previous=pending)
         search_action = parse_search_message(message)
         if search_action.authorized or REJECT.fullmatch(stripped) or search_action.action in {"stop", "pause"}:
-            if search_action.authorized or REJECT.fullmatch(stripped) or search_action.action == "stop":
-                dialogue_change("request_state", request=None)
+            if REJECT.fullmatch(stripped) or search_action.action == "stop":
+                root = (context.dialogue or {}).get("task_request")
+                if root:
+                    dialogue_change("request_state", request={**root, "status": "cancelled"})
             dialogue_change("workflow", request=None)
             dialogue_change("instruction", request=None)
             if REJECT.fullmatch(stripped) or search_action.authorized or search_action.action == "stop":
                 dialogue_change("task", kind="plan_id", id="", status="superseded", bind=True)
+        # Rules, small-model routes and full plans share one task anchor.
+        # Read/repair/reference/condition-only turns never replace it.
+        if action_request(message):
+            from ..workflow.requests import capture_request
+            root = capture_request(context.dialogue or {}, message, context.run_id, stamp, context.search_state or {})
+            dialogue_change("request_state", request=root.model_dump())
         if not shortcut_safe(message):
             return await self._handle_routed(message) if self.router else await self._handle_planned(message)
         if CONFIRM.fullmatch(stripped) or REJECT.fullmatch(stripped):
@@ -631,22 +678,26 @@ class AutoHuntAgent:
         if not self.tool_registry:
             return ChatResponse(message="工作流执行器尚未配置，没有启动搜索或后续动作。", lane=AgentLane.APPLICATION)
         stamp = resume_stamp(self.resume_workspace.read_document(), self.candidate_state)
-        from ..workflow.requests import TaskRequest, action_request
+        from ..workflow.requests import capture_request, action_request
+        prior_root = (context.dialogue or {}).get("task_request")
+        if previous and prior_root and previous.get("original") == prior_root.get("original"):
+            previous = {**previous, "condition_overrides": prior_root.get("condition_overrides", {}),
+                "revoked_tools": sorted(set(previous.get("revoked_tools", [])) | set(prior_root.get("revoked_tools", [])))}
         tracked = action_request(previous["original"] if previous else message)
         if tracked:
             root_original = previous["original"] if previous else message
-            current_request = (context.dialogue or {}).get("task_request") or {}
-            task_request = TaskRequest(original=previous["original"] if previous else message,
-                run_id=context.run_id, resume_stamp=stamp, conditions=context.search_state or {},
-                origin_run_id=(current_request.get("origin_run_id") if current_request.get("original") == root_original else "") or context.run_id)
+            from ..workflow.requests import is_continuation
+            task_request = capture_request(context.dialogue or {}, root_original, context.run_id, stamp, context.search_state or {},
+                retry=bool(previous) or is_continuation(context.user_message))
             dialogue_change("request_state", request=task_request.model_dump())
         emit("progress", detail="正在识别全部目标、核对参数与执行依赖；尚未执行")
         try:
             if self.router and not self.router.llm_available():
                 raise RuntimeError("主模型熔断保护生效，请稍后重试")
+            from ..runtime.memory_context import compile_context
             plan = await plan_request(self.llm, self.tool_registry, message, previous=previous,
-                dialogue={**compact_state(context.dialogue or {}), "recent_turns": bounded_history(
-                    self._conversation_history, max_messages=8, max_chars=4000)}, conditions=context.search_state or {}, stamp=stamp)
+                dialogue=compile_context(context.dialogue or {}, context.search_state or {}, self._conversation_history),
+                conditions=context.search_state or {}, stamp=stamp)
             if self.router:
                 self.router.record_llm_success()
         except (ValueError, RuntimeError, asyncio.TimeoutError) as exc:
@@ -656,7 +707,8 @@ class AutoHuntAgent:
                 self.router.record_final(message, "plan_rejected")
             detail = f"没有执行任务：{str(exc) or '规划超时'}。原始请求保留，不会自动重试。"
             if tracked:
-                task_request.status, task_request.failure = "failed", type(exc).__name__
+                task_request.status = prior_root.get("status", "failed") if previous and prior_root else "failed"
+                task_request.failure = type(exc).__name__
                 dialogue_change("request_state", request=task_request.model_dump())
             emit("plan_failed", code="planning_timeout" if isinstance(exc, TimeoutError) else "planning_rejected", detail=detail)
             return ChatResponse(message=detail, lane=AgentLane.APPLICATION)
@@ -665,7 +717,8 @@ class AutoHuntAgent:
                 self.router.record_llm_failure()
             detail = f"任务规划暂不可用（{type(exc).__name__}），没有执行任何动作。"
             if tracked:
-                task_request.status, task_request.failure = "failed", type(exc).__name__
+                task_request.status = prior_root.get("status", "failed") if previous and prior_root else "failed"
+                task_request.failure = type(exc).__name__
                 dialogue_change("request_state", request=task_request.model_dump())
             emit("plan_failed", code="planning_unavailable", detail=detail)
             return ChatResponse(message=detail, lane=AgentLane.APPLICATION)
@@ -674,8 +727,22 @@ class AutoHuntAgent:
         if self.router:
             self.router.record_final(message, "plan_clarifying" if plan["questions"] else
                 "+".join(dict.fromkeys(step["tool"] for step in plan["steps"])) or "answer")
+        if tracked and previous and not action_request(plan["original"]):
+            # A semantic detour/read is not a replacement task definition.
+            dialogue_change("request_state", request=prior_root)
+            tracked = False
         if tracked:
-            task_request.status = "clarifying" if plan["questions"] else "running"
+            # The planner can decide that a semantic reply is a new task. Never
+            # leave memory bound to the old request after that decision.
+            task_request = capture_request(context.dialogue or {}, plan["original"], context.run_id, stamp, context.search_state or {})
+            task_request.status = "clarifying" if plan["questions"] else "running" if plan["steps"] else "finished"
+            task_request.revoked_tools = plan.get("revoked_tools", [])
+            task_request.conditions.update(plan.get("verified_conditions", {}))
+            task_request.condition_overrides.update(plan.get("verified_conditions", {}))
+            if plan.get("answers"):
+                existing = {item.get("message") for item in task_request.amendments}
+                task_request.amendments = [*task_request.amendments, *[
+                    {"message": answer, "source": context.run_id, "fields": {}} for answer in plan["answers"] if answer not in existing]][-12:]
             dialogue_change("request_state", request=task_request.model_dump())
         return await begin(plan, self.tool_registry)
 
@@ -686,11 +753,7 @@ class AutoHuntAgent:
             reject = REJECT.fullmatch(message) is not None
             dialogue_change("decision", action_id=item["id"], decision="reject" if reject else "claim", conditions=context.search_state or {})
             if reject:
-                if message == "算了":
-                    dialogue_change("reset")
-                    self._conversation_history = []
-                    document = self.resume_workspace.read_document() if self.resume_workspace else None
-                    save_search_state(prepare_search_state(None, self.candidate_state.read(), document.version if document else None))
+                dialogue_change("abandon")
                 return ChatResponse(message="已取消这项待确认动作，没有执行或修改长期偏好。", lane=AgentLane.CANDIDATE)
             if not self.tool_registry:
                 raise ValueError("工具执行器尚未配置")
@@ -716,15 +779,12 @@ class AutoHuntAgent:
                     if view.id == owned and view.status in {"starting", "running", "paused", "waiting_for_user"}:
                         stop_outcome = await self.tool_registry.execute("browser_task_stop", {},
                             user_message="停止搜索", state=ToolLoopState())
-                dialogue_change("reset")
-                self._conversation_history = []
-                document = self.resume_workspace.read_document() if self.resume_workspace else None
-                save_search_state(prepare_search_state(None, self.candidate_state.read(), document.version if document else None))
+                dialogue_change("abandon")
                 if stop_outcome:
-                    text = "已中断本会话的搜索并清除临时条件；已找到的职位和历史保留。" if stop_outcome.status == "ok" else f"搜索中断未确认：{stop_outcome.content}；不会自动重试。"
+                    text = "已中断本会话的搜索；搜索条件、已找到的职位和历史保留。" if stop_outcome.status == "ok" else f"搜索中断未确认：{stop_outcome.content}；不会自动重试。"
                     return ChatResponse(message=text, lane=AgentLane.APPLICATION,
                         tool_events=[ToolEvent(tool=stop_outcome.tool, status=stop_outcome.status, detail=text)])
-                return ChatResponse(message="已退出当前对话任务并清除临时条件；持久化数据保留，没有中断其他会话的任务。", lane=AgentLane.CANDIDATE)
+                return ChatResponse(message="已退出当前对话任务；原需求、搜索条件和历史保留，没有中断其他会话的任务。", lane=AgentLane.CANDIDATE)
             return ChatResponse(message=f"{exc}。请说明是搜索、审核职位，还是生成学习计划；不会根据模糊确认自动投递或改写简历。", lane=AgentLane.CANDIDATE)
 
     async def _handle_routed(self, message: str) -> ChatResponse:
@@ -732,6 +792,10 @@ class AutoHuntAgent:
         ambiguous rest falls through to the plain (legacy) path."""
         if message.startswith(_CLARIFY_CHOICE_PREFIX):
             return await self._handle_clarify_choice(message)
+        engine = getattr(self.router, "rule_engine", None)
+        safety_match = engine.match(message) if engine else None
+        if not safety_match or safety_match.category != "P0":
+            self._refresh_routing_context()
         outcome = await self.router.route(message)
         if outcome.decision == "blocked":
             self.router.record_final(message, "unsafe")

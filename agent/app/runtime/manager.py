@@ -93,10 +93,14 @@ class AgentRuntime:
         self.store.update(run_id, status=status, error=detail if status != "completed" else None, **fields)
         request = self.store.dialogue_state(previous["session_id"]).get("task_request")
         if request and request.get("run_id") == run_id:
+            # Chat response delivery and task execution are different lifecycles.
+            # A successfully returned planning-error reply is not a finished task.
+            completed_status = (request.get("status") if request.get("status") in {"clarifying", "failed", "timed_out", "cancelled", "outcome_indeterminate"}
+                else "finished")
             self.store.mutate_dialogue(previous["session_id"], {"op": "request_state", "source": run_id,
                 "expected_run": run_id,
-                "request": {**request, "status": ("clarifying" if request.get("status") == "clarifying" else "finished") if status == "completed" else status,
-                    "failure": "" if status == "completed" else detail[:300]}})
+                "request": {**request, "status": completed_status if status == "completed" else status,
+                    "failure": request.get("failure", "") if status == "completed" and completed_status != "finished" else "" if status == "completed" else detail[:300]}})
         self.store.event(run_id, "status", {"status": status, "detail": detail})
 
     def emit(self, run_id: str, kind: str, data: dict):

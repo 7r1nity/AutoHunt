@@ -20,7 +20,9 @@ def persist(plan: dict) -> None:
     previous = (active_run().dialogue or {}).get("instruction_request") or {}
     if previous.get("id") != plan["id"] and previous.get("status") == "clarifying" and plan["status"] != "clarifying":
         return  # A background completion must not erase a newer foreground question.
-    dialogue_change("instruction", request={**{key: plan[key] for key in
+    if previous.get("id") == plan["id"]:
+        plan["revoked_tools"] = sorted(set(plan.get("revoked_tools", [])) | set(previous.get("revoked_tools", [])))
+    dialogue_change("instruction", request={"revoked_tools": plan.get("revoked_tools", []), "condition_overrides": plan.get("condition_overrides", {}), **{key: plan[key] for key in
         ("id", "original", "answers", "questions", "resume_stamp", "turn", "expires_at", "status", "goals")},
         "steps": [{key: step.get(key) for key in ("id", "tool", "arguments", "depends_on", "missing_slots", "status")}
                   for step in plan["steps"]]})
@@ -85,6 +87,12 @@ async def advance(plan: dict, registry) -> list[dict]:
                 continue
             current_stamp = resume_stamp(registry.resume_workspace.read_document(), registry.candidate_state)
             active_plan = (context.dialogue or {}).get("tasks", {}).get("plan_id")
+            current_instruction = (context.dialogue or {}).get("instruction_request") or {}
+            withdrawn = set(plan.get("revoked_tools", [])) | (set(current_instruction.get("revoked_tools", [])) if current_instruction.get("id") == plan["id"] else set())
+            if step["tool"] in withdrawn:
+                step.update(status="blocked", detail="用户已撤回此动作，记忆回顾或继续任务不能恢复授权")
+                observed.append(step); changed = True
+                continue
             if step["effect"] != "read" and (plan["resume_stamp"] != current_stamp or plan["expires_at"] < time.time() or active_plan != plan["id"]):
                 step.update(status="blocked", detail="简历变更、原计划取消/替代或授权过期，请重新授权此动作")
                 observed.append(step); changed = True
