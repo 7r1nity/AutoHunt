@@ -139,7 +139,7 @@ class RunStore:
                        (session_id, encoded, now()))
             return json.loads(encoded)
 
-    def create(self, session_id: str, request_key: str, kind: str, payload: dict, parent_id: str | None = None) -> tuple[dict, bool]:
+    def create(self, session_id: str, request_key: str, kind: str, payload: dict, parent_id: str | None = None, *, control: bool = False) -> tuple[dict, bool]:
         encoded = json.dumps(redact(payload), ensure_ascii=False, sort_keys=True)
         digest = hashlib.sha256(encoded.encode()).hexdigest()
         with self.lock, self.connect() as db:
@@ -151,7 +151,7 @@ class RunStore:
                     raise ValueError("同一请求 ID 已用于不同内容")
                 return self.decode(previous), False
             active = db.execute("SELECT COUNT(*) FROM agent_runs WHERE status IN ('queued','running','waiting_user','waiting_reply','waiting_confirmation','cancelling')").fetchone()[0]
-            if active >= 100:
+            if active >= 100 and not control:
                 raise ValueError("运行队列已满，请先处理或停止已有任务")
             run_id = uuid.uuid4().hex
             timestamp = now()

@@ -827,10 +827,8 @@ export default function Home() {
     if (browserActionBusy) return;
     setBrowserActionBusy(true);
     try {
-      const response = await fetch("/api/agent/browser", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "stop" }) });
-      const payload = await response.json();
-      if (!response.ok) throw new Error(payload.detail ?? "停止失败");
-      setNotice(payload.detail);
+      await runtime.interrupt();
+      setNotice("已核验当前会话任务及投递队列停止；已发送内容保留。");
       await refreshAutomation();
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "停止浏览器任务失败");
@@ -1494,9 +1492,10 @@ export default function Home() {
 
   async function interruptTask(command?: string) {
     try {
-      await runtime.interrupt();
+      await runtime.interrupt(command && /(?:所有|全部)/.test(command) ? "all" : "session");
       if (command) setChatText((current) => current.trim() === command ? "" : current);
-      setNotice("已发送当前会话的停止请求；最终状态请查看运行记录，已完成的步骤保留。");
+      setNotice("已核验任务与投递队列停止；已发送内容和历史保留。");
+      await refreshAutomation();
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "停止尚未确认，请重试");
     }

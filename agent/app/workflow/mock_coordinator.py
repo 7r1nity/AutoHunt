@@ -54,6 +54,9 @@ class MockWorkflowCoordinator:
         self.queue_lock = asyncio.Lock()
         self.wakeup = asyncio.Event()
         self.on_delivery_started = None
+        self.stopping_sessions: set[str] = set()
+        self.operations: dict[asyncio.Task, str] = {}
+        self.operation_jobs: dict[asyncio.Task, int | None] = {}
         self.poll_failures: dict[str, tuple[int, float]] = {}
         #: Observation -> rule matching -> action -> recorded decision.
         self.engine = RuleEngine(build_rules(self))
@@ -111,6 +114,8 @@ class MockWorkflowCoordinator:
         return type(observation)(at=observation.at, facts=facts)
 
     async def queue_deliveries(self, *, min_score: int, session_id: str, task_id: str | None = None) -> dict:
+        if session_id in self.stopping_sessions or "*" in self.stopping_sessions:
+            raise ValueError("当前正在停止任务，未加入投递队列")
         """One explicit bounded batch, not a persistent rule for unseen future jobs."""
         from ..growth.requests import resume_stamp
         if not 0 <= min_score <= 100:
@@ -136,19 +141,57 @@ class MockWorkflowCoordinator:
                 "先沟通，收到招聘方回复且投递按钮解锁后才发送已授权简历；验证需人工接管，失败或不确定不会重试。"
                 "仅处理当前简历的已搜索职位，不启用每日任务，也不自动添加未来职位。可说「停止自动投递」。"}
 
-    async def cancel_delivery_queue(self, session_id: str) -> dict:
-        async with self.queue_lock:
-            items = self.jobs.mock_delivery_queue(session_id=session_id)
+    async def _operation(self, session_id: str, factory, *, job_id: int | None = None, queued: bool = True):
+        if session_id in self.stopping_sessions or "*" in self.stopping_sessions:
+            return None
+        if job_id is not None and queued:
+            item = next((row for row in self.jobs.mock_delivery_queue(active_only=False)
+                         if row["job_id"] == job_id), None)
+            if not item or item["status"] == "cancelled":
+                return None
+        task = asyncio.create_task(factory(), name=f"mock-delivery-operation-{session_id}")
+        self.operations[task] = session_id
+        self.operation_jobs[task] = job_id
+        try:
+            return await task
+        except asyncio.CancelledError:
+            if asyncio.current_task().cancelling():
+                raise
+            return None
+        finally:
+            self.operations.pop(task, None)
+            self.operation_jobs.pop(task, None)
+
+    async def cancel_delivery_queue(self, session_id: str | None) -> dict:
+        key = session_id if session_id is not None else "*"
+        self.stopping_sessions.add(key)
+        try:
+            # Revoke before yielding: stale observations and restart cannot replay.
+            items = [row for row in self.jobs.mock_delivery_queue(session_id=session_id, active_only=False)
+                     if row["status"] in {"queued", "dispatched", "blocked"}]
+            for item in items:
+                self.jobs.update_mock_delivery(item["job_id"], "cancelled", "用户停止自动投递；已发送内容保留")
+            operations = [task for task, owner in self.operations.items()
+                          if session_id is None or owner == session_id]
+            operation_jobs = {self.operation_jobs.get(task) for task in operations}
+            for task in operations:
+                task.cancel()
+            if operations:
+                await asyncio.gather(*operations, return_exceptions=True)
             current = self.delivery.current()
-            if any(item["run_id"] == current.id for item in items if item["run_id"]):
+            if (any((item["run_id"] and item["run_id"] == current.id)
+                    or (not item["run_id"] and item["job_id"] == current.job_id) for item in items)
+                    or current.job_id is not None and current.job_id in operation_jobs):
                 await self.delivery.stop()
             for item in items:
-                self.jobs.update_mock_delivery(item["job_id"], "cancelled", "用户停止本会话的自动投递")
                 if item["run_id"]:
                     run = self.jobs.get_delivery_run(item["run_id"])
-                    if run.status == DeliveryTaskStatus.WAITING_FOR_REPLY and not run.submitted:
+                    if run.status not in {DeliveryTaskStatus.COMPLETED, DeliveryTaskStatus.FAILED,
+                                          DeliveryTaskStatus.OUTCOME_INDETERMINATE, DeliveryTaskStatus.CANCELLED} and not run.submitted:
                         self.jobs.update_delivery_run(run.id, status=DeliveryTaskStatus.CANCELLED, detail="用户停止本会话自动投递，已发送沟通保留")
-        return {"message": f"已停止本会话 {len(items)} 项自动投递；已经发送的消息和简历保留。"}
+            return {"cancelled_queue": len(items), "message": f"已停止 {len(items)} 项自动投递；已经发送的消息和简历保留。"}
+        finally:
+            self.stopping_sessions.discard(key)
 
     async def recover_failed_starts(self) -> dict:
         """Re-run starts that failed before any click, within a bounded budget.
@@ -171,7 +214,7 @@ class MockWorkflowCoordinator:
                 continue
             item = next((entry for entry in self.jobs.mock_delivery_queue(active_only=False)
                          if entry["run_id"] == run["id"]), None)
-            if item is None:
+            if item is None or item["status"] == "cancelled":
                 skipped += 1          # not a batch job; a human owns its authorisation
                 continue
             # reopen the run so the reply check can pick it up again
@@ -182,7 +225,10 @@ class MockWorkflowCoordinator:
             if self.delivery.current().id == run["id"]:
                 self.delivery.state = reopened
             try:
-                await self.delivery.resume_authorized_run(run["id"], **item["binding"])
+                view = await self._operation(item["session_id"],
+                    lambda: self.delivery.resume_authorized_run(run["id"], **item["binding"]), job_id=item["job_id"])
+                if view is None:
+                    continue
                 self.jobs.update_mock_delivery(run["job_id"], "dispatched", "已回复，正在自动重试投递", run_id=run["id"])
                 self.jobs.mark_job_retrying_delivery(run["job_id"])
                 recovered += 1
@@ -216,7 +262,10 @@ class MockWorkflowCoordinator:
             if wait_expired(run["started_at"], self.delivery.watch_limits.reply):
                 continue  # expiry is owned by the run's own watchdog
             try:
-                view = await self.delivery.resume_authorized_run(run["id"], **item["binding"])
+                view = await self._operation(item["session_id"],
+                    lambda: self.delivery.resume_authorized_run(run["id"], **item["binding"]), job_id=item["job_id"])
+                if view is None:
+                    continue
                 checked += 1
                 if view.submitted:
                     submitted += 1
@@ -250,7 +299,10 @@ class MockWorkflowCoordinator:
                         continue
                     try:
                         preview = self.jobs.create_delivery_preview(job["id"], resume_label="候选人主简历", **item["binding"])
-                        result = await self.delivery.authorize_and_start(preview.id, monitor_reply=False, **item["binding"])
+                        result = await self._operation(item["session_id"],
+                            lambda: self.delivery.authorize_and_start(preview.id, monitor_reply=False, **item["binding"]), job_id=job["id"])
+                        if result is None:
+                            return
                         self.jobs.update_mock_delivery(job["id"], "dispatched", "已启动浏览器沟通/投递", run_id=result[3].id)
                         if self.on_delivery_started:
                             self.on_delivery_started(result[3].id, item["session_id"])
@@ -275,7 +327,8 @@ class MockWorkflowCoordinator:
                         self._finish_queue_item(item, "blocked", "回复等待过期，请重新核对授权")
                         continue
                     self.jobs.update_mock_delivery(job["id"], "dispatched", "等待回复；正在检查", run_id=run.id)
-                    await self.delivery.resume_authorized_run(run.id, **item["binding"])
+                    await self._operation(item["session_id"],
+                        lambda: self.delivery.resume_authorized_run(run.id, **item["binding"]), job_id=job["id"])
                     return
                 if run.status == DeliveryTaskStatus.WAITING_FOR_USER:
                     if wait_expired(run.updated_at, self.delivery.watch_limits.human) and (not self.delivery.worker or self.delivery.worker.done()):
@@ -289,6 +342,10 @@ class MockWorkflowCoordinator:
                 self._finish_queue_item(item, "blocked", f"任务状态 {run.status}，需人工核验，不会重试")
 
     def _finish_queue_item(self, item: dict, status: str, detail: str) -> None:
+        current = next((row for row in self.jobs.mock_delivery_queue(active_only=False)
+                        if row["job_id"] == item["job_id"]), None)
+        if current and current["status"] == "cancelled":
+            return
         self.jobs.update_mock_delivery(item["job_id"], status, detail)
         if status in {"stale", "blocked"} and item["run_id"]:
             run = self.jobs.get_delivery_run(item["run_id"])
@@ -411,6 +468,12 @@ class MockWorkflowCoordinator:
         })
 
     async def _start_authorized_delivery(self, job_id: int) -> bool:
+        result = await self._operation("default", lambda: self._start_monitor_delivery(job_id), job_id=job_id, queued=False)
+        return bool(result)
+
+    async def _start_monitor_delivery(self, job_id: int) -> bool:
+        if not self.settings()["auto_submit"]:
+            return False
         if self.jobs.latest_delivery_status_for_job(job_id) is not None:
             return False
         if self.delivery.worker and not self.delivery.worker.done():
@@ -429,11 +492,16 @@ class MockWorkflowCoordinator:
         preview = self.jobs.create_delivery_preview(
             job_id, resume_label=document.source_filename or "候选人主简历", **binding,
         )
-        await self.delivery.authorize_and_start(preview.id, **binding)
+        result = await self.delivery.authorize_and_start(preview.id, **binding)
+        if self.on_delivery_started:
+            self.on_delivery_started(result[3].id, "default")
         self.jobs.event(f"job:{job_id}", "mock_monitor_delivery_authorized", preview.payload_digest)
         return True
 
     async def run_daily_if_due(self) -> bool:
+        return bool(await self._operation("default", self._run_daily_if_due))
+
+    async def _run_daily_if_due(self) -> bool:
         settings = self.settings()
         if not settings["daily_enabled"]:
             return False

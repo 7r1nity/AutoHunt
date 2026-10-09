@@ -11,7 +11,11 @@ export const terminalRun = (status: string) => ["completed", "failed", "cancelle
 
 // Fully consumed control commands only: questions, negation, quotes and mixed
 // requests must not cancel a task just because they mention stopping.
-export const interruptionCommand = (text: string) => /^(?:请|帮我)?(?:中断|停止|取消|终止|结束)(?:当前|本次|这个|正在执行的|正在运行的)?(?:任务|执行|请求|搜索)?[。！!]*$/.test(text.replace(/\s+/g, ""));
+export const interruptionScope = (text: string): "session" | "all" | null => {
+  const match = /^(?:请|帮我|先|请先|先帮我)?(?:中断|停止|取消|终止|结束)(所有|全部)?(?:当前|本次|这个|正在执行的|正在运行的)?(?:任务|执行|请求|搜索|投递|自动投递|沟通|浏览器任务)?[。！!]*$/.exec(text.replace(/\s+/g, ""));
+  return match ? match[1] ? "all" : "session" : null;
+};
+export const interruptionCommand = (text: string) => interruptionScope(text) !== null;
 
 export async function createRun(conversation_id: string, kind: AgentRun["kind"], payload: Record<string, string>) {
   const response = await fetch("/api/agent/runs", { method: "POST", headers: { "Content-Type": "application/json" },

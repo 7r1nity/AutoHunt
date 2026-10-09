@@ -322,6 +322,23 @@ async def cancel_all_runs() -> dict:
     return await agent_runtime.stop_all()
 
 
+class StopTasksRequest(BaseModel):
+    conversation_id: str = "default"
+    scope: Literal["session", "all"] = "session"
+
+
+@app.post("/api/v1/runs/control/stop")
+async def stop_tasks(payload: StopTasksRequest) -> dict:
+    if payload.scope == "session" and not any(s["id"] == payload.conversation_id for s in run_store.sessions()):
+        raise HTTPException(status_code=404, detail="会话不存在")
+    return await agent_runtime.stop_tasks(None if payload.scope == "all" else payload.conversation_id)
+
+
+@app.get("/api/v1/runs/control/stop")
+async def stop_tasks_status(conversation_id: str = "default", scope: Literal["session", "all"] = "session") -> dict:
+    return agent_runtime.stop_status(None if scope == "all" else conversation_id)
+
+
 @app.post("/api/v1/runs/{run_id}/cancel")
 async def cancel_run(run_id: str) -> dict:
     try:

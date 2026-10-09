@@ -200,30 +200,35 @@ export function useAgentRuntime() {
     finally { if (controls.current.get(key) === request) controls.current.delete(key); }
   }
 
-  async function interrupt() {
+  async function interrupt(scope: "session" | "all" = "session") {
     const session = sessionId;
-    if (stopRequest.current?.session === session) return stopRequest.current.promise;
+    const stopKey = scope === "all" ? "*" : session;
+    if (stopRequest.current?.session === stopKey) return stopRequest.current.promise;
     setStopping(true);
     const promise = (async () => {
       const start = pendingStart.current?.session === session ? pendingStart.current : null;
       if (start) {
         start.cancel = true;
-        await control(await start.ready, "cancel");
-        return;
+        // A lost create response is not proof that the backend did not create a run.
+        await start.ready.catch(() => undefined);
       }
-      // Read fresh session-scoped state, including restored background tasks.
-      const response = await fetch(`/api/agent/runs?conversation_id=${session}`, { cache: "no-store" });
-      if (!response.ok) throw new Error("无法读取当前会话任务；未确认停止，请重试");
-      const items = await response.json() as AgentRun[];
-      const active = items.filter((run) => run.session_id === session && !terminalRun(run.status));
-      if (!active.length) {
-        if (currentSession.current === session) setBusyRun(null);
-        return;
+      const endpoint = `/api/agent/runs/control/stop?conversation_id=${encodeURIComponent(session)}&scope=${scope}`;
+      let response = await fetch(endpoint, { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ conversation_id: session, scope }) });
+      let result = await response.json() as { status: string; message: string };
+      if (!response.ok) throw new Error(result.message ?? "停止请求未被接受");
+      const deadline = Date.now() + 30_000;
+      while (result.status === "stopping" && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        response = await fetch(endpoint, { cache: "no-store" });
+        result = await response.json();
+        if (!response.ok) throw new Error("无法核对停止状态；后台清理仍会继续");
       }
-      const results = await Promise.allSettled(active.map((run) => control(run, "cancel")));
-      if (results.some((item) => item.status === "rejected")) throw new Error("部分任务停止尚未确认，请在任务与上下文中核对或重试");
+      await refresh(session);
+      if (result.status !== "stopped") throw new Error(result.message || "停止尚未确认，请核对运行记录；后台清理不会因页面断开而取消");
+      if (currentSession.current === session) setBusyRun(null);
     })();
-    stopRequest.current = { session, promise };
+    stopRequest.current = { session: stopKey, promise };
     try { await promise; }
     finally {
       if (stopRequest.current?.promise === promise) stopRequest.current = null;
@@ -247,6 +252,7 @@ export function useAgentRuntime() {
     if (currentSession.current === session) { setDialogue(value); setSearchState(value.conditions); }
   }
 
-  const canInterrupt = Boolean(busyRun) || runs.some((run) => run.session_id === sessionId && !terminalRun(run.status));
+  // Queued deliveries can outlive their completed chat run; stop must remain available.
+  const canInterrupt = true;
   return { sessionId, setSessionId, sessions, searchState, resetSearchState, dialogue, resetContext, runs, progress, busyRun, stopping, canInterrupt, interrupt, notifications, currentSession, newSession, execute, control, observe };
 }

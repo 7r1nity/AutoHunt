@@ -66,6 +66,10 @@ function Steps({ run }: { run: AgentRun }) {
 
 export function RuntimePanel({ runtime, notice, showSession = true }: { runtime: ReturnType<typeof useAgentRuntime>; notice: (text: string) => void; showSession?: boolean }) {
   return <div className="runtime-panel">
+    <div className="runtime-actions"><button className="button secondary compact" disabled={runtime.stopping} onClick={() => {
+      if (!window.confirm("停止所有会话的搜索、沟通、投递及队列，并关闭每日任务和自动投递？已发送内容与历史保留。")) return;
+      void runtime.interrupt("all").then(() => notice("已核验全部会话任务及队列停止")).catch((error) => notice(error.message));
+    }}>停止全部任务</button></div>
     {showSession && <div className="runtime-session">
       <select aria-label="当前会话" value={runtime.sessionId} onChange={(event) => runtime.setSessionId(event.target.value)}>
         {runtime.sessions.length ? runtime.sessions.map((session) => <option key={session.id} value={session.id}>{session.title}</option>) : <option value="default">默认会话</option>}
@@ -98,7 +102,7 @@ export function RuntimePanel({ runtime, notice, showSession = true }: { runtime:
         </li>)}</ol>}
         {typeof run.result?.message === "string" && <details><summary>查看回复</summary><p>{chatDisplay(run.result.message)}</p></details>}
         <div className="runtime-actions">
-          {!terminalRun(run.status) && <button className="button secondary compact" onClick={() => void runtime.control(run, "cancel").catch((error) => notice(error.message))}>停止任务</button>}
+          {!terminalRun(run.status) && <button className="button secondary compact" disabled={runtime.stopping} onClick={() => void runtime.interrupt().then(() => notice("已核验当前会话及投递队列停止")).catch((error) => notice(error.message))}>停止当前会话</button>}
           {run.can_resume && <button className="button primary compact" onClick={() => void runtime.control(run, "resume").catch((error) => notice(error.message))}>{run.status === "waiting_user" ? "确认登录，继续" : run.status === "waiting_reply" ? "检查回复" : "恢复执行"}</button>}
           {!terminalRun(run.status) && <button className="text-button" onClick={() => runtime.observe(run)}>重新连接</button>}
         </div>

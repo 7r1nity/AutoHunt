@@ -1110,8 +1110,11 @@ class JobStore:
         if status not in {"dispatched", "completed", "blocked", "stale", "cancelled"}:
             raise ValueError("无效的投递队列状态")
         with self.lock, self._connect() as db:
-            db.execute("UPDATE mock_delivery_queue SET status=?,detail=?,run_id=COALESCE(?,run_id),updated_at=? WHERE job_id=?",
-                       (status, detail[:400], run_id, utc_now(), job_id))
+            db.execute("UPDATE mock_delivery_queue SET status=?,detail=?,run_id=COALESCE(?,run_id),updated_at=? "
+                       "WHERE job_id=? AND (status!='cancelled' OR ?='cancelled')",
+                       (status, detail[:400], run_id, utc_now(), job_id, status))
+            if status == "cancelled":
+                db.execute("UPDATE jobs SET mode='自动投递·已停止' WHERE id=? AND stage IN ('review','applying')", (job_id,))
 
     def learning_plans(self, resume_id: str) -> list[dict[str, Any]]:
         with self.lock, self._connect() as db:
