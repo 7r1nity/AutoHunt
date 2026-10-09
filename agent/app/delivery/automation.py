@@ -4,7 +4,7 @@ import asyncio
 import uuid
 from datetime import UTC, datetime
 
-from ..browser.lock import BrowserExecutionLock
+from ..browser.lock import BrowserExecutionLock, BrowserLockBusy
 from ..browser.session import BrowserSession
 from ..core.models import BrowserMode, DeliveryTaskStatus, DeliveryTaskView
 from ..jobs.store import JobStore
@@ -257,6 +257,13 @@ class DeliveryAutomationService:
         try:
             await guarded_operation(self._run_once(job_id, require_reply=require_reply),
                                     observe, limits=self.watch_limits)
+        except BrowserLockBusy as exc:
+            # Transient contention (a search or another delivery holds the browser).
+            # The action never started, so this must not consume the authorization:
+            # keep the run waiting and try again on the next check cycle.
+            self._update(DeliveryTaskStatus.WAITING_FOR_REPLY,
+                         f"浏览器忙，稍后自动重试检查招聘方回复（{exc}）",
+                         checkpoint="waiting_for_reply")
         except WatchdogExpired as exc:
             # Never retry a click whose outcome is unknown, even if the timeout
             # happened after submit() returned but before persistence finished.
