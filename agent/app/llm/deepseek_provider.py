@@ -47,6 +47,11 @@ class DeepSeekProvider(LLMProvider):
                 },
             ],
             "stream": False,
+            # Planning and extraction must be repeatable: the same request should
+            # yield the same plan, otherwise intent handling looks unreliable even
+            # when it is correct. Measured variance before this: 1 extra benign
+            # step in 3 identical runs.
+            "temperature": 0,
         }
         if request.fast:
             # Omitting thinking parameters does NOT disable the provider's

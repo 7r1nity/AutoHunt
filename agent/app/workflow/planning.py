@@ -121,10 +121,11 @@ def pending_slot_answer(message: str, pending: dict | None, *, rule_match=None) 
     return may_answer_pending(message, pending, rule_match=rule_match)
 
 
-def source_search_constraints(source: str, *, amendment: bool = False) -> dict:
+def source_search_constraints(source: str, *, amendment: bool = False,
+                              unresolved: list[str] | None = None) -> dict:
     from ..core.search_contract import simple_search_patch
     from ..core.search_language import SEARCH_CITIES
-    fields = explicit_search_constraints(source)
+    fields = explicit_search_constraints(source, unresolved=unresolved)
     if amendment:
         fields.update({key: value for key, value in (simple_search_patch(source, SEARCH_CITIES) or {}).items()
             if key in {"queries", "locations", "result_limit", "salary_min", "max_jobs"}})
@@ -184,6 +185,10 @@ def shortcut_safe(message: str) -> bool:
 async def plan_request(llm, registry, message: str, *, dialogue: dict, conditions: dict,
                        stamp: str, previous: dict | None = None) -> dict:
     schemas = [item for item in registry.schemas() if item["function"]["name"] not in INTERNAL_TOOLS]
+    # Spans the deterministic extractor recognised a city clause in but could not
+    # fully consume. Collected up front so the planner can read them itself.
+    unresolved_spans: list[str] = []
+    source_search_constraints(message, unresolved=unresolved_spans)
     quick = contextual_draft(message, previous, schemas)
     if quick is not None:
         emit("request_understanding", layer="context_contract", model_needed=False)
@@ -228,6 +233,16 @@ async def plan_request(llm, registry, message: str, *, dialogue: dict, condition
             "conditions": conditions, "dialogue": model_dialogue, "capabilities": schemas}, ensure_ascii=False),
         context="将意图分类、参数完整性、动作授权和执行状态分别判断。", fast=True,
         json_output=True, max_output_tokens=4096)
+    # Deterministic extraction could not fully consume these spans. They are not
+    # user errors and must not be dropped: hand them to the model, which reads the
+    # whole sentence, instead of rejecting the request that contained them.
+    if unresolved_spans:
+        request = LLMRequest(
+            instructions=request.instructions +
+            " 规则层未能完整解析以下片段，请在理解整句时自行解释，不要因为它而拒绝请求："
+            + json.dumps(unresolved_spans, ensure_ascii=False),
+            user_message=request.user_message, context=request.context, fast=request.fast,
+            json_output=True, max_output_tokens=4096)
     draft = await _draft_with_repair(llm, request)
     return validate_draft(draft, registry, message, dialogue=dialogue, conditions=conditions, stamp=stamp, previous=previous)
 
@@ -311,7 +326,49 @@ def validate_draft(draft: RequestDraft, registry, message: str, *, dialogue: dic
     if continued and re.fullmatch(r"\s*\d{1,3}(?:个|份|条)?\s*", message) and any("result_limit" in step.get("missing_slots", []) for step in previous.get("steps", [])):
         current_fields["result_limit"] = int(re.search(r"\d+", message)[0])
     explicit.update(current_fields)
+    # The same goal may be registered twice: once citing the parameter clause, once
+    # citing the verb. Collapse them before anything else inspects the step set, so
+    # a request never runs the same action twice. Steps are mergeable only when
+    # every non-focus argument agrees, so genuinely different scopes stay separate.
+    def merge_key(step):
+        return (step["tool"], json.dumps({key: value for key, value in step.get("arguments", {}).items()
+                                          if key != "focus"}, sort_keys=True, ensure_ascii=False),
+                json.dumps(sorted(step.get("depends_on", [])), ensure_ascii=False))
+
+    merged_steps: list[dict] = []
+    aliases: dict[str, str] = {}
+    merged_by_key: dict[tuple, dict] = {}
+    for step in steps:
+        key = merge_key(step)
+        existing = merged_by_key.get(key)
+        if existing is None:
+            merged_by_key[key] = step
+            merged_steps.append(step)
+            continue
+        aliases[step["id"]] = existing["id"]
+        slots = list(dict.fromkeys([*existing.get("missing_slots", []), *step.get("missing_slots", [])]))
+        existing["missing_slots"] = slots
+        current_focus = str(existing.get("arguments", {}).get("focus") or "")
+        new_focus = str(step.get("arguments", {}).get("focus") or "")
+        if len(new_focus) > len(current_focus):
+            existing.setdefault("arguments", {})["focus"] = new_focus
+    if aliases:
+        steps[:] = merged_steps
+        for step in steps:
+            step["depends_on"] = list(dict.fromkeys(aliases.get(dep, dep) for dep in step.get("depends_on", [])))
+        ids = [step["id"] for step in steps]
     searches = [step for step in steps if step["tool"] == "job_search_start"]
+    # Actions the user authorised in their own words, collected BEFORE step
+    # validation: the clause carrying the verb may follow the step that cites only
+    # its parameters ("…分析我的劣势和不足 生成成长计划"), so a single pass in step
+    # order would reject a request that was plainly authorised.
+    authorised_actions: list[str] = []
+    for name, cue in MUTATION_CUES.items():
+        authorised = any(command_grounded(name, clause.strip(), sources)
+                         for source in sources
+                         for clause in re.split(r"[，,。；;\n]|然后|并且|同时|接着", source) if clause.strip())
+        if authorised:
+            authorised_actions.append(name)
     for step in steps:
         name, args, quote = step["tool"], step["arguments"], step["command_quote"]
         if name not in tools or step["id"] in step["depends_on"] or not set(step["depends_on"]) <= set(ids):
@@ -323,23 +380,28 @@ def validate_draft(draft: RequestDraft, registry, message: str, *, dialogue: dic
             raise ValueError("待补槽位不属于工具能力")
         for slot in step["missing_slots"]:
             questions.append(f"请补充 {name} 的 {slot}。")
-        if spec.effect != "read" and not command_grounded(name, quote, sources):
-            # Models may cite a whole compound sentence. Select only a complete
-            # clause within that quote, then re-check its source context. Never
-            # delete negation/modality or search unrelated historical commands.
-            clauses = re.split(r"[，,。；;\n]|然后|并且|同时|接着", quote)
-            grounded = next((clause.strip() for clause in clauses
-                if command_grounded(name, clause.strip(), sources)), None)
+        quote_grounded = command_grounded(name, quote, sources)
+        if spec.effect != "read" and not quote_grounded:
+            # A step may cite the span that carries only its parameters while the
+            # verb sits in a neighbouring clause of the same sentence. That is a
+            # citation gap, not missing consent, so try each clause of the quote
+            # and of the still-valid original task first.
+            candidates = [clause.strip() for clause in re.split(r"[，,。；;\n]|然后|并且|同时|接着", quote)]
+            if continued:
+                candidates += [clause.strip() for clause in re.split(r"[，,。；;\n]|然后|并且|同时|接着", original)]
+            grounded = next((clause for clause in candidates
+                             if clause and command_grounded(name, clause, sources)), None)
             if grounded:
                 quote = step["command_quote"] = grounded
-        if continued and spec.effect != "read" and not command_grounded(name, quote, sources):
-            # Slot answers update parameters; authority comes from the still-valid
-            # original action, never from the short answer or arbitrary chat history.
-            candidates = [clause.strip() for clause in re.split(r"[，,。；;\n]|然后|并且|同时|接着", original)]
-            grounded = next((clause for clause in candidates if command_grounded(name, clause, [original])), None)
-            if grounded:
-                quote = step["command_quote"] = grounded
-        if spec.effect != "read" and not command_grounded(name, quote, sources):
+                quote_grounded = True
+            elif quote and name in authorised_actions:
+                # This action was authorised in the user's own words elsewhere in
+                # the request. The citation must still be verbatim user text and
+                # positively phrased; every value in it is separately verified
+                # against the sources below.
+                if any(quote in source for source in sources) and positive_action(quote):
+                    quote_grounded = True
+        if spec.effect != "read" and not quote_grounded:
             raise ValueError(f"{name} 未获得当前用户的明确授权")
         if name in {"job_search_start", "search_state_update"}:
             local_explicit = source_search_constraints(quote)

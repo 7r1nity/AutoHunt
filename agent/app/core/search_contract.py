@@ -118,11 +118,14 @@ def needs_search_reasoning(message: str) -> bool:
     ))
 
 
-def explicit_search_constraints(message: str) -> dict:
+def explicit_search_constraints(message: str, *, unresolved: list[str] | None = None) -> dict:
     """Protect explicit lower bounds/counts even if the model omits them.
 
-    This is not an intent router or a keyword extractor. Ambiguous salary units
-    and other constraints remain the main model's responsibility.
+    This function never rejects a request because it could not understand part of
+    the sentence. It is a best-effort extractor, not an authorization check: text
+    it cannot fully consume is reported through ``unresolved`` and left to the
+    planner, which can read the whole sentence. Only a genuine own-value conflict
+    still raises, because that needs the user's clarification, not a guess.
     """
     fields = {}
     def put(key, value):
@@ -164,11 +167,21 @@ def explicit_search_constraints(message: str) -> dict:
             # Preserve complete simple lists, including destinations not in it.
             tokens = [item for item in re.split(r"[、,，/\s]+|或者|以及|和|或", segment) if item]
             residue = re.sub(city_names, "", segment)
+            # A token that can only be a place name but is not on the whitelist
+            # ("地点深圳 火星") must still be asked about rather than dropped.
+            unknown_places = [item for item in tokens
+                              if item not in cities
+                              and re.fullmatch(r"[\u4e00-\u9fff]{2,10}|[A-Za-z][A-Za-z.-]{1,30}", item)
+                              and not re.search(r"不要|排除|不去|除了|不限|都|可以|最好", item)]
             if re.fullmatch(r"[、,，/\s]*", residue):
                 pass  # Also allows adjacent known names (上海杭州).
-            elif all(re.fullmatch(r"[\u4e00-\u9fff]{2,10}|[A-Za-z][A-Za-z.-]{1,30}", item)
-                     and not re.search(r"不要|排除|不去|除了|不限|都|可以|最好", item) for item in tokens):
-                cities = list(dict.fromkeys(tokens))
+            elif not unknown_places:
+                # The tail is not a place name (scores, counts, action clauses).
+                # Keeping the cities we did recognise is strictly better than
+                # rejecting the request: the same sentence may be fully readable
+                # by the planner, which never saw it because this raised.
+                if unresolved is not None and not re.fullmatch(r"[、,，/\s]*", residue):
+                    unresolved.append(segment)
             else:
                 raise ValueError("城市条件不能完整解析，请明确完整城市列表")
             put("locations", cities)
