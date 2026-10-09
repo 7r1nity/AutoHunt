@@ -18,6 +18,8 @@ function stepDescription(event: RunEvent): string {
     return `${event.kind === "tool_retry" ? data.tool : "模型请求"} · ${data.code} · 第 ${data.next_attempt}/3 次尝试，退避 ${data.delay_seconds} 秒（仅安全读取/推理）`;
   if (event.kind === "plan_repair" && data.repair_kind === "grounded_summary_read") return "补齐用户已要求的搜索结果总结：只读本次结果，不增加投递或写入动作";
   if (event.kind === "plan_scope_resolved") return `${data.tool} · 已根据相邻分支补齐省略的匹配分范围`;
+  if (event.kind === "plan_source_binding") return "续接已绑定完整原始请求及有效补充；不会把重试指令当作新的任务内容";
+  if (event.kind === "plan_repair" && data.repair_kind === "citation_spacing") return "已恢复引用中的原始空白格式；内容、数值与授权不变";
   if (event.kind === "plan_validation") {
     const issues = data.issues as { code: string; detail: string }[] | undefined;
     const decisions: Record<string, string> = { ready: "通过", clarifying: "需补充用户信息", clarify: "条件待澄清", repair: "内部规划待修正", block: "安全拦截", repair_exhausted: "内部修正未通过" };

@@ -552,7 +552,7 @@ class AutoHuntAgent:
             if resolved.action == "replan":
                 emit("progress", detail="已定位上文尚未执行的请求，正在重新规划全部目标；不是恢复空闲浏览器")
                 root = (context.dialogue or {}).get("task_request") or {}
-                if root.get("amendments") or root.get("revoked_tools"):
+                if root.get("amendments") or root.get("revoked_tools") or root.get("condition_overrides"):
                     import time
                     # resolve_continuation has already checked no execution,
                     # ownership, resume and age. Carry only validated user edits,

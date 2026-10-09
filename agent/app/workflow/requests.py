@@ -32,14 +32,25 @@ class TaskRequest(BaseModel):
 
 CONTINUE = re.compile(
     r"^(?:(?:请|帮我|麻烦你|我要你|我希望你|你)\s*)?"
-    r"(?:继续执行|重新执行|重新尝试|再试一次|再试一下|继续|恢复|接着(?:执行)?|重试)(?:一下)?"
+    r"(?:继续执行|重新执行|重新开始|再次执行|重新尝试|再试一次|再试一下|继续|恢复|接着(?:执行)?|重试)(?:一下)?"
     r"(?:(?:我)?(?:第(?:一|1)(?:次|个|条)|最初|最开始|上(?:一|个|次)?(?:文|面|条)?|刚才|之前|原来|这个|该|当前|前面)"
     r"(?:(?:发送|发|提出|说)(?:给你)?(?:过)?)?)?(?:的)?"
     r"(?:任务|请求|操作|执行|搜索|检索)?(?:吧)?[。！!\s]*$")
 
+_ROOT_REFERENCE = r"(?:按(?:照)?)(?:原(?:来)?|上文|之前|刚才)(?:的)?(?:请求|任务|要求)"
+_ALL_GOALS = r"(?:[，,\s]*(?:其他|其余|剩余|后续|全部)(?:的|步骤|任务|目标)?(?:也|都)?(?:要)?(?:实现|执行|完成|继续))"
+BOUND_RETRY = re.compile(
+    r"^(?:(?:请|帮我|麻烦你|我要你)\s*)?" + _ROOT_REFERENCE + r"\s*"
+    r"(?:重新执行|重新开始|再次执行|继续执行|继续|恢复)\s*"
+    r"(?:(?:任务|请求)?(?:" + _ALL_GOALS + r")?|(?:搜索|检索)" + _ALL_GOALS + r")"
+    r"[。！!\s]*$")
+
 
 def is_continuation(message: str) -> bool:
-    return bool(CONTINUE.fullmatch(message.strip()))
+    text = message.strip()
+    if text == "重新开始":
+        return False  # Existing explicit temporary-context reset, not task retry.
+    return bool(CONTINUE.fullmatch(text) or BOUND_RETRY.fullmatch(text))
 
 
 def action_request(message: str) -> bool:
@@ -48,7 +59,8 @@ def action_request(message: str) -> bool:
     if is_continuation(message) or is_request_summary(message) or is_search_summary(message) or not re.search(r"[\w\u4e00-\u9fff]", message):
         return False  # References and repair signals are not new task definitions.
     from .planning import command_grounded, MUTATION_CUES
-    clauses = re.split(r"[，,。；;\n]|然后|并且|同时|接着", message)
+    from ..core.action_language import action_clauses
+    clauses = action_clauses(message)
     return any(command_grounded(tool, clause.strip(), [message])
                for tool in MUTATION_CUES if tool not in {"browser_task_resume", "browser_task_pause", "browser_task_stop", "search_state_update"}
                for clause in clauses)
@@ -236,15 +248,20 @@ def resolve_continuation(saved: dict, browser, stamp: str, *, now: float | None 
     live = bool(owned and not browser_search_available(browser))
     if record and record.status in {"finished", "completed", "cancelled", "outcome_indeterminate"}:
         return Continuation("clarify", "所指原任务已经结束、取消或结果待核验；不会恢复另一个任务或重放历史操作。请明确新的请求，或先核对执行记录。")
-    questions = (saved.get("instruction_request") or {}).get("questions", [])
+    instruction = saved.get("instruction_request") or {}
+    # A clarification about a reference ("重新开始任务") is not a new task
+    # definition and cannot replace the immutable root's goals/constraints.
+    foreign_reference = bool(record and instruction.get("original") != record.original
+                             and is_continuation(instruction.get("original", "")))
+    questions = [] if foreign_reference else instruction.get("questions", [])
     planner_omission = bool(questions) and all(re.fullmatch(
         r"请求中的搜索结果总结尚未被规划，未执行半条命令。"
         r"|完整请求中的 [a-z_]+ 尚未被规划，请确认是否保留此目标。", question) for question in questions)
-    if record and record.status == "clarifying" and not planner_omission:
+    if record and record.status == "clarifying" and not planner_omission and not foreign_reference:
         return Continuation("clarify", "上文任务还有条件待确认，尚未执行。" + ("请补充：" + "；".join(questions) if questions else "请回答上一轮的追问。"))
     # An unresolved new request and an older live browser task are different referents.
     if record and (record.status in {"planning", "failed", "timed_out", "interrupted"}
-                   or record.status == "clarifying" and planner_omission) and not record.execution_started:
+                   or record.status == "clarifying" and (planner_omission or foreign_reference)) and not record.execution_started:
         if live:
             return Continuation("clarify", "上文请求尚未执行，但本会话还有浏览器任务在运行。请明确继续原请求还是处理浏览器任务。")
         if record.resume_stamp and record.resume_stamp != stamp:

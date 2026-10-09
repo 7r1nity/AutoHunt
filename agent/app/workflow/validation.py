@@ -48,10 +48,12 @@ def preflight(steps: list[dict], goals: list[dict], sources: list[str], tools: s
         covered.update(goal["step_ids"])
     if not ids <= covered:
         issues.append(ValidationIssue("uncovered_step", "repair", "规划包含未绑定用户目标的步骤"))
-    for quote in [goal["quote"] for goal in goals] + [step[field] for step in steps
-                  for field in ("command_quote", "scope_quote") if step[field]]:
+    citations = [(f"goals[{index}].quote", "", goal["quote"]) for index, goal in enumerate(goals)]
+    citations.extend((f"steps[{step['id']}].{field}", step["tool"], step[field])
+                     for step in steps for field in ("command_quote", "scope_quote") if step[field])
+    for field, tool, quote in citations:
         if not any(quote in source for source in sources):
-            issues.append(ValidationIssue("invalid_citation", "repair", "引用必须来自有效用户原话"))
+            issues.append(ValidationIssue("invalid_citation", "repair", "引用必须来自有效用户原话", tool, field))
     for step in steps:
         if step["tool"] not in tools:
             issues.append(ValidationIssue("unknown_tool", "repair", "工具不在已提供能力中", step["tool"]))
@@ -70,6 +72,22 @@ def preflight(steps: list[dict], goals: list[dict], sources: list[str], tools: s
         issues = list(dict.fromkeys(issues))
         first = issues[0]
         raise PlanValidationError(first.code, first.detail, issues=issues)
+
+
+def restore_quote_spacing(quote: str, sources: list[str], *, max_length: int) -> str:
+    """Restore a uniquely matching raw span; normalize whitespace runs ONLY.
+
+    Never delete negation, change numbers/units/punctuation or concatenate
+    disjoint fragments. Authorization subsequently checks the restored source.
+    Ambiguous raw spans remain a repair issue, not permission to choose one.
+    """
+    if not quote.strip() or any(quote in source for source in sources):
+        return quote
+    pattern = "".join(r"\s+" if part.isspace() else re.escape(part)
+                      for part in re.split(r"(\s+)", quote.strip()) if part)
+    matches = {match.group() for source in sources for match in re.finditer(pattern, source)
+               if len(match.group()) <= max_length}
+    return matches.pop() if len(matches) == 1 else quote
 
 
 def normalize_encoding(arguments: dict, schema: dict) -> dict:
