@@ -45,3 +45,24 @@ export async function POST(request: NextRequest) {
     return unavailable();
   }
 }
+
+export async function PUT(request: NextRequest) {
+  const token = process.env.AUTOHUNT_BACKEND_TOKEN;
+  if (!token) return unavailable();
+  try {
+    const payload = await request.json();
+    if (typeof payload.id !== "string" || !/^[a-f0-9]{32}$/.test(payload.id)) {
+      return NextResponse.json({ detail: "无效的材料 ID" }, { status: 422 });
+    }
+    const response = await fetch(`${backendUrl}/api/v1/materials/${payload.id}/reparse`, {
+      method: "POST",
+      headers: { "X-AutoHunt-Key": token, "Content-Type": "application/json" },
+      body: JSON.stringify({ target_entry_id: payload.target_entry_id ?? null }),
+      cache: "no-store",
+      signal: AbortSignal.timeout(45_000),
+    });
+    return NextResponse.json(await response.json(), { status: response.status });
+  } catch {
+    return unavailable();
+  }
+}

@@ -107,6 +107,8 @@ class ResumeProposalView(BaseModel):
     id: str = Field(default_factory=lambda: __import__("uuid").uuid4().hex)
     document_id: str = "master"
     document_version: int = 1
+    resume_id: str | None = None
+    applied_operation_ids: list[str] = Field(default_factory=list, max_length=50)
     instruction: str = Field(min_length=1, max_length=2000)
     reason: str = Field(min_length=1, max_length=1000)
     status: Literal["pending", "approved", "partially_approved", "rejected"] = "pending"
@@ -290,6 +292,7 @@ class CandidateEvidenceItem(BaseModel):
     achievements: list[str] = Field(default_factory=list, max_length=20)
     source: Literal["file", "conversation"]
     confidence: float = Field(default=0.8, ge=0, le=1)
+    extraction_note: str = Field(default="", max_length=500)
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 

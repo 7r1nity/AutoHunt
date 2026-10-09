@@ -172,8 +172,8 @@ function detailLabel(line: ResumeLine) {
   return (line.explicitLabel ?? line.content.trim().match(fieldPrefix)?.[1] ?? "").replace(/[：:]\s*$/, "");
 }
 
-// Both modes share this layout. Grouping adds visual containers only; all source
-// lines remain in order, including unrecognized headings and paragraphs.
+// Editing preserves source order; display may place supplements in their matching
+// section without changing source indices or the canonical editable text.
 function ResumeLayout({ lines, renderLine, editing = false }: { lines: ResumeLine[]; renderLine: LineRenderer; editing?: boolean }) {
   const indexed = lines.map((line, index) => ({ ...line, index }));
   const titleIndex = indexed.findIndex((line) => line.kind === "title");
@@ -185,6 +185,31 @@ function ResumeLayout({ lines, renderLine, editing = false }: { lines: ResumeLin
     if (line.kind === "section") groups.push({ heading: line, content: [] });
     else if (groups.length) groups[groups.length - 1].content.push(line);
     else preamble.push(line);
+  }
+  if (!editing) {
+    const sectionKey = (line: IndexedLine) => {
+      const label = (line.display ?? line.content).replace(/^#+\s*/, "").trim();
+      if (/^(项目经历|项目经验|项目|Projects|Project Experience)$/i.test(label)) return "project";
+      if (/^(工作经历|工作经验|Work Experience)$/i.test(label)) return "experience";
+      if (/^(实习经历|实习经验|Internship Experience)$/i.test(label)) return "internship";
+      if (/^(课程与研究|Coursework)$/i.test(label)) return "course";
+      return label;
+    };
+    let supplemental = false;
+    for (let i = 0; i < groups.length; i++) {
+      const group = groups[i];
+      if (sectionKey(group.heading) === "已确认的补充经历") {
+        supplemental = true;
+        if (group.content.every((line) => line.kind === "space")) { groups.splice(i--, 1); }
+        continue;
+      }
+      if (!supplemental) continue;
+      const destination = groups.slice(0, i).find((candidate) => sectionKey(candidate.heading) === sectionKey(group.heading));
+      if (destination) {
+        destination.content.push(...group.content);
+        groups.splice(i--, 1);
+      }
+    }
   }
   const render = (line: IndexedLine, kind?: string, omitLabel = false) => <Fragment key={line.index}>{renderLine(line, kind, omitLabel)}</Fragment>;
   const renderChunk = (chunk: IndexedLine[]) => {

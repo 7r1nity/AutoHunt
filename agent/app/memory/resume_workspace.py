@@ -657,6 +657,7 @@ class ResumeWorkspaceStore:
         proposal = ResumeProposalView(
             document_id=document.id,
             document_version=document.version,
+            resume_id=self.candidate_state.read().profile.resume_id,
             instruction=instruction[:2000],
             reason=reason[:1000],
             operations=operations,
@@ -664,25 +665,46 @@ class ResumeWorkspaceStore:
         self._save_proposal(proposal)
         return proposal
 
-    def propose_add_evidence(self, evidence: CandidateEvidenceItem) -> ResumeProposalView | None:
+    def propose_add_evidence(
+        self, evidence: CandidateEvidenceItem, *, target_entry_id: str | None = None,
+        expected_version: int | None = None,
+    ) -> ResumeProposalView | None:
+        with self._lock:
+            return self._propose_evidence(evidence, target_entry_id, expected_version)
+
+    def _propose_evidence(
+        self, evidence: CandidateEvidenceItem, target_entry_id: str | None,
+        expected_version: int | None,
+    ) -> ResumeProposalView | None:
         document = self.read_document()
-        if any(evidence.id in entry.evidence_ids for entry in document.entries):
+        if expected_version is not None and document.version != expected_version:
+            raise RuntimeError("主简历在解析期间已变化，请重新解析并核对替换目标。")
+        target = next((entry for entry in document.entries if entry.id == target_entry_id), None)
+        if target_entry_id and target is None:
+            raise ValueError("要替换的补充经历已不存在，请重新选择。")
+        if not target and any(evidence.id in entry.evidence_ids for entry in document.entries):
             return None
         for pending in self.list_proposals("pending"):
-            if any(evidence.id in operation.evidence_ids for operation in pending.operations):
+            path = f"entries.{target.id}" if target else "entries"
+            if ((not target or pending.document_version == document.version)
+                    and any(evidence.id in operation.evidence_ids and operation.path == path
+                            for operation in pending.operations)):
                 return pending
         entry = _entry_from_evidence(evidence)
+        if target:
+            entry.id = target.id
+            entry.evidence_ids = _unique([*target.evidence_ids, evidence.id], 20)
         operation = ResumePatchOperation(
-            operation="add",
-            path="entries",
-            label=f"新增{self._kind_label(entry.kind)}：{entry.title}",
-            old_value=None,
+            operation="replace" if target else "add",
+            path=f"entries.{target.id}" if target else "entries",
+            label=f"{'替换' if target else '新增'}{self._kind_label(entry.kind)}：{entry.title}",
+            old_value=target.model_dump(mode="json") if target else None,
             new_value=entry.model_dump(mode="json"),
             evidence_ids=entry.evidence_ids,
         )
         return self._create_proposal(
             instruction=f"将新{self._kind_label(entry.kind)}加入主简历",
-            reason="材料已解析为候选人证据；写入主简历前需要人工确认。",
+            reason="材料已解析为候选人证据；写入主简历前需要人工确认。" + evidence.extraction_note,
             operations=[operation],
         )
 
@@ -817,12 +839,24 @@ class ResumeWorkspaceStore:
     ) -> tuple[ResumeProposalView, ResumeDocumentView]:
         with self._lock:
             proposal = self.read_proposal(proposal_id)
-            if proposal.status != "pending":
-                raise RuntimeError("Resume proposal has already been decided")
             document = self.read_document()
-            if document.version != proposal.document_version:
-                raise RuntimeError("Resume document changed; regenerate this proposal")
             selected = set(operation_ids) if operation_ids is not None else {item.id for item in proposal.operations}
+            known = {item.id for item in proposal.operations}
+            if not selected or not selected <= known:
+                raise ValueError("请选择本提案中的有效修改项。")
+            if proposal.status != "pending":
+                applied_ids = set(proposal.applied_operation_ids)
+                if proposal.status == "approved" and not applied_ids:
+                    applied_ids = known  # Older fully-approved proposals are also idempotent.
+                if proposal.status in {"approved", "partially_approved"} and selected == applied_ids:
+                    return proposal, document
+                raise RuntimeError("提案已处理；请重新查看当前简历，不要重复写入。")
+            profile = self.candidate_state.read().profile
+            if ((proposal.resume_id is not None and proposal.resume_id != profile.resume_id)
+                    or (profile.resume_activated_at and profile.resume_activated_at > proposal.created_at)):
+                raise RuntimeError("主简历已切换，请根据当前简历重新生成提案。")
+            if document.version != proposal.document_version:
+                self._validate_independent_additions(proposal, document, selected)
             applied = 0
             for operation in proposal.operations:
                 if operation.id not in selected:
@@ -831,18 +865,53 @@ class ResumeWorkspaceStore:
                 applied += 1
             if applied == 0:
                 raise ValueError("Select at least one resume change")
+            # Validate the complete result before either encrypted document is
+            # written, including the draft size accepted by candidate state.
+            document = ResumeDocumentView.model_validate(document.model_dump())
+            rendered = self.render_markdown(document)
+            if len(rendered) > 40_000:
+                raise ValueError("补充后的简历超过 40000 字符，请精简提案后再接受；本次未写入。")
             document.version += 1
             document.updated_at = datetime.now(UTC)
             proposal.status = "approved" if applied == len(proposal.operations) else "partially_approved"
             proposal.decided_at = datetime.now(UTC)
+            proposal.applied_operation_ids = sorted(selected)
             self._save_document(document)
             self._save_proposal(proposal)
             self.candidate_state.update_resume_draft(
-                self.render_markdown(document),
+                rendered,
                 preserve_exact=document.source_mode == "verbatim",
             )
             self.candidate_state.sync_approved_resume_skills(document.skills)
             return proposal, document
+
+    def _validate_independent_additions(
+        self, proposal: ResumeProposalView, document: ResumeDocumentView, selected: set[str],
+    ) -> None:
+        """Rebase additions only when the original resume and its existing entries are unchanged."""
+        conflict = "主简历已有冲突修改，请重新解析材料并核对新提案；本次未写入。"
+        operations = [item for item in proposal.operations if item.id in selected]
+        baseline_path = self.history_root / f"master-v{proposal.document_version:06d}.json.enc"
+        if (document.version <= proposal.document_version or not baseline_path.exists()
+                or any(item.operation != "add" or item.path != "entries" for item in operations)):
+            raise RuntimeError(conflict)
+        baseline = ResumeDocumentView.model_validate(self._read_payload(baseline_path))
+        ignored = {"version", "updated_at", "layout", "entries", "skills", "supplemental_skills"}
+        if (baseline.version != proposal.document_version or baseline.id != proposal.document_id
+                or baseline.model_dump(exclude=ignored) != document.model_dump(exclude=ignored)):
+            raise RuntimeError(conflict)
+        if (document.entries[:len(baseline.entries)] != baseline.entries
+                or not set(baseline.skills) <= set(document.skills)
+                or not set(baseline.supplemental_skills) <= set(document.supplemental_skills)):
+            raise RuntimeError(conflict)
+        ids = {entry.id for entry in document.entries}
+        evidence_ids = {eid for entry in document.entries for eid in entry.evidence_ids}
+        for operation in operations:
+            entry = ResumeEntryView.model_validate(operation.new_value)
+            if entry.id in ids or evidence_ids.intersection(entry.evidence_ids):
+                raise RuntimeError("该项目或证据已写入主简历，请重新查看，避免重复添加。")
+            ids.add(entry.id)
+            evidence_ids.update(entry.evidence_ids)
 
     def reject(self, proposal_id: str) -> ResumeProposalView:
         with self._lock:
@@ -916,6 +985,15 @@ class ResumeWorkspaceStore:
             raise ValueError("Resume entry no longer exists")
         if operation.operation == "remove" and len(parts) == 2:
             document.entries.pop(index)
+            return
+        if operation.operation == "replace" and len(parts) == 2:
+            if document.entries[index].model_dump(mode="json") != operation.old_value:
+                raise RuntimeError("要替换的经历已变化，请重新生成提案。")
+            entry = ResumeEntryView.model_validate(operation.new_value)
+            if entry.id != parts[1]:
+                raise ValueError("替换经历必须保留原条目 ID。")
+            document.entries[index] = entry
+            document.skills = _unique([*document.skills, *entry.skills], 100)
             return
         if operation.operation != "replace" or len(parts) != 3:
             raise ValueError(f"Unsupported resume patch operation: {operation.operation}")

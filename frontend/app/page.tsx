@@ -272,6 +272,22 @@ function formatProposalValue(value: unknown) {
   return String(value);
 }
 
+function ProposalValue({ value }: { value: unknown }) {
+  if (!value || typeof value !== "object" || Array.isArray(value) || !("title" in value)) {
+    return <span>{formatProposalValue(value)}</span>;
+  }
+  const entry = value as Record<string, unknown>;
+  const list = (key: string) => Array.isArray(entry[key]) ? (entry[key] as unknown[]).filter((item): item is string => typeof item === "string") : [];
+  return <div className="proposal-entry-preview">
+    <strong>{String(entry.title ?? "")}</strong>
+    {typeof entry.summary === "string" && <p><b>项目简介：</b>{entry.summary}</p>}
+    {typeof entry.architecture === "string" && entry.architecture && <p><b>方法 / 架构：</b>{entry.architecture}</p>}
+    {list("skills").length > 0 && <p><b>方法与工具：</b>{list("skills").join("、")}</p>}
+    {list("highlights").length > 0 && <><b>项目描述</b><ul>{list("highlights").map((item, index) => <li key={index}>{item}</li>)}</ul></>}
+    {list("optimizations").length > 0 && <><b>改进与优化</b><ul>{list("optimizations").map((item, index) => <li key={index}>{item}</li>)}</ul></>}
+  </div>;
+}
+
 
 function preferredSearchQuery(state: CandidateState) {
   const confirmedRole = state.preferences.target_roles.source === "user_confirmed" ? state.preferences.target_roles.values[0] : undefined;
@@ -349,6 +365,7 @@ export default function Home() {
   const [materials, setMaterials] = useState<Material[]>([]);
   const [resumes, setResumes] = useState<ResumeProfile[]>([]);
   const [candidateMaterials, setCandidateMaterials] = useState<CandidateMaterial[]>([]);
+  const [materialRepairTargets, setMaterialRepairTargets] = useState<Record<string, string>>({});
   const [candidateState, setCandidateState] = useState<CandidateState | null>(null);
   const [resumeSourceMode, setResumeSourceMode] = useState<ResumeDocumentMeta["source_mode"]>("structured");
   const [resumeDocument, setResumeDocument] = useState<ResumeDocumentMeta | null>(null);
@@ -1263,6 +1280,35 @@ export default function Home() {
     }
   }
 
+  async function reparseMaterial(material: CandidateMaterial) {
+    setResumeBusy(true);
+    setUploadFeedback({ kind: "progress", text: "正在重新解析材料；只生成提案，不直接改写简历…" });
+    try {
+      const response = await fetch("/api/agent/materials", {
+        method: "PUT", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: material.id, target_entry_id: materialRepairTargets[material.id] || null }),
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(String(payload.detail ?? "材料重新解析失败"));
+      const result = payload as MaterialIngestResult;
+      setCandidateState(result.candidate_state);
+      const proposal = result.resume_proposal;
+      if (proposal) {
+        setMessages((current) => [...current, {
+          id: createMessageId(), author: "agent", time: now(), text: "材料已重新解析，请核对新提案。接受前不会修改主简历；旧的错误提案可拒绝。",
+          action: "resume_proposal", resumeProposal: proposal, proposalState: "pending",
+          selectedOperationIds: proposal.operations.map((item) => item.id),
+        }]);
+        setActiveView("chat");
+      }
+      setUploadFeedback({ kind: "success", text: "重新解析完成，请在对话中核对并接受新提案。" });
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : "材料重新解析失败";
+      setNotice(detail);
+      setUploadFeedback({ kind: "error", text: detail });
+    } finally { setResumeBusy(false); }
+  }
+
   async function saveResumeDraft() {
     const content = resumeDraft;
     if (!content.trim()) {
@@ -1348,7 +1394,7 @@ export default function Home() {
       setNotice("请至少选择一项简历修改");
       return;
     }
-    setMessages((current) => current.map((message) => message.id === messageId ? { ...message, proposalState: "approving" } : message));
+    setMessages((current) => current.map((message) => message.id === messageId ? { ...message, proposalState: "approving", proposalError: undefined } : message));
     try {
       const response = await fetch("/api/agent/resume-proposals", {
         method: "PUT",
@@ -1360,6 +1406,7 @@ export default function Home() {
       if (decision === "approve") {
         if (payload.candidate_state) setCandidateState(payload.candidate_state);
         if (payload.document?.source_mode) setResumeSourceMode(payload.document.source_mode);
+        if (payload.document) setResumeDocument(payload.document);
         setResumeViewMode("text");
         setNotice(`已接受 ${operationIds.length} 项修改，主简历已生成新版本`);
       } else {
@@ -1370,8 +1417,9 @@ export default function Home() {
         proposalState: decision === "approve" ? "approved" : "rejected",
       } : message));
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : "处理简历提案失败");
-      setMessages((current) => current.map((message) => message.id === messageId ? { ...message, proposalState: "failed" } : message));
+      const detail = error instanceof Error ? error.message : "处理简历提案失败";
+      setNotice(detail);
+      setMessages((current) => current.map((message) => message.id === messageId ? { ...message, proposalState: "failed", proposalError: detail } : message));
     }
   }
 
@@ -1761,8 +1809,8 @@ export default function Home() {
                                     <div>
                                       <strong>{operation.label}</strong>
                                       <div className="proposal-diff">
-                                        {operation.operation !== "add" && <p className="diff-old"><span>−</span>{formatProposalValue(operation.old_value)}</p>}
-                                        {operation.operation !== "remove" && <p className="diff-new"><span>＋</span>{formatProposalValue(operation.new_value)}</p>}
+                                        {operation.operation !== "add" && <div className="diff-old"><span>−</span><ProposalValue value={operation.old_value} /></div>}
+                                        {operation.operation !== "remove" && <div className="diff-new"><span>＋</span><ProposalValue value={operation.new_value} /></div>}
                                       </div>
                                       {operation.evidence_ids.length > 0 && <small>依据：{operation.evidence_ids.length} 条候选人证据</small>}
                                     </div>
@@ -1779,7 +1827,7 @@ export default function Home() {
                             {message.proposalState === "approving" && <p className="confirm-result">正在写入主简历新版本…</p>}
                             {message.proposalState === "approved" && <p className="confirm-result ok">✓ 已写入主简历，未选择的修改不会应用</p>}
                             {message.proposalState === "rejected" && <p className="confirm-result">已拒绝，主简历未改变</p>}
-                            {message.proposalState === "failed" && <p className="confirm-result error">处理失败，可重新选择后重试</p>}
+                            {message.proposalState === "failed" && <p className="confirm-result error">{message.proposalError ?? "提案处理失败，请核对当前简历与所选修改。"}</p>}
                           </div>
                         )}
                         {message.action === "open_board" && (
@@ -1882,7 +1930,14 @@ export default function Home() {
                   {materials.map((item) => {
                     const resume = resumes.find((candidate) => candidate.id === item.id);
                     const isActive = resume?.id === candidateState?.profile.resume_id;
-                    return <div key={item.id} className="material-row"><span className="file-icon">□</span><div><strong>{item.name}</strong><small>{isActive ? `${item.type} · 当前主简历` : item.type}</small></div>{resume ? <div className="material-row-actions"><a className="text-button" href={`/api/agent/resumes?id=${encodeURIComponent(resume.id)}&original=1`} target="_blank" rel="noreferrer">查看原件</a>{isActive ? <button className="text-button" type="button" onClick={editResumeText}>编辑文本版</button> : <button className="text-button" type="button" onClick={() => void activateUploadedResume(resume)} disabled={resumeBusy}>设为主简历</button>}<button className="text-button danger" type="button" onClick={() => void deleteUploadedResume(resume)} disabled={resumeBusy}>删除</button></div> : <em className={item.status === "失败" ? "material-failed" : ""}>{item.status}</em>}</div>;
+                    const material = candidateMaterials.find((candidate) => candidate.id === item.id);
+                    return <div key={item.id} className="material-row"><span className="file-icon">□</span><div><strong>{item.name}</strong><small>{isActive ? `${item.type} · 当前主简历` : item.type}</small></div>{resume ? <div className="material-row-actions"><a className="text-button" href={`/api/agent/resumes?id=${encodeURIComponent(resume.id)}&original=1`} target="_blank" rel="noreferrer">查看原件</a>{isActive ? <button className="text-button" type="button" onClick={editResumeText}>编辑文本版</button> : <button className="text-button" type="button" onClick={() => void activateUploadedResume(resume)} disabled={resumeBusy}>设为主简历</button>}<button className="text-button danger" type="button" onClick={() => void deleteUploadedResume(resume)} disabled={resumeBusy}>删除</button></div> : material ? <div className="material-row-actions material-repair-actions">
+                      <select aria-label={`重新解析 ${item.name} 的写入位置`} value={materialRepairTargets[material.id] ?? ""} disabled={resumeBusy} onChange={(event) => setMaterialRepairTargets((current) => ({ ...current, [material.id]: event.target.value }))}>
+                        <option value="">作为新项目提案</option>
+                        {(resumeDocument?.entries ?? []).map((entry) => <option key={entry.id} value={entry.id}>替换：{entry.title} · {entry.summary.slice(0, 45)}</option>)}
+                      </select>
+                      <button className="text-button" type="button" disabled={resumeBusy || resumeEditing} onClick={() => void reparseMaterial(material)}>重新解析</button>
+                    </div> : <em className={item.status === "失败" ? "material-failed" : ""}>{item.status}</em>}</div>;
                   })}
                   {materials.length === 0 && <div className="empty-state">上传简历、课程报告、项目文档、单个代码文件或项目 ZIP</div>}
                 </div>
@@ -2024,7 +2079,7 @@ export default function Home() {
                     })}</div>
                     <details><summary>查看详细学习任务与验收标准</summary><div className="learning-detail"><p><strong>目标：</strong>{gap.objective}</p>{gap.prerequisites.length > 0 && <p><strong>前置知识：</strong>{gap.prerequisites.join("、")}</p>}<ol>{gap.steps.map((step, index) => <li key={index}>{step}</li>)}</ol><p><strong>实践产物：</strong>{gap.practice}</p><strong>验收标准</strong><ul>{gap.acceptance.map((item, index) => <li key={index}>{item}</li>)}</ul></div></details>
                     {gap.status === "todo" ? <div className="learning-complete"><label>完成证据：具体做了什么、产物与可验证结果<textarea value={completionEvidence[gap.id] ?? ""} onChange={(event) => setCompletionEvidence((current) => ({ ...current, [gap.id]: event.target.value }))} placeholder="不要只写‘已学会’。请描述练习、项目、产物、结果或链接。" /></label><div className="learning-complete-row"><label>写入简历<select value={target} onChange={(event) => setCompletionTargets((current) => ({ ...current, [gap.id]: event.target.value as "skill" | "project" | "none" }))}><option value="none">不补充</option><option value="skill">补充简洁技能</option><option value="project">补充项目经历</option></select></label>{target === "project" && <label>真实项目名称<input value={completionTitles[gap.id] ?? ""} onChange={(event) => setCompletionTitles((current) => ({ ...current, [gap.id]: event.target.value }))} placeholder="例如：信用风险评分模型" /></label>}<button className="button primary compact" disabled={planBusy} onClick={() => void completeLearningGap(plan.id, gap.id, gap.resume_target)}>标记完成</button></div></div> : <div className="learning-done">已保存你的完成说明；这属于用户报告，简历内容仍需审核。{gap.resume_proposal_id && !proposal && <span> 简历提案已处理或待刷新。</span>}</div>}
-                    {proposal && <div className="learning-proposal"><strong>简历补充提案 · 待审核</strong><p>{proposal.reason}</p>{proposal.operations.map((operation) => <div key={operation.id}><b>{operation.label}</b><p>{formatProposalValue(operation.new_value)}</p></div>)}<div className="learning-complete-row"><button className="button secondary compact" disabled={planBusy} onClick={() => void decideLearningProposal(proposal, "reject")}>不写入简历</button><button className="button primary compact" disabled={planBusy} onClick={() => void decideLearningProposal(proposal, "approve")}>核对无误，写入简历</button></div></div>}
+                    {proposal && <div className="learning-proposal"><strong>简历补充提案 · 待审核</strong><p>{proposal.reason}</p>{proposal.operations.map((operation) => <div key={operation.id}><b>{operation.label}</b><ProposalValue value={operation.new_value} /></div>)}<div className="learning-complete-row"><button className="button secondary compact" disabled={planBusy} onClick={() => void decideLearningProposal(proposal, "reject")}>不写入简历</button><button className="button primary compact" disabled={planBusy} onClick={() => void decideLearningProposal(proposal, "approve")}>核对无误，写入简历</button></div></div>}
                   </div>;
                 })}</div>
               </article>

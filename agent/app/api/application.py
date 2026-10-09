@@ -12,7 +12,7 @@ from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import Response, StreamingResponse
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from typing import Literal
 
 from ..core.config import settings
@@ -653,6 +653,42 @@ async def list_candidate_materials() -> list[MaterialView]:
         return material_store.list()
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+class MaterialReparseRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    target_entry_id: str | None = Field(default=None, min_length=1, max_length=200)
+
+
+@app.post("/api/v1/materials/{material_id}/reparse", response_model=MaterialIngestResult)
+async def reparse_candidate_material(material_id: str, request: MaterialReparseRequest) -> MaterialIngestResult:
+    try:
+        material, text = material_store.read_text(material_id)
+        document = resume_workspace_store.read_document()
+        resume_id = candidate_state_store.read().profile.resume_id
+        if request.target_entry_id and not any(entry.id == request.target_entry_id for entry in document.entries):
+            raise ValueError("要替换的补充经历已不存在，请重新选择。")
+        evidence = await candidate_evidence_extractor.extract(
+            text, title=material.filename, kind=material.kind, source="file",
+        )
+        if candidate_state_store.read().profile.resume_id != resume_id:
+            raise RuntimeError("主简历在解析期间已切换，请重新解析。")
+        # apply_evidence may reuse an existing evidence ID; build the proposal
+        # only after that normalization so its references stay valid.
+        state = candidate_state_store.apply_evidence(evidence)
+        proposal = resume_workspace_store.propose_add_evidence(
+            evidence, target_entry_id=request.target_entry_id, expected_version=document.version,
+        )
+        return MaterialIngestResult(
+            material=material, evidence=evidence, candidate_state=state, resume_proposal=proposal,
+            pipeline=["stored_material_read", "candidate_evidence_extract", "resume_proposal_create", "await_user_confirmation"],
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="材料不存在，请重新上传。") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @app.get("/api/v1/candidate-state", response_model=CandidateStateView)

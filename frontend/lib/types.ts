@@ -295,6 +295,7 @@ export type ResumeDocumentMeta = {
   source_mode: "structured" | "verbatim";
   source_filename: string;
   version?: number;
+  entries?: Array<{ id: string; kind: string; title: string; summary: string }>;
   layout?: ResumeLayoutReport | null;
 };
 
@@ -386,6 +387,7 @@ export type Message = {
   resumeProposal?: ResumeProposal;
   selectedOperationIds?: string[];
   proposalState?: "pending" | "approving" | "approved" | "rejected" | "failed";
+  proposalError?: string;
   actionLocations?: string[];
   actionDryRun?: boolean;
   clarifyOptions?: ClarifyOption[];

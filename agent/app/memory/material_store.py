@@ -140,3 +140,15 @@ class MaterialStore:
 
     def list(self) -> list[MaterialView]:
         return [MaterialView.model_validate(item) for item in self._read_index()]
+
+    def read_text(self, material_id: str) -> tuple[MaterialView, str]:
+        if not re.fullmatch(r"[a-f0-9]{32}", material_id):
+            raise FileNotFoundError(material_id)
+        material = next((item for item in self.list() if item.id == material_id), None)
+        path = self.root / f"{material_id}.text.enc"
+        if material is None or not path.is_file():
+            raise FileNotFoundError(material_id)
+        try:
+            return material, self._require_cipher().decrypt(path.read_bytes()).decode("utf-8")
+        except (InvalidToken, UnicodeDecodeError) as exc:
+            raise RuntimeError("材料文本无法读取，请重新上传原件。") from exc
