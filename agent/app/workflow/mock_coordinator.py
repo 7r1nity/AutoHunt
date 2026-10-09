@@ -73,6 +73,7 @@ class MockWorkflowCoordinator:
             for enabled, action in (
                 (bool(self.jobs.mock_delivery_queue()), self.process_delivery_queue),
                 (bool(self.jobs.delivery_runs_waiting_reply(limit=1)), self.check_reply_queue),
+                (bool(self.jobs.delivery_runs_failed_before_submit(limit=1)), self.recover_failed_starts),
                 (settings["monitor_enabled"] and bool(settings["applicant_id"]), self.sync_once),
                 (settings["daily_enabled"], self.run_daily_if_due),
             ):
@@ -141,6 +142,52 @@ class MockWorkflowCoordinator:
                     if run.status == DeliveryTaskStatus.WAITING_FOR_REPLY and not run.submitted:
                         self.jobs.update_delivery_run(run.id, status=DeliveryTaskStatus.CANCELLED, detail="用户停止本会话自动投递，已发送沟通保留")
         return {"message": f"已停止本会话 {len(items)} 项自动投递；已经发送的消息和简历保留。"}
+
+    async def recover_failed_starts(self) -> dict:
+        """Re-run starts that failed before any click, within a bounded budget.
+
+        A transient browser error used to park a job at "需要重新授权" even when its
+        recruiter had already asked for the resume, so the user had to approve the
+        same job again. The run is resumed in place rather than re-dispatched: its
+        binding and one-use authorisation were never consumed, and re-dispatching
+        would mint a second preview and a second run for the same job.
+        """
+        recovered, skipped = 0, 0
+        for run in self.jobs.delivery_runs_failed_before_submit():
+            if self.delivery.worker and not self.delivery.worker.done():
+                break
+            if int(run.get("attempts") or 0) >= self.delivery.retry_limit:
+                skipped += 1
+                continue
+            if not str(run.get("recruiter_reply") or "").strip():
+                skipped += 1          # nothing to send yet; the reply check owns it
+                continue
+            item = next((entry for entry in self.jobs.mock_delivery_queue(active_only=False)
+                         if entry["run_id"] == run["id"]), None)
+            if item is None:
+                skipped += 1          # not a batch job; a human owns its authorisation
+                continue
+            # reopen the run so the reply check can pick it up again
+            reopened = self.jobs.update_delivery_run(
+                run["id"], status=DeliveryTaskStatus.WAITING_FOR_REPLY,
+                checkpoint="waiting_for_reply", submitted=0,
+                detail="上次提交未能开始（未发出任何内容）；招聘方已回复，正在自动重试，无需重新授权")
+            if self.delivery.current().id == run["id"]:
+                self.delivery.state = reopened
+            try:
+                await self.delivery.resume_authorized_run(run["id"], **item["binding"])
+                self.jobs.update_mock_delivery(run["job_id"], "dispatched", "已回复，正在自动重试投递", run_id=run["id"])
+                self.jobs.mark_job_retrying_delivery(run["job_id"])
+                recovered += 1
+            except Exception as exc:  # noqa: BLE001 - one job must not stop the rest
+                self.jobs.record_mock_workflow_error(
+                    f"job={run['job_id']} 自动重试启动失败：{type(exc).__name__}：{exc}")
+                skipped += 1
+            worker = self.delivery.worker
+            if worker is not None:
+                await asyncio.gather(worker, return_exceptions=True)
+            break
+        return {"recovered": recovered, "skipped": skipped}
 
     async def check_reply_queue(self) -> dict:
         """Reply monitoring that does not hold the delivery worker.

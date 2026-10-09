@@ -195,6 +195,7 @@ class JobStore:
             self._ensure_column(db, "delivery_runs", "mock_resume_id", "INTEGER")
             self._ensure_column(db, "delivery_runs", "mock_applicant_id", "INTEGER")
             self._ensure_column(db, "delivery_runs", "action", "TEXT NOT NULL DEFAULT 'submit_resume'")
+        self._ensure_column(db, "delivery_runs", "attempts", "INTEGER NOT NULL DEFAULT 0")
 
     @staticmethod
     def _ensure_column(db: sqlite3.Connection, table: str, column: str, declaration: str) -> None:
@@ -471,6 +472,20 @@ class JobStore:
             )
         return self.get_delivery_run(run_id)
 
+    def bump_delivery_attempts(self, run_id: str) -> int:
+        """Count one more start attempt and return the new count.
+
+        Retries are bounded by the caller; the count lives here so a restart cannot
+        silently reset the budget of a job that keeps failing.
+        """
+        with self.lock, self._connect() as db:
+            db.execute("UPDATE delivery_runs SET attempts=COALESCE(attempts,0)+1, updated_at=? WHERE id=?",
+                       (utc_now(), run_id))
+            row = db.execute("SELECT attempts FROM delivery_runs WHERE id=?", (run_id,)).fetchone()
+            if row is None:
+                raise KeyError(run_id)
+            return int(row["attempts"] or 0)
+
     def get_delivery_run(self, run_id: str) -> DeliveryTaskView:
         with self.lock, self._connect() as db:
             row = db.execute("SELECT * FROM delivery_runs WHERE id=?", (run_id,)).fetchone()
@@ -487,6 +502,7 @@ class JobStore:
         allowed = {
             "status", "checkpoint", "detail", "takeover_reason", "current_url", "submitted",
             "recruiter_reply", "recruiter_reply_at", "last_checked_at", "mock_resume_id", "mock_applicant_id",
+            "attempts",
         }
         values = {
             key: (value.value if hasattr(value, "value") else value)
@@ -995,6 +1011,18 @@ class JobStore:
                     inserted.append(item["id"])
         return inserted
 
+    def delivery_runs_failed_before_submit(self, *, limit: int = 50) -> list[dict]:
+        """Runs whose start failed before any click, so nothing was submitted.
+
+        These are safe to re-dispatch automatically: the checkpoint proves the submit
+        action never began, and the one-use authorisation is still unspent.
+        """
+        with self.lock, self._connect() as db:
+            rows = db.execute(
+                "SELECT * FROM delivery_runs WHERE status='failed' AND submitted=0 "
+                "AND checkpoint='failed_before_submit' ORDER BY started_at LIMIT ?", (limit,)).fetchall()
+        return [dict(row) for row in rows]
+
     def delivery_runs_waiting_reply(self, *, limit: int = 50) -> list[dict]:
         """Granted runs that still wait for the recruiter, oldest first.
 
@@ -1023,6 +1051,17 @@ class JobStore:
         with self.lock, self._connect() as db:
             return db.execute("UPDATE mock_delivery_queue SET status='dispatched',updated_at=? "
                               "WHERE job_id=? AND status='queued'", (utc_now(), job_id)).rowcount == 1
+
+    def mark_job_retrying_delivery(self, job_id: int) -> None:
+        """Return a job to the applying column while its submit is retried.
+
+        Without this the board keeps showing "需要重新授权" for a job the system has
+        already resumed, so the user is told to approve something that needs no
+        approval.
+        """
+        with self.lock, self._connect() as db:
+            db.execute("UPDATE jobs SET stage='applying',mode='自动投递·重试中',last_seen_at=? WHERE id=? "
+                       "AND stage NOT IN ('waiting','interview','rejected')", (utc_now(), job_id))
 
     def update_mock_delivery(self, job_id: int, status: str, detail: str, *, run_id: str | None = None) -> None:
         if status not in {"dispatched", "completed", "blocked", "stale", "cancelled"}:

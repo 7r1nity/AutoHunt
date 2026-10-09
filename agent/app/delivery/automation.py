@@ -37,6 +37,9 @@ class DeliveryAutomationService:
         self.cdp_url = cdp_url
         self.reply_poll_seconds = reply_poll_seconds
         self.resume_workspace = resume_workspace
+        # A start that failed before any click cannot have sent anything, so it may
+        # be retried this many times without a fresh authorisation.
+        self.retry_limit = 3
         self.adapter = MockJobSiteAdapter()
         self.session: BrowserSession | None = None
         self.worker: asyncio.Task | None = None
@@ -215,6 +218,7 @@ class DeliveryAutomationService:
                 last_checked_at=self.state.last_checked_at,
                 mock_resume_id=self.state.mock_resume_id,
                 mock_applicant_id=self.state.mock_applicant_id,
+                attempts=self.state.attempts,
             )
 
     async def _run_until_terminal(self, job_id: int) -> None:
@@ -236,6 +240,7 @@ class DeliveryAutomationService:
                 detail="已发起沟通；后台按周期检查招聘方回复，收到回复后自动发送已授权简历",
                 mock_resume_id=self.state.mock_resume_id,
                 mock_applicant_id=self.state.mock_applicant_id,
+                attempts=self.state.attempts,
             )
 
     def expire_reply_wait(self, job_id: int) -> None:
@@ -391,7 +396,19 @@ class DeliveryAutomationService:
             elif self.state.submitted:
                 self._update(DeliveryTaskStatus.COMPLETED, f"已确认的投递保留；回复监测停止：{detail}", checkpoint="reply_monitor_stopped")
             else:
-                self.jobs.mark_delivery_failed(job_id, detail)
+                # Nothing was clicked, so the resume was certainly not sent and a
+                # retry cannot duplicate a submission. Retry a bounded number of
+                # times before asking the user to re-authorise: a transient browser
+                # error used to park a job at "需要重新授权" even though its recruiter
+                # had already asked for the resume.
+                attempts = self.jobs.bump_delivery_attempts(self.state.id)
+                if attempts <= self.retry_limit:
+                    self._update(DeliveryTaskStatus.WAITING_FOR_REPLY,
+                                 f"本次提交未能开始（{detail}）；第 {attempts}/{self.retry_limit} 次自动重试，"
+                                 "无需重新授权", checkpoint="retry_pending")
+                else:
+                    self.jobs.mark_delivery_failed(
+                        job_id, f"{detail}；已自动重试 {self.retry_limit} 次仍未成功，需人工核对")
                 self._update(DeliveryTaskStatus.FAILED, detail, checkpoint="failed_before_submit")
         finally:
             lock.release()
