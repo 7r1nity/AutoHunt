@@ -5,6 +5,7 @@ import asyncio
 import time
 from dataclasses import dataclass
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
+from typing import Callable
 
 from playwright.async_api import Page
 
@@ -27,6 +28,14 @@ class MockSubmitResult:
     duplicate: bool
     detail: str
     await_reply: bool = False
+
+
+@dataclass(frozen=True)
+class MockResumeBinding:
+    resume_id: int
+    applicant_id: int
+    job_url: str
+    payload: dict
 
 
 class MockJobSiteAdapter:
@@ -154,7 +163,7 @@ class MockJobSiteAdapter:
 
         Once the panel is open it covers the button's hit point, so a second
         Playwright click waits for actionability until it times out. The DOM
-        handler is idempotent, so the fallback click is safe.
+        opening message is a side effect too: do not retry an ambiguous click.
         """
         if await self._chat_open(page):
             return
@@ -163,8 +172,9 @@ class MockJobSiteAdapter:
             return
         try:
             await communicate.first.click(timeout=5_000)
-        except Exception:  # noqa: BLE001 - overlay/scroll interception is expected
-            await communicate.first.click(force=True, timeout=5_000)
+        except Exception as exc:
+            if not await self._chat_open(page):
+                raise RuntimeError("发起沟通未获确认；请核对模拟站会话，不会重复点击") from exc
         await page.wait_for_timeout(800)
 
     async def prepare(self, page: Page, job_url: str) -> MockApplyObservation:
@@ -180,36 +190,105 @@ class MockJobSiteAdapter:
             return await self.inspect(page)
 
         if observation.direct_apply:
-            await page.locator("#job-hero").get_by_role("button", name="投递后沟通", exact=True).click()
+            if not await self._chat_open(page):
+                await page.locator("#job-hero").get_by_role("button", name="投递后沟通", exact=True).click(timeout=5_000)
             return await self.inspect(page)
         await self._open_communication(page)
         return await self.inspect(page)
 
-    async def submit(self, page: Page) -> MockSubmitResult:
+    async def bind_resume(self, page: Page, payload: dict, *, applicant_id: int | None = None,
+                          resume_id: int | None = None) -> MockResumeBinding:
+        """Sync only the previewed document; POST once, never synthesize facts."""
+        job_url = self.normalize_job_url(page.url)
+        if not job_url:
+            raise ValueError("简历同步仅支持本地模拟站职位页面")
+        result = await page.evaluate("""async ({payload, applicantId, resumeId}) => {
+          const id = Number(localStorage.getItem('userId'));
+          if (!id || localStorage.getItem('userRole') !== 'applicant' || (applicantId && id !== applicantId))
+            throw new Error('求职者账号与授权绑定不一致');
+          if (typeof selectedResumeId !== 'function' || typeof loadResumes !== 'function')
+            throw new Error('请刷新模拟站网页，加载支持主简历绑定的版本');
+          const headers = {'Content-Type':'application/json', 'X-User-Id':String(id), 'X-User-Role':'applicant'};
+          const read = async (path, options = {}) => {
+            const response = await fetch(path, {headers, redirect:'error', ...options});
+            if (!response.ok) throw new Error('主简历同步失败 HTTP ' + response.status);
+            return response.json();
+          };
+          const equal = resume => Object.keys(payload).every(key => JSON.stringify(resume[key]) === JSON.stringify(payload[key]));
+          const mine = await read('/api/resumes/mine');
+          let exact = resumeId ? mine.find(r => r.id === resumeId && equal(r)) : mine.find(equal);
+          if (resumeId && !exact) throw new Error('已绑定的模拟站简历缺失或发生变化');
+          if (!exact) exact = await read('/api/resumes', {method:'POST', body:JSON.stringify(payload)});
+          if (!equal(exact) || exact.applicant_id !== id) throw new Error('同步后的简历内容或账号不一致');
+          await loadResumes();
+          const select = document.querySelector('#resume-select');
+          if (!select || !Array.from(select.options).some(o => o.value === String(exact.id)))
+            throw new Error('授权简历未出现在页面选项中');
+          select.value = String(exact.id);
+          window.autohuntResumeBinding = {resumeId:exact.id, applicantId:id};
+          return {resume_id:exact.id, applicant_id:id};
+        }""", {"payload": payload, "applicantId": applicant_id, "resumeId": resume_id})
+        return MockResumeBinding(int(result["resume_id"]), int(result["applicant_id"]), job_url, payload)
+
+    async def _binding_evidence(self, page: Page, binding: MockResumeBinding) -> dict:
+        if self.normalize_job_url(page.url) != binding.job_url:
+            raise ValueError("投递页面与简历绑定的职位不一致")
+        return await page.evaluate("""async ({resumeId, applicantId, payload}) => {
+          if (Number(localStorage.getItem('userId')) !== applicantId || localStorage.getItem('userRole') !== 'applicant')
+            throw new Error('求职者账号已变化');
+          const headers = {'X-User-Id':String(applicantId),'X-User-Role':'applicant'};
+          const read = async path => {
+            const r = await fetch(path, {headers,redirect:'error'});
+            if (!r.ok) throw new Error('无法核实授权简历与投递记录');
+            return r.json();
+          };
+          const resume = await read('/api/resumes/' + resumeId);
+          if (resume.applicant_id !== applicantId || !Object.keys(payload).every(k => JSON.stringify(resume[k]) === JSON.stringify(payload[k])))
+            throw new Error('授权简历内容已变化');
+          const jobId = Number(new URL(location.href).searchParams.get('id'));
+          const application = (await read('/api/applications/mine')).find(a => a.job_id === jobId);
+          if (application) return {submitted:true, matches:application.resume_id === resumeId};
+          const select = document.querySelector('#resume-select');
+          const bound = window.autohuntResumeBinding;
+          if (!select || select.value !== String(resumeId) || bound?.resumeId !== resumeId || bound?.applicantId !== applicantId)
+            throw new Error('页面选择的简历不是已授权简历');
+          return {submitted:false,matches:false};
+        }""", {"resumeId": binding.resume_id, "applicantId": binding.applicant_id, "payload": binding.payload})
+
+    async def submit(self, page: Page, *, binding: MockResumeBinding | None = None,
+                     before_click: Callable[[], object] | None = None) -> MockSubmitResult:
         """Click once; reconcile using page evidence, never retry a submission."""
+        if binding is None:
+            return MockSubmitResult(False, False, "缺少已授权主简历的模拟站绑定；未点击投递")
+        evidence = await self._binding_evidence(page, binding)
+        if evidence["submitted"]:
+            return MockSubmitResult(bool(evidence["matches"]), bool(evidence["matches"]),
+                "已存在同一授权简历的投递记录" if evidence["matches"] else "已存在其他简历的投递记录，需人工核对")
         before = await self.inspect(page)
         if before.intervention_reason:
             return MockSubmitResult(False, False, before.intervention_reason)
         if before.application_submitted:
-            return MockSubmitResult(True, True, "页面已存在投递成功证据", before.direct_apply)
+            return MockSubmitResult(False, False, "页面与投递记录不一致，需人工核对")
         selector = "#direct-apply-btn" if before.direct_apply else "#resume-btn"
         button = page.locator(selector)
         if not await button.count() or await button.is_disabled():
             return MockSubmitResult(False, False, "投递按钮不可用")
+        if before_click is not None:
+            before_click()
         try:
             await button.click(timeout=8_000)
-        except Exception:  # noqa: BLE001 - the chat panel can cover the hit point
-            # The outcome after a failed click is unknown; the status scan below
-            # decides from page evidence, and an unconfirmed click is never retried.
-            try:
-                await button.click(force=True, timeout=8_000)
-            except Exception as exc:  # noqa: BLE001
-                return MockSubmitResult(False, False, f"点击投递按钮失败：{type(exc).__name__}")
+        except Exception:
+            pass  # Click may already have reached the site. Reconcile, never click again.
         deadline = time.monotonic() + self.submit_timeout_seconds
         while time.monotonic() < deadline:
-            observation = await self.inspect(page)
-            if observation.application_submitted:
-                return MockSubmitResult(True, False, "页面已确认投递成功", before.direct_apply)
+            try:
+                evidence = await self._binding_evidence(page, binding)
+                observation = await self.inspect(page)
+            except Exception:
+                return MockSubmitResult(False, False, "提交后无法核实账号、简历或投递记录，禁止自动重试")
+            if evidence["submitted"]:
+                return MockSubmitResult(bool(evidence["matches"]), False,
+                    "模拟站已确认授权简历投递成功" if evidence["matches"] else "投递记录的简历不符，需人工核对", before.direct_apply)
             if observation.intervention_reason:
                 return MockSubmitResult(False, False, "提交后出现验证，投递结果待核实")
             await asyncio.sleep(0.1)

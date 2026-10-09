@@ -65,6 +65,7 @@ delivery_service = DeliveryAutomationService(
     settings.data_root,
     headless=settings.browser_headless,
     cdp_url=settings.browser_cdp_url,
+    resume_workspace=resume_workspace_store,
 )
 mock_workflow = MockWorkflowCoordinator(
     job_store, browser_service, delivery_service, candidate_state_store, resume_workspace_store,

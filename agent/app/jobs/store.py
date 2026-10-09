@@ -192,6 +192,8 @@ class JobStore:
             self._ensure_column(db, "delivery_runs", "target_url", "TEXT")
             self._ensure_column(db, "delivery_runs", "resume_version", "INTEGER")
             self._ensure_column(db, "delivery_runs", "resume_digest", "TEXT")
+            self._ensure_column(db, "delivery_runs", "mock_resume_id", "INTEGER")
+            self._ensure_column(db, "delivery_runs", "mock_applicant_id", "INTEGER")
             self._ensure_column(db, "delivery_runs", "action", "TEXT NOT NULL DEFAULT 'submit_resume'")
 
     @staticmethod
@@ -484,7 +486,7 @@ class JobStore:
     def update_delivery_run(self, run_id: str, **fields: Any) -> DeliveryTaskView:
         allowed = {
             "status", "checkpoint", "detail", "takeover_reason", "current_url", "submitted",
-            "recruiter_reply", "recruiter_reply_at", "last_checked_at",
+            "recruiter_reply", "recruiter_reply_at", "last_checked_at", "mock_resume_id", "mock_applicant_id",
         }
         values = {
             key: (value.value if hasattr(value, "value") else value)
@@ -1220,7 +1222,7 @@ class JobStore:
         with self.lock, self._connect() as db:
             cursor = db.execute(
                 "UPDATE jobs SET recruiter_reply=?,recruiter_reply_at=?,reply_last_checked_at=?,reasoning=?,last_seen_at=? WHERE id=?",
-                (clean, now, now, f"招聘方回复：{clean}；正在自动发送简历", now, job_id),
+                (clean, now, now, f"招聘方回复：{clean}；发送状态以投递记录为准", now, job_id),
             )
             if cursor.rowcount == 0:
                 raise KeyError(job_id)

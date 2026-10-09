@@ -506,6 +506,8 @@ class DeliveryTaskView(BaseModel):
     resume_document_id: str | None = None
     resume_version: int | None = None
     resume_digest: str | None = None
+    mock_resume_id: int | None = None
+    mock_applicant_id: int | None = None
     action: str | None = None
     status: DeliveryTaskStatus = DeliveryTaskStatus.IDLE
     detail: str = "尚未启动投递"

@@ -44,8 +44,8 @@ def is_continuation(message: str) -> bool:
 
 def action_request(message: str) -> bool:
     """Coarse task focus only, never grants execution authority."""
-    from ..core.request_summary import is_request_summary
-    if is_continuation(message) or is_request_summary(message) or not re.search(r"[\w\u4e00-\u9fff]", message):
+    from ..core.request_summary import is_request_summary, is_search_summary
+    if is_continuation(message) or is_request_summary(message) or is_search_summary(message) or not re.search(r"[\w\u4e00-\u9fff]", message):
         return False  # References and repair signals are not new task definitions.
     from .planning import command_grounded, MUTATION_CUES
     clauses = re.split(r"[，,。；;\n]|然后|并且|同时|接着", message)

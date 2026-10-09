@@ -522,7 +522,9 @@ class AutoHuntAgent:
                         dialogue_change("instruction", request=None)
                     emit("request_anchor", origin_run_id=recovered.origin_run_id, status=recovered.status,
                          detail="已按持久化任务事实定位原始请求；未执行任何动作")
-        from .request_summary import is_request_summary, request_summary
+        from .request_summary import is_request_summary, is_search_summary, request_summary
+        if is_search_summary(message):
+            return self._search_summary_response()
         if is_request_summary(message):
             return ChatResponse(message=request_summary(context.dialogue or {}, context.search_state or {},
                 self._conversation_history), lane=AgentLane.APPLICATION)
@@ -942,6 +944,26 @@ class AutoHuntAgent:
             lane=AgentLane.MARKET,
             tool_events=[ToolEvent(tool="job_stats_read", status="ok", detail=str(insights.get("stored_total", 0)))],
         )
+
+    def _search_summary_response(self) -> ChatResponse:
+        """Read this session's actual search, never global/default requirements."""
+        context = active_run()
+        task_id = ((context.dialogue or {}).get("tasks") or {}).get("browser_id") if context else None
+        if not task_id or self.job_store is None:
+            return ChatResponse(message="本会话还没有可核对的职位搜索记录，因此没有职位结果总结；没有启动新搜索。", lane=AgentLane.MARKET)
+        try:
+            browser = self.job_store.get_task(task_id)
+            report = self.job_store.search_report(task_id)
+        except (KeyError, ValueError):
+            return ChatResponse(message="本会话的搜索记录已不可用，请查看运行记录；没有启动或重放搜索。", lane=AgentLane.MARKET)
+        if browser.status not in {BrowserTaskStatus.COMPLETED, BrowserTaskStatus.STOPPED, BrowserTaskStatus.FAILED}:
+            return ChatResponse(message=f"搜索尚未结束，已核对 {report['covered_jobs']} 个职位；完成后会生成整体薪资、JD 总结和逐岗位简表。没有重新启动搜索。", lane=AgentLane.MARKET)
+        from ..jobs.search_reporting import render_search_report
+        if report.get("jobs"):
+            dialogue_change("snapshot", topic="applications", kind="job", version=task_id, displayed=True,
+                items=[{key: item[key] for key in ("id", "title", "company", "stage", "content_hash")} for item in report["jobs"]])
+        return ChatResponse(message=render_search_report(browser, report), lane=AgentLane.MARKET,
+            tool_events=[ToolEvent(tool="job_results_read", status="ok", detail=f"search_report:{task_id}")])
 
     def _job_results_response(self) -> ChatResponse:
         jobs = self.job_store.list_jobs(limit=10) if self.job_store is not None else []

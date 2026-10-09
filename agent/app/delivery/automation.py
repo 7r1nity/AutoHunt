@@ -9,6 +9,8 @@ from ..browser.session import BrowserSession
 from ..core.models import BrowserMode, DeliveryTaskStatus, DeliveryTaskView
 from ..jobs.store import JobStore
 from .mock_site_adapter import MockJobSiteAdapter
+from .resume_binding import mock_resume_payload
+from ..memory.resume_workspace import ResumeWorkspaceStore
 from ..runtime.resilience import WatchLimits, WatchdogExpired, guarded_operation, wait_expired
 
 
@@ -26,13 +28,15 @@ _TERMINAL = {
 class DeliveryAutomationService:
     """One-job, one-authorization browser delivery state machine."""
 
-    def __init__(self, jobs: JobStore, data_root, *, headless: bool, cdp_url: str, reply_poll_seconds: float | None = 5.0) -> None:
+    def __init__(self, jobs: JobStore, data_root, *, headless: bool, cdp_url: str, reply_poll_seconds: float | None = 5.0,
+                 resume_workspace: ResumeWorkspaceStore | None = None) -> None:
         self.jobs = jobs
         self.data_root = data_root
         self.profile_dir = data_root / "browser-profile"
         self.headless = headless
         self.cdp_url = cdp_url
         self.reply_poll_seconds = reply_poll_seconds
+        self.resume_workspace = resume_workspace
         self.adapter = MockJobSiteAdapter()
         self.session: BrowserSession | None = None
         self.worker: asyncio.Task | None = None
@@ -52,6 +56,12 @@ class DeliveryAutomationService:
 
     def supports(self, source_url: str) -> bool:
         return self.adapter.normalize_job_url(source_url) is not None
+
+    def _authorized_resume_payload(self) -> dict:
+        if self.resume_workspace is None or not self.resume_workspace.candidate_state.read().profile.resume_id:
+            raise ValueError("没有启用的主简历；不会发送演示简历或其他账号的简历")
+        return mock_resume_payload(self.resume_workspace.read_document(), document_id=self.state.resume_document_id,
+            version=self.state.resume_version, digest=self.state.resume_digest)
 
     async def authorize_and_start(
         self, preview_id: str, *, resume_document_id: str | None = None,
@@ -203,6 +213,8 @@ class DeliveryAutomationService:
                 recruiter_reply=self.state.recruiter_reply,
                 recruiter_reply_at=self.state.recruiter_reply_at,
                 last_checked_at=self.state.last_checked_at,
+                mock_resume_id=self.state.mock_resume_id,
+                mock_applicant_id=self.state.mock_applicant_id,
             )
 
     async def _run_until_terminal(self, job_id: int) -> None:
@@ -256,6 +268,7 @@ class DeliveryAutomationService:
         submit_started = False
         try:
             lock.acquire()
+            self._authorized_resume_payload()
             job = self.jobs.get_job(job_id)
             job_url = self.adapter.normalize_job_url(str(self.state.target_url or job.get("source_url") or ""))
             if not job_url:
@@ -281,6 +294,16 @@ class DeliveryAutomationService:
             self._update(DeliveryTaskStatus.RUNNING, "正在检查投递页面", url=page.url)
 
             while True:
+                # Communication sends a greeting too. Bind the account BEFORE
+                # prepare() can open chat/send, not only before resume submission.
+                identity = await page.evaluate("({id:Number(localStorage.getItem('userId')),role:localStorage.getItem('userRole')})")
+                if identity.get("role") == "applicant" and identity.get("id"):
+                    applicant_id = identity["id"]
+                    expected_applicant = self.state.mock_applicant_id or self.jobs.mock_workflow_settings().get("applicant_id")
+                    if not isinstance(applicant_id, int) or applicant_id < 1 or expected_applicant and applicant_id != expected_applicant:
+                        raise ValueError("当前模拟站求职者账号与授权任务不一致")
+                    self.state.mock_applicant_id = applicant_id
+                    self._update(DeliveryTaskStatus.RUNNING, "已核对求职者账号", checkpoint="applicant_bound")
                 observation = await self.adapter.prepare(page, job_url)
                 self.state.last_checked_at = datetime.now(UTC)
                 self._update(DeliveryTaskStatus.RUNNING, "已读取投递页面", url=page.url)
@@ -298,27 +321,12 @@ class DeliveryAutomationService:
                     if page is None:
                         raise RuntimeError("人工接管后模拟招聘网站页面已关闭")
                     continue
-                if observation.waiting_for_reply:
-                    if observation.application_submitted:
-                        detail = "职位已投递；后台将持续监测招聘方回复"
-                        self.jobs.mark_delivery_completed(job_id, detail)
-                        self.state.submitted = True
-                    else:
-                        detail = "已发起职位沟通；后台将持续监测招聘方回复，按钮解锁后自动发送已授权简历"
-                        self.jobs.mark_delivery_waiting_reply(job_id, detail)
+                if observation.waiting_for_reply and not observation.application_submitted:
+                    detail = "已发起职位沟通；后台将持续监测招聘方回复，按钮解锁后自动发送已授权简历"
+                    self.jobs.mark_delivery_waiting_reply(job_id, detail)
                     self._update(DeliveryTaskStatus.WAITING_FOR_REPLY, detail, url=page.url, checkpoint="waiting_for_reply", submitted=observation.application_submitted)
                     return
-                if observation.application_submitted and observation.hr_reply_text:
-                    reply_at = self.jobs.mark_recruiter_reply(job_id, observation.hr_reply_text)
-                    self.state.recruiter_reply = observation.hr_reply_text
-                    self.state.recruiter_reply_at = datetime.fromisoformat(reply_at)
-                    detail = f"已投递并收到招聘方回复：{observation.hr_reply_text}"
-                    self.jobs.mark_delivery_completed(job_id, detail)
-                    self._update(DeliveryTaskStatus.COMPLETED, detail, url=page.url, submitted=True, checkpoint="submission_confirmed")
-                    return
-                if not observation.resume_ready:
-                    raise RuntimeError("当前账号没有可用简历或发送按钮不可用")
-                if require_reply and not observation.hr_reply_text:
+                if require_reply and not observation.hr_reply_text and not observation.application_submitted:
                     raise RuntimeError("本次批量授权要求先收到招聘方回复；此页面尚无明确回复，不会直接发送简历，请人工核对")
                 if observation.hr_reply_text:
                     reply_at = self.jobs.mark_recruiter_reply(job_id, observation.hr_reply_text)
@@ -327,6 +335,18 @@ class DeliveryAutomationService:
                     self._update(DeliveryTaskStatus.RUNNING, f"已收到招聘方回复：{observation.hr_reply_text}；正在发送简历", url=page.url)
                 break
 
+            # Recheck the actual workspace immediately before exporting and again
+            # before the click. Waiting/MFA/resume changes never retain old authority.
+            payload = self._authorized_resume_payload()
+            binding = await self.adapter.bind_resume(page, payload,
+                applicant_id=self.state.mock_applicant_id or self.jobs.mock_workflow_settings().get("applicant_id"),
+                resume_id=self.state.mock_resume_id)
+            self.state.mock_resume_id, self.state.mock_applicant_id = binding.resume_id, binding.applicant_id
+            self._update(DeliveryTaskStatus.RUNNING, "已同步并绑定授权主简历，正在核对发送条件", checkpoint="resume_bound")
+            self._authorized_resume_payload()
+            observation = await self.adapter.inspect(page)
+            if not observation.application_submitted and not observation.resume_ready:
+                raise RuntimeError("授权主简历已同步，但发送按钮尚不可用；请核对招聘方回复和页面状态")
             submit_started = True
             self._update(
                 DeliveryTaskStatus.RUNNING,
@@ -334,7 +354,7 @@ class DeliveryAutomationService:
                 url=page.url,
                 checkpoint="submit_started",
             )
-            result = await self.adapter.submit(page)
+            result = await self.adapter.submit(page, binding=binding, before_click=self._authorized_resume_payload)
             if result.confirmed:
                 if result.await_reply:
                     detail = "模拟网站已确认直接投递；后台将持续监测招聘方回复"
@@ -350,10 +370,13 @@ class DeliveryAutomationService:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            detail = str(exc)[:500]
+            detail = str(exc)[:500] if isinstance(exc, (ValueError, RuntimeError)) else (
+                f"浏览器操作失败（{type(exc).__name__}）；请核对模拟站与运行记录，不会自动重试")
             if submit_started:
                 self.jobs.mark_outcome_indeterminate(job_id, detail)
                 self._update(DeliveryTaskStatus.OUTCOME_INDETERMINATE, detail, checkpoint="submission_unconfirmed")
+            elif self.state.submitted:
+                self._update(DeliveryTaskStatus.COMPLETED, f"已确认的投递保留；回复监测停止：{detail}", checkpoint="reply_monitor_stopped")
             else:
                 self.jobs.mark_delivery_failed(job_id, detail)
                 self._update(DeliveryTaskStatus.FAILED, detail, checkpoint="failed_before_submit")

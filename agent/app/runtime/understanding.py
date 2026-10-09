@@ -16,13 +16,15 @@ class TurnRole:
 
 
 def turn_role(message: str, *, patch: dict | None = None) -> TurnRole:
-    from ..core.request_summary import is_request_summary
+    from ..core.request_summary import is_request_summary, is_search_summary
     from ..core.search_language import parse_search_message
     from ..workflow.requests import action_request, is_continuation
     from .dialogue import CONFIRM, REJECT
     text = message.strip()
     if is_request_summary(text):
         return TurnRole("recall")
+    if is_search_summary(text):
+        return TurnRole("question")
     if not re.search(r"[\w\u4e00-\u9fff]", text):
         return TurnRole("repair")
     if text in {"重置上下文", "清空会话状态", "重新开始"}:

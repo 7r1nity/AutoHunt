@@ -48,7 +48,7 @@ def simple_search_patch(message: str, cities: tuple[str, ...]) -> dict | None:
     """Fully consume a small editing grammar. Unconsumed text goes to the LLM."""
     text = message.strip().strip("。！!")
     city_names = "|".join(re.escape(city) for city in cities)
-    city_list = rf"(?:{city_names})(?:[、,，/\s]*(?:或者|或|和)?\s*(?:{city_names}))*"
+    city_list = rf"(?:{city_names})(?:[、,，/\s]*(?:或者|以及|或|和)?\s*(?:{city_names}))*"
     patch = {}
     for clause in re.split(r"[;；]|[,，](?=\s*(?:地点|城市|数量|结果数量|岗位数量|职位数量|薪资|月薪|工资|最低月薪))", text):
         clause = clause.strip()
@@ -159,34 +159,19 @@ def explicit_search_constraints(message: str, *, unresolved: list[str] | None = 
         # list looked unparseable, and the whole request was rejected. Separators
         # inside a list (、 ，) are deliberately NOT split points.
         segment = re.split(r"薪资|工资|月薪|数量|目标|尽量|对于|然后|并且|并生成|并总结|并更新|只要|要求"
-                           r"|匹配度|匹配分|以及|同时|接着|分析|生成|更新|投递", match[1])[0]
+                           r"|匹配度|匹配分|同时|接着|分析|生成|更新|投递", match[1])[0]
         segment = re.sub(r"(?:都可以|都行|也可以|均可)\s*[，, ]*$", "", segment).strip(" ，,")
-        cities = list(dict.fromkeys(m.group() for m in re.finditer(city_names, segment)))
-        if cities:
-            # A known-city whitelist must not silently discard an extra city.
-            # Preserve complete simple lists, including destinations not in it.
-            tokens = [item for item in re.split(r"[、,，/\s]+|或者|以及|和|或", segment) if item]
-            residue = re.sub(city_names, "", segment)
-            # A token that can only be a place name but is not on the whitelist
-            # ("地点深圳 火星") must still be asked about rather than dropped.
-            unknown_places = [item for item in tokens
-                              if item not in cities
-                              and re.fullmatch(r"[\u4e00-\u9fff]{2,10}|[A-Za-z][A-Za-z.-]{1,30}", item)
-                              and not re.search(r"不要|排除|不去|除了|不限|都|可以|最好", item)]
-            if re.fullmatch(r"[、,，/\s]*", residue):
-                pass  # Also allows adjacent known names (上海杭州).
-            elif not unknown_places:
-                # The tail is not a place name (scores, counts, action clauses).
-                # Keeping the cities we did recognise is strictly better than
-                # rejecting the request: the same sentence may be fully readable
-                # by the planner, which never saw it because this raised.
-                if unresolved is not None and not re.fullmatch(r"[、,，/\s]*", residue):
-                    unresolved.append(segment)
-            else:
-                raise ValueError("城市条件不能完整解析，请明确完整城市列表")
-            put("locations", cities)
-        elif re.fullmatch(r"\s*(?:不限|不限制)[，, ]*", segment):
+        if re.fullmatch(r"\s*(?:不限|不限制)[，, ]*", segment):
             put("locations", [])
+            continue
+        # Only a wholly consumed, positive known-city list is authoritative.
+        # An exclusion, unfamiliar destination or prose belongs to the planner;
+        # NEVER protect a partial list and overwrite the model's interpretation.
+        city_list = rf"(?:{city_names})(?:[、,，/\s]*(?:或者|以及|或|和)?\s*(?:{city_names}))*"
+        if re.fullmatch(city_list, segment, re.I):
+            put("locations", list(dict.fromkeys(m.group() for m in re.finditer(city_names, segment, re.I))))
+        elif unresolved is not None:
+            unresolved.append(segment)
     return fields
 
 

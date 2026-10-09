@@ -756,12 +756,26 @@ class BrowserAutomationService:
                     self.store.mark_delivery_completed(job_id, "Dry Run 检测到既有投递成功证据")
                     counters["dry_run_submitted"] += 1
                     report_lines.append(f"- {label}：页面已有投递成功证据")
-                elif observation.hr_reply_text and observation.resume_ready:
+                elif observation.hr_reply_text:
                     self.store.mark_recruiter_reply(job_id, observation.hr_reply_text)
                     counters["dry_run_replied"] += 1
+                    if self.resume_workspace is None:
+                        raise ValueError("没有授权主简历，不能投递")
+                    from ..delivery.resume_binding import mock_resume_payload
+                    payload = mock_resume_payload(self.resume_workspace.read_document(),
+                        document_id=binding.get("resume_document_id"), version=binding.get("resume_version"),
+                        digest=binding.get("resume_digest"))
+                    site_binding = await self.mock_delivery_adapter.bind_resume(page, payload,
+                        applicant_id=self.store.mock_workflow_settings().get("applicant_id"))
+                    mock_resume_payload(self.resume_workspace.read_document(),
+                        document_id=binding.get("resume_document_id"), version=binding.get("resume_version"),
+                        digest=binding.get("resume_digest"))
                     submit_started = True
                     self.store.update_task(task_id, checkpoint="mock_dry_run_submit_started")
-                    result = await self.mock_delivery_adapter.submit(page)
+                    result = await self.mock_delivery_adapter.submit(page, binding=site_binding,
+                        before_click=lambda: mock_resume_payload(self.resume_workspace.read_document(),
+                            document_id=binding.get("resume_document_id"), version=binding.get("resume_version"),
+                            digest=binding.get("resume_digest")))
                     if result.confirmed:
                         submit_confirmed = True
                         self.store.mark_delivery_completed(job_id, f"Dry Run 已确认点击发送简历；招聘方回复：{observation.hr_reply_text}")

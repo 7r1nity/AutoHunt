@@ -289,6 +289,7 @@ def validate_draft(draft: RequestDraft, registry, message: str, *, dialogue: dic
         tool for tool in MUTATION_CUES if revoked(tool, sources)})
     tools = {item["function"]["name"]: item["function"] for item in schemas}
     steps = [item.model_dump() for item in draft.steps]
+    goals = [item.model_dump() for item in draft.goals]
     ids = [item["id"] for item in steps]
     if len(set(ids)) != len(ids):
         raise ValueError("规划包含重复步骤 ID")
@@ -326,13 +327,12 @@ def validate_draft(draft: RequestDraft, registry, message: str, *, dialogue: dic
     if continued and re.fullmatch(r"\s*\d{1,3}(?:个|份|条)?\s*", message) and any("result_limit" in step.get("missing_slots", []) for step in previous.get("steps", [])):
         current_fields["result_limit"] = int(re.search(r"\d+", message)[0])
     explicit.update(current_fields)
-    # The same goal may be registered twice: once citing the parameter clause, once
-    # citing the verb. Collapse them before anything else inspects the step set, so
-    # a request never runs the same action twice. Steps are mergeable only when
-    # every non-focus argument agrees, so genuinely different scopes stay separate.
+    # Merge exact duplicate claims only. Focus and source/scope citations are
+    # semantic inputs, not cosmetic labels: different learning goals stay distinct.
     def merge_key(step):
-        return (step["tool"], json.dumps({key: value for key, value in step.get("arguments", {}).items()
-                                          if key != "focus"}, sort_keys=True, ensure_ascii=False),
+        return (step["tool"], json.dumps(step.get("arguments", {}), sort_keys=True, ensure_ascii=False),
+                step["command_quote"], step["scope_quote"],
+                json.dumps(step.get("slot_evidence", {}), sort_keys=True, ensure_ascii=False),
                 json.dumps(sorted(step.get("depends_on", [])), ensure_ascii=False))
 
     merged_steps: list[dict] = []
@@ -348,29 +348,17 @@ def validate_draft(draft: RequestDraft, registry, message: str, *, dialogue: dic
         aliases[step["id"]] = existing["id"]
         slots = list(dict.fromkeys([*existing.get("missing_slots", []), *step.get("missing_slots", [])]))
         existing["missing_slots"] = slots
-        current_focus = str(existing.get("arguments", {}).get("focus") or "")
-        new_focus = str(step.get("arguments", {}).get("focus") or "")
-        if len(new_focus) > len(current_focus):
-            existing.setdefault("arguments", {})["focus"] = new_focus
     if aliases:
         steps[:] = merged_steps
         for step in steps:
             step["depends_on"] = list(dict.fromkeys(aliases.get(dep, dep) for dep in step.get("depends_on", [])))
+        for goal in goals:
+            goal["step_ids"] = list(dict.fromkeys(aliases.get(key, key) for key in goal["step_ids"]))
         ids = [step["id"] for step in steps]
     searches = [step for step in steps if step["tool"] == "job_search_start"]
-    # Actions the user authorised in their own words, collected BEFORE step
-    # validation: the clause carrying the verb may follow the step that cites only
-    # its parameters ("…分析我的劣势和不足 生成成长计划"), so a single pass in step
-    # order would reject a request that was plainly authorised.
-    authorised_actions: list[str] = []
-    for name, cue in MUTATION_CUES.items():
-        authorised = any(command_grounded(name, clause.strip(), sources)
-                         for source in sources
-                         for clause in re.split(r"[，,。；;\n]|然后|并且|同时|接着", source) if clause.strip())
-        if authorised:
-            authorised_actions.append(name)
     for step in steps:
         name, args, quote = step["tool"], step["arguments"], step["command_quote"]
+        focus_quote = quote
         if name not in tools or step["id"] in step["depends_on"] or not set(step["depends_on"]) <= set(ids):
             raise ValueError("工具或步骤依赖无效")
         spec = registry._tools[name]
@@ -387,20 +375,20 @@ def validate_draft(draft: RequestDraft, registry, message: str, *, dialogue: dic
             # citation gap, not missing consent, so try each clause of the quote
             # and of the still-valid original task first.
             candidates = [clause.strip() for clause in re.split(r"[，,。；;\n]|然后|并且|同时|接着", quote)]
-            if continued:
-                candidates += [clause.strip() for clause in re.split(r"[，,。；;\n]|然后|并且|同时|接着", original)]
             grounded = next((clause for clause in candidates
                              if clause and command_grounded(name, clause, sources)), None)
+            # Recover an action citation for a positive PARAMETER-ONLY span, not
+            # for a denied/question/hypothetical action. Install the recovered
+            # command itself so the planner and runtime enforce the same grammar.
+            if (grounded is None and (quote or continued) and positive_action(quote)
+                    and not re.search(r"如果|假如|假设|要是|建议|能否|可不可以|[‘’`『』]", quote)
+                    and not re.search(MUTATION_CUES.get(name, r"(?!)"), quote, re.I)):
+                grounded = next((clause.strip() for source in sources
+                    for clause in re.split(r"[，,。；;\n]|然后|并且|同时|接着", source)
+                    if clause.strip() and command_grounded(name, clause.strip(), sources)), None)
             if grounded:
                 quote = step["command_quote"] = grounded
                 quote_grounded = True
-            elif quote and name in authorised_actions:
-                # This action was authorised in the user's own words elsewhere in
-                # the request. The citation must still be verbatim user text and
-                # positively phrased; every value in it is separately verified
-                # against the sources below.
-                if any(quote in source for source in sources) and positive_action(quote):
-                    quote_grounded = True
         if spec.effect != "read" and not quote_grounded:
             raise ValueError(f"{name} 未获得当前用户的明确授权")
         if name in {"job_search_start", "search_state_update"}:
@@ -479,7 +467,7 @@ def validate_draft(draft: RequestDraft, registry, message: str, *, dialogue: dic
                 questions.append("请明确成长计划分析的匹配分范围。")
                 step["missing_slots"].append("score_scope")
             if name == "learning_plan_generate":
-                args["focus"] = quote[:400]
+                args["focus"] = "；".join(dict.fromkeys([focus_quote, quote]))[:400]
         if name == "resume_propose_patch":
             args["instruction"] = quote
         if name == "preference_update":
@@ -554,7 +542,7 @@ def validate_draft(draft: RequestDraft, registry, message: str, *, dialogue: dic
     return {"id": previous["id"] if continued else uuid.uuid4().hex, "original": original, "answers": answers,
         "condition_overrides": overrides, "verified_conditions": verified_conditions,
         "revoked_tools": revoked_tools,
-        "goals": [goal.model_dump() for goal in draft.goals], "steps": steps, "questions": list(dict.fromkeys(questions)),
+        "goals": goals, "steps": steps, "questions": list(dict.fromkeys(questions)),
         "reply": draft.reply, "resume_stamp": stamp, "turn": dialogue.get("turn", 0),
         "expires_at": time.time() + (600 if questions else 1800), "status": "clarifying" if questions else "ready"}
 

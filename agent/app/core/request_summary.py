@@ -10,12 +10,26 @@ def is_request_summary(message: str) -> bool:
         r"(?:请)?(?:(?:我的|我之前的|我刚才的|当前|目前)(?:需求|要求|搜索条件|求职条件)(?:是什么|有哪些)?"
         r"|(?:总结|概括|回顾|查看|看看)(?:一下)?(?:我的|我之前的|当前|目前)(?:需求|要求|搜索条件|求职条件))", text):
         return True
-    # A read-only follow-up about a finished search is still a state read, not an
-    # action to plan. Sending it to the planner asks the user to re-confirm goals
-    # they never stated ("完整请求中的 job_search_start 尚未被规划").
-    if re.search(r"投递|申请|简历|找|搜一下|生成|更新|制定|修改|停止|暂停|继续|取消", text):
+    return False
+
+
+def is_search_summary(message: str) -> bool:
+    """A results read is not a recall of requirements or a new task definition."""
+    text = re.sub(r"\s+", "", message).strip("。？！?!")
+    if len(text) > 80 or re.search(r"投递|申请|简历|找工作|更新|制定|修改|停止|暂停|继续|取消|学习|成长", text):
         return False
-    return bool(re.search(r"总结|汇总|报告", text) and re.fullmatch(r"[\u4e00-\u9fff\w\s]{0,24}[呢吗？?]?", text))
+    # "职位搜索完成之后的总结呢" starts with a search-shaped noun,
+    # not an imperative. Consume this read grammar before testing authorization.
+    if re.fullmatch(r"(?:(?:请)?(?:查看|看看|显示|给我|提供)(?:一下)?)?"
+                    r"(?:(?:本次|这次|本轮|最近|上次|刚才|当前)(?:的)?)?"
+                    r"(?:职位|岗位)?(?:搜索|检索)(?:结果|完成|结束)(?:之后|以后|后)?"
+                    r"(?:的)?(?:总结|汇总|报告)(?:呢|在哪|在哪里|是什么)?", text):
+        return True
+    from .search_language import parse_search_message
+    if parse_search_message(message).authorized:
+        return False  # "找15个岗位并生成总结" is a compound new task, not a read.
+    return bool(re.fullmatch(r"(?:请)?(?:总结|汇总|报告)(?:一下|呢|在哪|在哪里)?", text)
+                or re.search(r"(?:搜索|检索|职位|岗位).*(?:总结|汇总|报告)|(?:总结|汇总|报告).*(?:搜索|检索|职位|岗位)", text))
 
 
 def search_summary(conditions: dict) -> str:
