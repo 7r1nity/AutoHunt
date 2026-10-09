@@ -44,22 +44,29 @@ def missing_search_message(has_resume: bool) -> str:
     return f"{reason}，本会话也没有明确的搜索岗位，因此我还没有启动搜索。请先上传简历，或告诉我想找什么岗位；没有简历也可以按你指定的岗位搜索。"
 
 
-def browser_search_keyword(value: str) -> str:
-    """Reduce a role label to something the job site can actually match.
+#: Prefixes the job site itself uses as a specialisation in front of a role word
+#: ("NLP算法工程师", "AI算法工程师"). Only these may be dropped when widening a role
+#: label — a generic rule would mangle ordinary titles such as 交易员 or 分析师.
+SITE_ROLE_PREFIXES = (
+    "AI", "LLM", "NLP", "CV", "AIGC", "RAG", "Agent", "MLOps", "SRE",
+    "大模型", "机器学习", "深度学习", "强化学习", "多模态", "视觉", "语音",
+    "推荐", "搜索", "广告", "风控", "量化", "数据挖掘", "自然语言",
+)
 
-    The mock site matches titles by literal substring, and its titles carry the
-    Chinese role word with at most a short taxonomy prefix. A résumé-derived label
-    such as "AI/LLM 算法工程师", "NLP 算法工程师" or "RAG 算法工程师" therefore matches
-    nothing even though hundreds of such jobs exist. Latin self-labels and seniority
-    words are dropped when a Chinese role word follows; a label that is only an
-    acronym is kept as-is, because dropping it would search for nothing.
+
+def browser_search_keyword(value: str) -> str:
+    """Reduce a role label to a term the job site can actually match.
+
+    The site matches a literal substring, and its titles put at most one known
+    specialisation in front of the role word. Only that specialisation is dropped,
+    and only when a role word follows, so 分析师/交易员/专员 and every other plain
+    role title survive untouched.
     """
     text = re.sub(r"\s+", " ", str(value or "")).strip()
     if not text:
         return ""
-    stripped = re.sub(
-        r"^(?:(?:[A-Za-z][A-Za-z0-9+.#/-]*|[一二三四五六七八九十]?[高中初]级|资深|专家|高级|中级|初级)\s*)+",
-        "", text).strip()
+    pattern = "|".join(sorted((re.escape(item) for item in SITE_ROLE_PREFIXES), key=len, reverse=True))
+    stripped = re.sub(rf"^(?:(?:{pattern})\s*/\s*)*(?:{pattern})\s+", "", text, flags=re.I).strip()
     if stripped and re.search(r"[\u4e00-\u9fff]", stripped) and len(stripped) >= 2:
         return stripped
     # A slash inside the role word itself ("数据分析/建模"): keep the first part.
