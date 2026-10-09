@@ -150,7 +150,13 @@ def explicit_search_constraints(message: str) -> dict:
     from .search_language import SEARCH_CITIES
     city_names = "|".join(map(re.escape, SEARCH_CITIES))
     for match in re.finditer(r"(?:工作地点|地点|城市)\s*(?:可以是|改成|改为|换成|在|是|为)?\s*[:：]?\s*([^。；;\n]+)", message):
-        segment = re.split(r"薪资|工资|月薪|数量|目标|尽量|对于|然后|并且|并生成|并总结|只要|要求", match[1])[0]
+        # The city list ends where the next requirement starts. Splitting only on
+        # field labels was not enough for a space-separated sentence
+        # ("地点深圳 杭州  匹配度85以上的直接投递…"): the tail stayed attached, the
+        # list looked unparseable, and the whole request was rejected. Separators
+        # inside a list (、 ，) are deliberately NOT split points.
+        segment = re.split(r"薪资|工资|月薪|数量|目标|尽量|对于|然后|并且|并生成|并总结|并更新|只要|要求"
+                           r"|匹配度|匹配分|以及|同时|接着|分析|生成|更新|投递", match[1])[0]
         segment = re.sub(r"(?:都可以|都行|也可以|均可)\s*[，, ]*$", "", segment).strip(" ，,")
         cities = list(dict.fromkeys(m.group() for m in re.finditer(city_names, segment)))
         if cities:
