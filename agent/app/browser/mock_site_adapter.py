@@ -157,12 +157,17 @@ class MockJobSiteSearchAdapter:
             if not cards:
                 continue
             # A widened direction token also matches description prose and even
-            # unrelated words ("Agent" hits 配送 because those titles contain the
-            # letters). When the variant is not a role label, the direction has to
-            # be in the title for the job to count as that direction.
+            # letter runs inside Chinese words ("Agent" hits 配送). The direction
+            # must appear as its own token in the card, but it does NOT have to be
+            # in the title: RAG/LLM are technologies carried in the job's skill
+            # tags, and 600 RAG jobs would collapse to 20 under a title-only rule.
             if re.fullmatch(r"[A-Za-z][A-Za-z0-9+.#]*", variant):
-                matched = [card for card in cards
-                           if variant.lower() in str(card.get("title", "")).lower()]
+                pattern = re.compile(rf"(?<![A-Za-z0-9]){re.escape(variant)}(?![A-Za-z0-9])", re.I)
+                def matches(card: dict) -> bool:
+                    haystack = " ".join([str(card.get("title", "")),
+                                         " ".join(str(tag) for tag in card.get("tags") or [])])
+                    return bool(pattern.search(haystack))
+                matched = [card for card in cards if matches(card)]
                 if matched:
                     cards = matched
                     break
