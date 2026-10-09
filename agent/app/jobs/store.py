@@ -986,6 +986,12 @@ class JobStore:
                      self.review_fingerprint(item), min_score, utc_now()),
                 )
                 if cursor.rowcount:
+                    # The user authorised this batch in words ("85分以上的自动投递").
+                    # Leaving the job at the default '人工确认' label made it look like
+                    # it still needed a manual approval that never existed, so the
+                    # badge now states what actually happened.
+                    db.execute("UPDATE jobs SET mode='自动投递·已授权',last_seen_at=? WHERE id=? AND mode='人工确认'",
+                               (utc_now(), item["id"]))
                     inserted.append(item["id"])
         return inserted
 
