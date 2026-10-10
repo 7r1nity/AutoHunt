@@ -213,6 +213,11 @@ def explicit_search_constraints(message: str, *, unresolved: list[str] | None = 
     count_pattern = rf"(?:找|搜(?:索)?|需要|提供|给我|目标数量|结果数量|岗位数量|职位数量|数量)\s*[:：]?\s*({NUMBER})\s*(?:份|个|条)"
     for count in re.finditer(count_pattern, message):
         put("result_limit", numeric_value(count[1]))
+    # A standalone count is a result target even without repeating '找/数量'.
+    # Require whole boundaries so salary, score, experience and city counts are
+    # not accidentally parsed as a number of jobs.
+    for count in re.finditer(rf"(?:^|[\s，,；;])({NUMBER})\s*(?:份|个|条)(?:左右|上下)?(?=$|[\s，,；;。])", message):
+        put("result_limit", numeric_value(count[1]))
     for count in re.finditer(rf"(?:目标数量|结果数量|岗位数量|职位数量|数量)\s*[:：]?\s*({NUMBER})(?![\d,，.])", message):
         put("result_limit", numeric_value(count[1]))
     salary_pattern = (rf"(?:薪资|月薪|工资|薪水|薪酬)(?:水平)?\s*(?:在|为|至少|不低于|不要低于|最低|达到|大于)?\s*"

@@ -84,8 +84,10 @@ class RequestDraft(Strict):
 def command_grounded(tool: str, quote: str, sources: list[str]) -> bool:
     """A model cannot carve a positive command out of a negative/question/quote."""
     cue = MUTATION_CUES.get(tool)
-    search_update = tool == "search_state_update" and bool(quote) and parse_search_message(quote).authorized
-    if not cue or not quote or not (re.search(cue, quote, re.I) or search_update):
+    # Search authority has ONE grammar shared with routing and the runtime gate.
+    # A second cue list previously rejected '给我找工作' after parsing accepted it.
+    search_command = tool in {"job_search_start", "search_state_update"} and bool(quote) and parse_search_message(quote).authorized
+    if not cue or not quote or not (re.search(cue, quote, re.I) or search_command):
         return False
     if tool == "job_search_start" and not parse_search_message(quote).authorized:
         return False  # "根据搜索结果生成计划" mentions search, but does not start one.
@@ -106,6 +108,11 @@ def command_grounded(tool: str, quote: str, sources: list[str]) -> bool:
                 continue
             if tool in {"mock_delivery_cancel", "browser_task_stop"}:
                 if not re.search(r"怎么|如何|为什么|是否|不要(?:停止|取消|中断)|别(?:停止|取消)|不(?:停止|取消)|[？?]", guarded):
+                    return True
+            elif tool == "job_search_start":
+                # Negative job constraints are not negative search consent.
+                # Inspect the intact source clause, never a carved positive span.
+                if parse_search_message(guarded).authorized and parse_search_message(source).reason != "negated":
                     return True
             elif positive_action(guarded):
                 return True
@@ -256,6 +263,7 @@ async def plan_request(llm, registry, message: str, *, dialogue: dict, condition
             "superseded_reference只是旧的续接追问，不是新任务，不要要求用户再次确认它。"
             "steps最多8步，只使用提供的工具。只按用户目标安排行为，不加额外副作用；回答不能声称动作已完成。"
             "显式数字必须提取：找15份工作→result_limit=15，月薪12k以上→salary_min=12000；"
+            "独立数量表达如20个左右按result_limit=20记录，不把数量或筛选句放进岗位词。"
             "数值槽位同时给slot_evidence：字段名映射最小连续用户原文，例如salary_min:'工资底线一万五'、result_limit:'给我十五个'。"
             "slot_evidence仅允许result_limit、salary_min、max_jobs，不要填query、queries、locations或其他字段。"
             "引用须有单位/字段语义且只含一个数值；工资中等不能自行猜数，匹配90分不能当月薪或岗位数量。"
@@ -270,6 +278,8 @@ async def plan_request(llm, registry, message: str, *, dialogue: dict, condition
             "quote可以引用含共享主语的完整句，text可以补齐省略，例如学校必须提供住宿或者交通补贴可用any包含学校提供住宿和学校提供交通补贴，两个quote都引用完整句；不能新增偏好。"
             "叶节点含否定时直接判断完整句子，不再包not造成双重否定。条件句保持完整叶节点。"
             "完整保留任意组合逻辑，不用行业白名单。华为项目并不等于华为雇主，未提及不等于没有。"
+            "不要外包/不需要经验等是否定岗位条件，不是否定搜索；给我找工作本身是明确搜索授权。"
+            "可以有实习/实习也可以仅表示允许包含，不等于只找实习，也不是必须提供转正机会；不能因此排除社招。"
             "新条件在原会话filters上增补或改动，仅明确取消才能清除；修改后提交完整树。"
             "filters是硬条件，不能把尽量/优先自动升级为必须；当前不支持通用软偏好排序，需要澄清该偏好是否可不排序或改为硬条件。"
             "先查看简历再提出修改、读结果再查看某职位、条件更新后重新搜索，也要写真实depends_on。"

@@ -32,6 +32,28 @@ _CONTROLS = {
 }
 
 
+def _search_revoked(text: str) -> bool:
+    """Negation of the search ACTION, not negation inside job requirements.
+
+    A generic search object/end boundary matters: '不要搜索外包岗位' excludes
+    those jobs, whereas '不要再搜索了' revokes the action. The leading command
+    is still required independently, so a standalone negative is never consent.
+    """
+    from .action_language import action_clauses
+    clauses = [part for clause in action_clauses(text) for part in re.split(
+        r"\s+(?=(?:不要|先别|暂不|暂时不|不想|不用|不需要|无需|别|不再|取消))", clause)]
+    for clause in clauses:
+        clause = _text(clause)
+        if re.match(
+            r"^(?:不要|先别|暂不|暂时不|不想|不用|不需要|无需|别|不再|取消)"
+            r"\s*(?:再|重新|继续)?\s*(?:帮我|给我)?\s*(?:开始|启动|进行)?\s*"
+            r"(?:(?:搜索|检索|查找|搜)(?:工作|职位|岗位|招聘信息|任务)?|找(?:工作|职位|岗位|招聘信息))"
+            r"(?:了)?(?=$|[\s，,。；;！!])", clause
+        ):
+            return True
+    return False
+
+
 @dataclass(frozen=True)
 class SearchLanguage:
     action: str = "none"
@@ -111,7 +133,9 @@ def _parse_search_message(message: str) -> SearchLanguage:
         return SearchLanguage(action="results", complete=True, reason="existing_results")
     # Explicit positive second clause after rejecting an earlier suggestion.
     text = re.sub(r"^不需要\s*[,，]\s*(?=开始(?:搜索|检索))", "", text)
-    if _NEGATION.search(text):
+    # '不要外包/不需要经验/无需证书' are parameter semantics for the model,
+    # not a veto on a positive search command. Do not strip these constraints.
+    if _NEGATION.match(text) or _search_revoked(text):
         return SearchLanguage(reason="negated")
     text = re.sub(r"(?i)^(?:dry[ -]run|试运行)\s*", "", text)
     text = re.sub(r"^按(?:照)?(?:现有|当前|之前|上次|刚才|这些|原有|原来)(?:的)?条件\s*[,，]?\s*", "", text)
