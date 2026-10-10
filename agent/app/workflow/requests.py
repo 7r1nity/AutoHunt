@@ -289,7 +289,20 @@ def resolve_continuation(saved: dict, browser, stamp: str, *, now: float | None 
     from ..runtime.context import browser_search_available
     live = bool(owned and not browser_search_available(browser))
     if record and record.status in {"finished", "completed", "cancelled", "outcome_indeterminate"}:
-        return Continuation("clarify", "所指原任务已经结束、取消或结果待核验；不会恢复另一个任务或重放历史操作。请明确新的请求，或先核对执行记录。")
+        # A pre-flight refusal is not an outcome. "请先绑定账号" arrives from a
+        # validation step, so classifying the tool call as uncertain marked the task
+        # outcome_indeterminate with execution_started, and every later "重新开始任务"
+        # was answered with "所指原任务已经结束" — for work that never began. When
+        # nothing was executed, the request stays restartable.
+        restartable = record.status == "outcome_indeterminate" and not record.execution_started
+        if not restartable:
+            return Continuation("clarify", "所指原任务已经结束、取消或结果待核验；不会恢复另一个任务或重放历史操作。请明确新的请求，或先核对执行记录。")
+    if record and record.status == "outcome_indeterminate" and not record.execution_started:
+        if record.resume_stamp and record.resume_stamp != stamp:
+            return Continuation("clarify", "原请求保留，但当前简历已变更。请确认是否按新简历重新执行原请求；尚未启动任何操作。")
+        if now - record.updated_at > 86400:
+            return Continuation("clarify", "原请求已经较久未处理，请重新确认完整条件；不会自动重放旧任务。")
+        return Continuation("replan", original=record.original)
     instruction = saved.get("instruction_request") or {}
     # A clarification about a reference ("重新开始任务") is not a new task
     # definition and cannot replace the immutable root's goals/constraints.

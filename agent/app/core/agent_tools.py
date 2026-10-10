@@ -21,7 +21,7 @@ from .search_contract import explicit_search_constraints, missing_search_message
 from .search_language import parse_search_message
 from .task_semantics import understand, binding_valid, command_grounded
 from .job_filters import filter_schema
-from ..runtime.resilience import classify_failure, safe_retry
+from ..runtime.resilience import PreflightRefused, classify_failure, safe_retry
 
 
 class MissingSearchInput(ValueError):
@@ -30,6 +30,7 @@ class MissingSearchInput(ValueError):
 
 class MissingPlanScope(ValueError):
     """An explicit action is remembered, but no evidence exists in its scope."""
+
 
 
 @dataclass(frozen=True)
@@ -519,6 +520,14 @@ class AgentToolRegistry:
             dialogue_change("tool", tool=name, status="awaiting_user", detail=str(exc))
             emit("tool_finished", tool=name, status="awaiting_user", detail=str(exc))
             return AgentToolOutcome(name, "awaiting_user", str(exc), spec.effect)
+        except PreflightRefused as exc:
+            # Nothing was attempted, so this is a refusal to report — not an outcome to
+            # verify. Classifying it as uncertain used to poison the task anchor.
+            emit("tool_finished", tool=name, status="error", detail=str(exc))
+            dialogue_change("tool", tool=name, status="error", detail=str(exc))
+            return AgentToolOutcome(name, "error", str(exc), spec.effect,
+                                    failure={"code": "precondition_unmet", "retryable": True,
+                                             "effect_started": False, "uncertain": False})
         except Exception as exc:
             failure = classify_failure(exc, effect=spec.effect, started=executor_started)
             metadata = failure.metadata()
@@ -677,7 +686,7 @@ class AgentToolRegistry:
         if scope:
             candidate = self.candidate_state.read().profile
             if not candidate.resume_id:
-                raise ValueError("请先上传并启用一份主简历")
+                raise PreflightRefused("请先上传并启用一份主简历")
             eligible = self.jobs.jobs_for_resume_analysis(candidate.resume_id, limit=20, task_id=task_id, **scope) if candidate.resume_id else []
             if not any(len(str(job["description"] or "").strip()) >= 40 for job in eligible):
                 from ..growth.requests import resume_stamp
@@ -695,14 +704,14 @@ class AgentToolRegistry:
     async def _mock_delivery_start(self, args: dict) -> dict:
         context = active_run()
         if context is None:
-            raise ValueError("自动投递需要当前会话")
+            raise PreflightRefused("自动投递需要当前会话")
         task_id = (context.action_authority or {}).get("evidence_task_id")
         return await self.mock_workflow.queue_deliveries(min_score=args["min_score"], session_id=context.session_id, task_id=task_id)
 
     async def _mock_delivery_cancel(self, _args: dict) -> dict:
         context = active_run()
         if context is None:
-            raise ValueError("停止自动投递需要当前会话")
+            raise PreflightRefused("停止自动投递需要当前会话")
         return await self.mock_workflow.cancel_delivery_queue(context.session_id)
 
     async def _mock_delivery_status(self, _args: dict) -> dict:
@@ -812,7 +821,7 @@ class AgentToolRegistry:
     async def _reference_resolve(self, args):
         context = active_run()
         if not context:
-            raise ValueError("需要当前会话")
+            raise PreflightRefused("需要当前会话")
         resolved = resolve_reference(context.dialogue or {}, **args)
         if args["kind"] == "resume_entry" and resolved["version"] != str(self.resume_workspace.read_document().version):
             raise ValueError("简历版本已变化，请重新查看简历")
@@ -822,7 +831,7 @@ class AgentToolRegistry:
         from ..jobs.search_reporting import render_job_detail
         context = active_run()
         if not context:
-            raise ValueError("需要当前会话")
+            raise PreflightRefused("需要当前会话")
         from .job_followups import job_followup_request
         explicit = job_followup_request(context.user_message, context.dialogue or {})
         # The model may not substitute database IDs or another company for the

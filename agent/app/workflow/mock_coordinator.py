@@ -14,7 +14,7 @@ from ..jobs.analysis import analyze_job
 from ..jobs.store import JobStore
 from ..memory.candidate_state import CandidateStateStore
 from ..memory.resume_workspace import ResumeWorkspaceStore, resume_document_digest
-from ..runtime.resilience import safe_retry, wait_expired
+from ..runtime.resilience import PreflightRefused, safe_retry, wait_expired
 from .delivery_rules import build_rules
 from .rules import RuleEngine
 
@@ -118,16 +118,16 @@ class MockWorkflowCoordinator:
 
     async def queue_deliveries(self, *, min_score: int, session_id: str, task_id: str | None = None) -> dict:
         if session_id in self.stopping_sessions or "*" in self.stopping_sessions:
-            raise ValueError("当前正在停止任务，未加入投递队列")
+            raise PreflightRefused("当前正在停止任务，未加入投递队列")
         """One explicit bounded batch, not a persistent rule for unseen future jobs."""
         from ..growth.requests import resume_stamp
         if not 0 <= min_score <= 100:
-            raise ValueError("匹配分数必须在 0–100 之间")
+            raise PreflightRefused("匹配分数必须在 0–100 之间")
         profile = self.candidate.read().profile
         if not profile.resume_id:
-            raise ValueError("请先上传并启用主简历；没有简历不能投递")
+            raise PreflightRefused("请先上传并启用主简历；没有简历不能投递")
         if not self.settings()["applicant_id"]:
-            raise ValueError("请先在模拟站登录求职者账号并完成一次搜索，以绑定账号")
+            raise PreflightRefused("请先在模拟站登录求职者账号并完成一次搜索，以绑定账号")
         document = self.resume.read_document()
         evidence = self.jobs.jobs_for_resume_analysis(profile.resume_id, limit=200, min_score=min_score, task_id=task_id)
         eligible = [self.jobs.get_job(item["id"]) for item in evidence

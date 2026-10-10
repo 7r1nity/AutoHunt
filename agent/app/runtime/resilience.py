@@ -12,6 +12,17 @@ from typing import Awaitable, Callable, TypeVar
 T = TypeVar("T")
 
 
+class PreflightRefused(ValueError):
+    """An executor refused before doing anything: a precondition was not met.
+
+    Lives here, not in agent_tools, so executors can raise it without importing the
+    registry (which imports them). The distinction matters: a refusal has performed no
+    external effect, so the task must stay restartable. "请先在模拟站登录求职者账号"
+    was reported as outcome_indeterminate with execution_started, after which every
+    "重新开始任务" was answered with "所指原任务已经结束" for work that never began.
+    """
+
+
 @dataclass(frozen=True)
 class Failure:
     code: str
