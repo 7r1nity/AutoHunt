@@ -11,7 +11,7 @@ from collections import Counter
 
 LABELS = {
     "browser_task_stop": "中断搜索", "browser_task_pause": "暂停搜索",
-    "browser_task_resume": "继续搜索", "browser_task_read": "浏览器状态",
+    "browser_task_resume": "继续搜索", "task_continue": "接续原任务", "browser_task_read": "浏览器状态",
     "context_state_read": "会话需求", "context_history_read": "历史查询",
     "context_reference_resolve": "条目定位", "context_action_propose": "待确认动作",
     "context_question_ask": "补充信息", "search_state_read": "搜索条件",

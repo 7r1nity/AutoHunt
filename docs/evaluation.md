@@ -1,5 +1,28 @@
 # AutoHunt 隔离评估
 
+## 任务接续专项（2026-10-10）
+
+实现、状态决策和失败诊断见[任务接续](task-recovery.md)。新增持久语料 `agent/evaluation/corpora/recovery.json`：669 个合成规格，含状态/失败组合、取消、简历变化、参数损坏及接续/非命令表达；加 23 个生产运行器/SQLite/投递状态机契约，共 692 项通过。
+
+```powershell
+cd agent
+.\.venv\Scripts\python.exe -m evaluation.recovery_contract
+# 仅需要重建合成语料时：
+.\.venv\Scripts\python.exe -m evaluation.recovery_contract --generate
+```
+
+| 组别 | 结果 | 本地记录 |
+|---|---:|---|
+| 接续/故障/状态机 | 692 pass，0 fail/error | `agent/test-results/recovery-contract/20261010T155600.490428Z/` |
+| 动作契约 | 15 pass | `agent/test-results/action-contract/20261010T154539.168942Z/`，最终还复跑 unittest |
+| 隐私契约 | 14 pass | `agent/test-results/privacy-contract/20261010T154544.056002Z/`，最终还复跑 unittest |
+| 报告发布 | 14 pass | `agent/test-results/reporting-contract/20261010T154548.502773Z/`，最终还复跑 unittest |
+| 隔离 Chromium DOM | 14 pass | `agent/test-results/evaluation/20261010T155333.546486Z/` |
+
+共 749 项检查；组合规格、组件契约和 DOM 适配器检查不是相同层次的“独立用户任务”。新 runner 保存语料/源文件 SHA256、逐例期望/实际、运行事件/调用轨迹与错误。开发失败轮次不覆盖：首轮测试把 MEDIUM 本地动作误当 HIGH 需要确认；扩充入口测试曾写错类名导入。诊断及生产修正详见上文链接。
+
+未调用外部模型，未接管用户浏览器，未使用真实简历/聊天/职位或提交申请。页面与执行器仍为合成替身；不能推断真实 DeepSeek 理解率、完整模拟站后端 E2E、真实招聘站成功率或所有可能故障均已覆盖。历史大套件的旧契约失败另行保留，没有用这些通过数替代。
+
 ## 最新动作契约
 
 新增搜索报告契约 `python -m evaluation.reporting_contract`：14 项通过，验证按搜索任务 ID 去重、纯搜索与复合任务输出、异步完成后读取、失败/显式读取保留、报告兜底及重启恢复。使用临时加密 SQLite 和生产 `AgentRuntime.watch_plan`，不执行招聘动作，不调用外部模型，也不代表前端或浏览器 E2E。逐例日志保留在本地忽略目录 `agent/test-results/reporting-contract/20261010T144034.370754Z/`；历史重复消息不自动删除。

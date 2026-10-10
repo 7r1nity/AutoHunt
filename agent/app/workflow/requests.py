@@ -35,9 +35,9 @@ class TaskRequest(BaseModel):
 CONTINUE = re.compile(
     r"^(?:(?:请|帮我|麻烦你|我要你|我希望你|你)\s*)?"
     r"(?:继续执行|重新执行|重新开始|再次执行|重新尝试|再试一次|再试一下|继续|恢复|接着(?:执行)?|重试)(?:一下)?"
-    r"(?:(?:我)?(?:第(?:一|1)(?:次|个|条)|最初|最开始|上(?:一|个|次)?(?:文|面|条)?|刚才|之前|原来|这个|该|当前|前面)"
+    r"(?:(?:我)?(?:第(?:一|1)(?:次|个|条)|最初|最开始|上(?:一|个|次)?(?:文|面|条)?|刚才|之前|原来|这个|该|当前|前面|中断|失败|未完成|剩余|暂停)"
     r"(?:(?:发送|发|提出|说)(?:给你)?(?:过)?)?)?(?:的)?"
-    r"(?:任务|请求|操作|执行|搜索|检索)?(?:吧)?[。！!\s]*$")
+    r"(?:中断|失败|未完成|剩余|暂停)?(?:的)?(?:任务|请求|操作|执行|搜索|检索)?(?:吧)?[。！!\s]*$")
 
 _ROOT_REFERENCE = r"(?:按(?:照)?)(?:原(?:来)?|上文|之前|刚才)(?:的)?(?:请求|任务|要求)"
 _ALL_GOALS = r"(?:[，,\s]*(?:其他|其余|剩余|后续|全部)(?:的|步骤|任务|目标)?(?:也|都)?(?:要)?(?:实现|执行|完成|继续))"
@@ -53,7 +53,8 @@ def is_continuation(message: str) -> bool:
     if text == "重新开始":
         return False  # Existing explicit temporary-context reset, not task retry.
     from ..core.task_semantics import retained_reference
-    return bool(CONTINUE.fullmatch(text) or BOUND_RETRY.fullmatch(text) or retained_reference(text))
+    checkpoint_command = re.fullmatch(r"(?:请)?(?:从|按)(?:原来的?|上次的?)?(?:断点|检查点)(?:处)?(?:继续|恢复|接续)(?:执行|任务)?[。！!\s]*", text)
+    return bool(checkpoint_command or CONTINUE.fullmatch(text) or BOUND_RETRY.fullmatch(text) or retained_reference(text))
 
 
 def action_request(message: str) -> bool:

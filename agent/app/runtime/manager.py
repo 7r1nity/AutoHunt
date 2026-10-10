@@ -35,7 +35,7 @@ class AgentRuntime:
         self.slots = asyncio.Semaphore(2)
         self.recover_search_summaries()
         # Re-enqueue only requests which never began. Side effects are not replayed.
-        for run in reversed(self.store.list(active=True)):
+        for run in reversed(self.store.list(active=True, limit=None)):
             if run["cancel_requested"]:
                 self.finish(run["id"], "outcome_indeterminate" if run["mutation_started"] else "cancelled", "取消请求已恢复")
             elif run["status"] == "queued":
@@ -119,7 +119,7 @@ class AgentRuntime:
 
     def delivery_owner(self, task_id: str) -> str | None:
         """An active tracked authorization, not a manually opened site conversation."""
-        owners = {run["session_id"] for run in self.store.list(active=True)
+        owners = {run["session_id"] for run in self.store.list(active=True, limit=None)
                   if run["kind"] == "delivery" and not run["cancel_requested"]
                   and (run["checkpoint"] or {}).get("delivery_id") == task_id}
         return next(iter(owners)) if len(owners) == 1 else None
@@ -153,6 +153,9 @@ class AgentRuntime:
         if kind == "plan_state":
             saved = self.store.get(run_id)["checkpoint"] or {}
             self.store.update(run_id, checkpoint={**saved, "phase": "action_plan", "plan": data["plan"]})
+        if kind == "plan_response_selection":
+            saved = self.store.get(run_id)["checkpoint"] or {}
+            self.store.update(run_id, checkpoint={**saved, "response_selection": data})
         if kind == "plan_failed":
             saved = self.store.get(run_id)["checkpoint"] or {}
             self.store.update(run_id, checkpoint={**saved, "planning_failure": data})
@@ -222,6 +225,7 @@ class AgentRuntime:
                                          mutate_dialogue=lambda operation: self.store.mutate_dialogue(run["session_id"], operation),
                                          retrieve_history=lambda query, limit: self.jobs.search_conversation_history(run["session_id"], query, limit=limit),
                                          request_records=lambda: self.store.request_records(run["session_id"]),
+                                         resume_task=lambda message: self.continue_task(run_id, message),
                                          enforce_task_scope=True)
                     token = current_run.set(context)
                     started = time.monotonic()
@@ -281,7 +285,9 @@ class AgentRuntime:
                             self.store.update(run_id, result=result)
                             if run["kind"] == "chat":
                                 self.jobs.add_conversation_message("assistant", result["message"], response=result, conversation_id=run["session_id"], run_id=run_id)
-                            self.store.event(run_id, "response", {"result": result, "elapsed_ms": round((time.monotonic()-started)*1000)})
+                            selection = (self.store.get(run_id)["checkpoint"] or {}).get("response_selection", {})
+                            self.store.event(run_id, "response", {"result": result, **selection,
+                                "elapsed_ms": round((time.monotonic()-started)*1000)})
                             if run["kind"] == "chat":
                                 planning_failure = (self.store.get(run_id)["checkpoint"] or {}).get("planning_failure")
                                 if planning_failure:
@@ -392,6 +398,8 @@ class AgentRuntime:
         if plan["questions"]:
             self.finish(run_id, "completed", "参数尚待补充，没有执行动作")
             return
+        from ..workflow.recovery import reconcile_receipts
+        reconcile_receipts(plan, self.store.all_events(run_id))
         searches = [step for step in plan["steps"] if step["tool"] == "job_search_start"]
         canonical_id = (run["checkpoint"] or {}).get("browser_id")
         if (len(searches) == 1 and canonical_id and searches[0].get("task_id") != canonical_id
@@ -469,7 +477,7 @@ class AgentRuntime:
                             current_run.reset(token)
             if all(step["status"] in DONE for step in plan["steps"]):
                 if not self.store.has_event(run_id, "workflow_summary") and any(step.get("task_id") or step.get("proposal_id") for step in plan["steps"]):
-                    lines = completion_lines(plan, self.store.events(run_id))
+                    lines = completion_lines(plan, self.store.all_events(run_id))
                     if lines:
                         message = "任务编排结果：\n\n" + "\n\n".join(lines)
                         self.jobs.add_conversation_message("assistant", message, conversation_id=run["session_id"], run_id=f"plan:{run_id}")
@@ -591,9 +599,7 @@ class AgentRuntime:
         view = self.jobs.get_delivery_run(task_id)
         code = None
         alive = self.delivery and self.delivery.current().id == task_id and self.delivery.worker and not self.delivery.worker.done()
-        if view.status == "waiting_for_reply" and not alive and wait_expired(view.started_at, self.watch_limits.reply):
-            code = "reply_timeout"
-        elif view.status == "waiting_for_user" and wait_expired(view.updated_at, self.watch_limits.human):
+        if view.status == "waiting_for_user" and wait_expired(view.updated_at, self.watch_limits.human):
             # A live worker has a cooperative watchdog which releases its lease.
             if not alive:
                 code = "human_timeout"
@@ -601,7 +607,7 @@ class AgentRuntime:
             if not alive:
                 code = "worker_lost"
         if code:
-            uncertain = view.checkpoint in {"submit_started", "submission_unconfirmed"} and not view.submitted
+            uncertain = view.checkpoint in {"communication_started", "communication_unconfirmed", "submit_started", "submission_unconfirmed"} and not view.submitted
             detail = "任务等待已过期或执行器中断；不自动重放，已确认的投递保留，请核对执行记录"
             if uncertain:
                 self.jobs.mark_outcome_indeterminate(view.job_id, detail)
@@ -628,7 +634,7 @@ class AgentRuntime:
 
     def browser_summary(self, run_id: str, browser, *, restore_display: bool = True):
         run = self.store.get(run_id)
-        if any(event["kind"] == "browser_summary" and event["data"].get("task_id") == browser.id for event in self.store.events(run_id)):
+        if any(event["kind"] in {"browser_summary", "report_reference"} and event["data"].get("task_id") == browser.id for event in self.store.all_events(run_id)):
             return
         from ..jobs.search_reporting import render_search_report
         report_rendered = True
@@ -803,8 +809,98 @@ class AgentRuntime:
         self.finish(run_id, "outcome_indeterminate" if uncertain else "cancelled",
             "任务已停止；中断时正在执行的写入需核对，未自动重试" if uncertain else "任务已停止，已完成的步骤保留")
 
+    async def continue_task(self, run_id: str, message: str):
+        """Resolve a user continuation against durable plans before model routing."""
+        from .context import active_run, dialogue_change
+        from ..core.models import ChatResponse, AgentLane
+        from ..workflow.recovery import recover_plan
+        from ..workflow.execution import begin
+        from ..workflow.requests import request_selector, TaskRequest
+        from ..growth.requests import resume_stamp
+        context = active_run()
+        run = self.store.get(run_id)
+        # Recovery uses execution records, not the UI's recent-500 history window.
+        records = [item for item in self.store.list(run["session_id"], limit=None) if item["id"] != run_id]
+        root = (context.dialogue or {}).get("task_request") or {}
+        explicit = (run["checkpoint"] or {}).get("resume_source_id")
+        source_id = explicit or root.get("run_id") or root.get("origin_run_id")
+        candidates = [item for item in records if (item.get("checkpoint") or {}).get("plan")]
+        if request_selector(message) == "first":
+            epoch = (context.dialogue or {}).get("history_epoch", 0)
+            from datetime import datetime
+            candidates = [item for item in reversed(candidates)
+                          if datetime.fromisoformat(item["created_at"]).timestamp() >= epoch]
+            source_id = candidates[0]["id"] if candidates else source_id
+        source = next((item for item in records if item["id"] == source_id), None)
+        if source is None:
+            if not candidates:
+                return None  # No executed plan: the original no-effect planner path handles it.
+            logical_tasks = {item["checkpoint"]["plan"]["id"] for item in candidates}
+            if len(logical_tasks) != 1:
+                return ChatResponse(message="有多个执行计划，无法唯一确定接续对象；请在运行记录中选择任务。", lane=AgentLane.APPLICATION)
+            source = candidates[0]
+        if source["session_id"] != run["session_id"]:
+            return ChatResponse(message="未恢复其他会话的任务。", lane=AgentLane.APPLICATION)
+        logical = ((source.get("checkpoint") or {}).get("plan") or {}).get("id")
+        # Pick the latest descendant, not an older failed attempt that could replay a
+        # step already completed by a previous explicit continuation.
+        descendants = {source["id"]}
+        for _ in records:
+            descendants.update(item["id"] for item in records if item.get("parent_id") in descendants
+                and ((item.get("checkpoint") or {}).get("plan") or {}).get("id") == logical)
+        source = next(item for item in records if item["id"] in descendants)
+        self.store.event(run_id, "recovery_resolution", {"source_run_id": source["id"], "plan_id": logical})
+        worker = self.tasks.get(source["id"])
+        if source["status"] not in TERMINAL and worker and not worker.done():
+            browser_id = (source["checkpoint"] or {}).get("browser_id")
+            if browser_id and self.browser.current().id == browser_id and self.browser.current().status in {"paused", "waiting_for_user"}:
+                await self.browser.resume()
+                return ChatResponse(message="已继续原任务的浏览器执行器，正在核验登录和页面；没有重新规划或重复执行。", lane=AgentLane.APPLICATION)
+            return ChatResponse(message="原任务仍在执行或等待招聘方回复；没有启动重复任务。", lane=AgentLane.APPLICATION)
+        stamp = resume_stamp(self.resume_workspace.read_document(), self.agent.candidate_state)
+        decision = recover_plan(source, session_id=run["session_id"], stamp=stamp,
+            events=self.store.all_events(source["id"]),
+            revoked_tools=root.get("revoked_tools", []) if root.get("original") == ((source.get("checkpoint") or {}).get("plan") or {}).get("original") else ())
+        self.store.event(run_id, "recovery_decision", {"action": decision.action, "source_run_id": source["id"], "detail": decision.message})
+        if decision.action == "no_plan":
+            return None
+        if decision.action != "resume":
+            return ChatResponse(message=decision.message, lane=AgentLane.APPLICATION)
+        plan = decision.plan
+        # Uncertain external searches can be attached by their durable task ID. Dead
+        # search workers are restarted only by the explicitly authorized search step.
+        for step in plan["steps"]:
+            if step["tool"] == "job_search_start" and step["status"] == "waiting_external":
+                task = self.jobs.get_task(step["task_id"])
+                if task.status == "completed":
+                    step.update(status="completed", retained_result=True)
+                elif self.browser.can_start_search():
+                    step.update(status="pending", resume_search_task_id=step["task_id"])
+        self.store.update(run_id, parent_id=source["id"], checkpoint={"phase": "action_plan", "plan": plan,
+            "recovery_source_id": source["id"]})
+        for event in self.store.all_events(source["id"]):
+            if event["kind"] in {"browser_summary", "report_reference"}:
+                self.store.event(run_id, "report_reference", {"task_id": event["data"].get("task_id"),
+                    "report_rendered": event["data"].get("report_rendered", True), "source_run_id": source["id"]})
+        # Install an immutable task anchor for the new attempt without parsing chat
+        # history, importing expired tokens or changing the original parameters.
+        anchor = TaskRequest(original=plan["original"], run_id=run_id,
+            origin_run_id=root.get("origin_run_id") or source["id"], interpretation="model",
+            status="running", resume_stamp=stamp, revoked_tools=plan.get("revoked_tools", []),
+            conditions=plan.get("verified_conditions", {}))
+        dialogue_change("request_state", request=anchor.model_dump())
+        response = await begin(plan, self.agent.tool_registry)
+        response.message = decision.message + "\n\n" + response.message
+        return response
+
     async def resume(self, run_id: str) -> dict:
         run = self.store.get(run_id)
+        if (run["checkpoint"] or {}).get("plan"):
+            import uuid
+            child = self.submit(run["session_id"], f"continue:{run_id}:{uuid.uuid4().hex}", "chat",
+                {"message": "继续任务"}, parent_id=run_id)
+            self.store.update(child["id"], checkpoint={"resume_source_id": run_id})
+            return self.store.get(child["id"])
         browser_id = (run["checkpoint"] or {}).get("browser_id")
         delivery_id = (run["checkpoint"] or {}).get("delivery_id")
         if run["status"] in {"waiting_user", "waiting_reply"} and delivery_id and self.delivery:

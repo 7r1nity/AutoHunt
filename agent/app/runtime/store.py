@@ -161,9 +161,14 @@ class RunStore:
                 if self._load(previous["payload"]) != payload or previous["kind"] != kind:
                     raise ValueError("同一请求 ID 已用于不同内容")
                 return self.decode(previous), False
-            active = db.execute("SELECT COUNT(*) FROM agent_runs WHERE status IN ('queued','running','waiting_user','waiting_reply','waiting_confirmation','cancelling')").fetchone()[0]
+            # Persisted HR monitors do not occupy the execution admission budget.
+            active = db.execute("SELECT COUNT(*) FROM agent_runs WHERE status IN ('queued','running','waiting_user','waiting_confirmation','cancelling')").fetchone()[0]
             if active >= 100 and not control:
                 raise ValueError("运行队列已满，请先处理或停止已有任务")
+            if parent_id:
+                parent = db.execute("SELECT session_id FROM agent_runs WHERE id=?", (parent_id,)).fetchone()
+                if not parent or parent[0] != session_id:
+                    raise ValueError("接续来源必须属于同一会话")
             run_id = uuid.uuid4().hex
             timestamp = now()
             db.execute("""INSERT INTO agent_runs
@@ -188,11 +193,12 @@ class RunStore:
             raise KeyError("运行记录不存在")
         return self.decode(row)
 
-    def list(self, session_id: str | None = None, *, active: bool = False) -> list[dict]:
+    def list(self, session_id: str | None = None, *, active: bool = False, limit: int | None = 500) -> list[dict]:
         with self.connect() as db:
             condition = " AND status NOT IN ('completed','failed','cancelled','timed_out','interrupted','outcome_indeterminate')" if active else ""
-            rows = db.execute("SELECT * FROM agent_runs WHERE (? IS NULL OR session_id=?)" + condition + " ORDER BY created_at DESC LIMIT 500",
-                              (session_id, session_id)).fetchall()
+            rows = db.execute("SELECT * FROM agent_runs WHERE (? IS NULL OR session_id=?)" + condition + " ORDER BY created_at DESC" +
+                              (" LIMIT ?" if limit is not None else ""),
+                              (session_id, session_id, limit) if limit is not None else (session_id, session_id)).fetchall()
         runs = [self.decode(row) for row in rows]
         return runs
 
@@ -218,12 +224,17 @@ class RunStore:
         return output
 
     def update(self, run_id: str, **fields) -> dict:
-        allowed = {"status", "result", "error", "error_type", "checkpoint", "mutation_started", "cancel_requested"}
+        allowed = {"status", "result", "error", "error_type", "checkpoint", "mutation_started", "cancel_requested", "parent_id"}
         if not fields.keys() <= allowed:
             raise ValueError("Unsupported run fields")
         if "status" in fields and fields["status"] not in STATUSES:
             raise ValueError("Unsupported run status")
         with self.lock, self.connect() as db:
+            if fields.get("parent_id"):
+                parent = db.execute("SELECT session_id FROM agent_runs WHERE id=?", (fields["parent_id"],)).fetchone()
+                owner = db.execute("SELECT session_id FROM agent_runs WHERE id=?", (run_id,)).fetchone()
+                if not parent or not owner or parent["session_id"] != owner["session_id"] or fields["parent_id"] == run_id:
+                    raise ValueError("接续来源必须属于同一会话，不能引用自身")
             current = db.execute("SELECT status FROM agent_runs WHERE id=?", (run_id,)).fetchone()
             if not current:
                 raise KeyError(run_id)
@@ -239,6 +250,13 @@ class RunStore:
         with self.lock, self.connect() as db:
             db.execute("INSERT INTO agent_run_events (run_id,kind,data,created_at) VALUES (?,?,?,?)",
                        (run_id, kind, self._encode(data), now()))
+
+    def all_events(self, run_id: str) -> list[dict]:
+        result, cursor = [], 0
+        while page := self.events(run_id, cursor):
+            result.extend(page)
+            cursor = page[-1]["seq"]
+        return result
 
     def events(self, run_id: str, after: int = 0) -> list[dict]:
         with self.connect() as db:

@@ -480,6 +480,12 @@ class AutoHuntAgent:
         context = active_run()
         stripped = message.strip()
         from ..workflow.requests import canonical_request, request_selector, action_request
+        from ..workflow.requests import is_continuation
+        from .task_semantics import retained_reference
+        if context.resume_task and is_continuation(message) and not retained_reference(message):
+            resumed = await context.resume_task(message)
+            if resumed is not None:
+                return resumed
         if stripped not in {"退出当前任务", "不办了", "重置上下文", "清空会话状态", "重新开始"} and not REJECT.fullmatch(stripped):
             current_request = (context.dialogue or {}).get("task_request") or {}
             selector = request_selector(message)
@@ -1021,6 +1027,11 @@ class AutoHuntAgent:
         )
 
     async def _direct_browser_control(self, intent: str) -> ChatResponse:
+        context = active_run()
+        if intent == "resume_search" and context and context.resume_task:
+            resumed = await context.resume_task(context.user_message)
+            if resumed is not None:
+                return resumed
         browser = self.tool_registry.browser if self.tool_registry is not None else None
         if browser is None:
             raise _DirectHandlerUnavailable(intent)

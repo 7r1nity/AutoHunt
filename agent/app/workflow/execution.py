@@ -41,10 +41,15 @@ def completion_lines(plan: dict, events: list[dict]) -> list[str]:
     Keep failed reads, other searches and explicit detail/list reads visible.
     """
     published = {event["data"].get("task_id") for event in events
-                 if event["kind"] == "browser_summary"
+                 if event["kind"] in {"browser_summary", "report_reference"}
                  and event["data"].get("report_rendered", True)} - {None, ""}
+    rendered = {step_id for event in events if event["kind"] == "response"
+                and event["data"].get("plan_id") == plan["id"]
+                for step_id in event["data"].get("completed_step_ids", [])}
     lines = []
     for step in plan["steps"]:
+        if step["status"] == "completed" and (step.get("retained_result") or step["id"] in rendered):
+            continue
         if step["status"] == "completed":
             if step["tool"] == "job_search_start" and step.get("task_id") in published:
                 continue
@@ -88,11 +93,13 @@ async def advance(plan: dict, registry) -> list[dict]:
             current_instruction = (context.dialogue or {}).get("instruction_request") or {}
             withdrawn = set(plan.get("revoked_tools", [])) | (set(current_instruction.get("revoked_tools", [])) if current_instruction.get("id") == plan["id"] else set())
             if step["tool"] in withdrawn:
-                step.update(status="blocked", detail="用户已撤回此动作，记忆回顾或继续任务不能恢复授权")
+                step.update(status="blocked", detail="用户已撤回此动作，记忆回顾或继续任务不能恢复授权",
+                    failure={"code": "authority_revoked", "effect_started": False, "uncertain": False})
                 observed.append(step); changed = True
                 continue
             if step["effect"] != "read" and (plan["resume_stamp"] != current_stamp or plan["expires_at"] < time.time() or active_plan != plan["id"]):
                 step.update(status="blocked", detail="简历变更、原计划取消/替代或授权过期，请重新授权此动作")
+                step["failure"] = {"code": "authority_stale", "effect_started": False, "uncertain": False}
                 observed.append(step); changed = True
                 continue
             task_id = steps.get(step.get("evidence_step"), {}).get("task_id")
@@ -102,6 +109,7 @@ async def advance(plan: dict, registry) -> list[dict]:
                 "candidate": registry.candidate_state, "resumes": registry.resume_workspace,
                 "evidence_task_id": task_id, "plan_id": plan["id"], "step_id": step["id"]}
             authority["binding"] = step.get("authority_binding")
+            authority["resume_search_task_id"] = step.get("resume_search_task_id")
             step.update(status="claimed")
             persist(plan)  # Durable claim BEFORE the executor or any write.
             emit("plan_step", step_id=step["id"], tool=step["tool"], status="claimed", depends_on=step["depends_on"])
@@ -127,6 +135,8 @@ async def advance(plan: dict, registry) -> list[dict]:
                 else:
                     step.update(status="outcome_indeterminate" if outcome.status == "outcome_indeterminate" else "blocked",
                         detail=str(outcome.content)[:1000], failure=outcome.failure)
+                    if outcome.status == "error" and (outcome.failure or {}).get("effect_started") is False:
+                        step["status"] = "failed"
             except asyncio.CancelledError:
                 # Leave claim durable so restart cannot replay an uncertain write.
                 raise
@@ -161,9 +171,14 @@ async def begin(plan: dict, registry) -> ChatResponse:
     proposal = next((step.get("result", {}).get("proposal") for step in observed
         if step["status"] == "waiting_confirmation" and isinstance(step.get("result"), dict)), None)
     pending = [step["tool"] for step in plan["steps"] if step["status"] == "pending"]
-    text = "\n\n".join(render_step(step) for step in observed) or plan["reply"] or "没有识别到可执行目标，请说明希望完成的操作。"
+    text = "\n\n".join(render_step(step) for step in observed) or (
+        "正在观察原任务的未完成步骤，没有重放已完成动作。" if plan.get("recovery_count") else
+        plan["reply"] or "没有识别到可执行目标，请说明希望完成的操作。")
     if pending:
         text += "\n\n待前置步骤完成后：" + "、".join(tool_label(tool) for tool in pending) + "。不会把启动、入队或提案视为最终完成。"
+    # This selects content, but is not proof that a response was delivered.
+    emit("plan_response_selection", plan_id=plan["id"],
+         completed_step_ids=[step["id"] for step in observed if step["status"] == "completed"])
     return ChatResponse(message=text, lane=AgentLane.APPLICATION,
         action="resume_proposal" if proposal else None, resume_proposal=proposal,
         tool_events=[ToolEvent(tool=step["tool"], status=step["status"], detail=step.get("detail", "")[:300]) for step in observed])

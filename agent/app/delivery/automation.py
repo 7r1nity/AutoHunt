@@ -169,7 +169,7 @@ class DeliveryAutomationService:
             if self.worker and not self.worker.done():
                 self.worker.cancel()
                 await asyncio.gather(self.worker, return_exceptions=True)
-            if not self.state.submitted and self.state.checkpoint in {"submit_started", "submission_unconfirmed"}:
+            if not self.state.submitted and self.state.checkpoint in {"communication_started", "communication_unconfirmed", "submit_started", "submission_unconfirmed"}:
                 detail = "发送简历期间被中断，结果需人工核验；不会自动重试"
                 self.jobs.mark_outcome_indeterminate(self.state.job_id, detail)
                 self._update(DeliveryTaskStatus.OUTCOME_INDETERMINATE, detail)
@@ -238,18 +238,7 @@ class DeliveryAutomationService:
         self._update(DeliveryTaskStatus.WAITING_FOR_REPLY,
             "已发起沟通；后台按周期检查招聘方回复，收到回复后自动发送已授权简历")
 
-    def expire_reply_wait(self, job_id: int) -> None:
-        detail = "招聘方回复等待已过期，监测已停止；已确认的投递保留，未投递需重新核对授权"
-        if self.state.submitted:
-            self._update(DeliveryTaskStatus.COMPLETED, detail, checkpoint="reply_timeout")
-        else:
-            self.jobs.mark_delivery_failed(job_id, detail)
-            self._update(DeliveryTaskStatus.FAILED, detail, checkpoint="reply_timeout")
-
     async def _run_once_guarded(self, job_id: int, *, require_reply: bool = False) -> None:
-        if wait_expired(self.state.started_at, self.watch_limits.reply):
-            self.expire_reply_wait(job_id)
-            return
         def observe():
             view = self.state
             return ((view.status, view.checkpoint, view.current_url, view.submitted,
@@ -267,7 +256,7 @@ class DeliveryAutomationService:
         except WatchdogExpired as exc:
             # Never retry a click whose outcome is unknown, even if the timeout
             # happened after submit() returned but before persistence finished.
-            if self.state.checkpoint in {"submit_started", "submission_unconfirmed"}:
+            if self.state.checkpoint in {"communication_started", "communication_unconfirmed", "submit_started", "submission_unconfirmed"}:
                 self.jobs.mark_outcome_indeterminate(job_id, str(exc))
                 self._update(DeliveryTaskStatus.OUTCOME_INDETERMINATE, str(exc), checkpoint="submission_unconfirmed")
             elif self.state.submitted:
@@ -305,15 +294,11 @@ class DeliveryAutomationService:
         else:
             self.jobs.mark_delivery_failed(
                 job_id, f"{detail[:300]}；已自动重试 {self.retry_limit} 次仍未成功，需人工核对")
-            # The checkpoint keeps its meaning "the submit click never happened" — it is
-            # the only value that proves no résumé can have been sent, and the recovery
-            # query selects on exactly that string. Encoding "given up" here instead would
-            # silently kill that query: nothing would ever match again and the whole retry
-            # subsystem would cease to exist without raising anything. The exhausted state
-            # is carried by the attempt count and the detail.
+            # A transient pre-click failure is distinct from an invalid binding or
+            # legacy failure without classification. Persist both category and budget.
             self._update(DeliveryTaskStatus.FAILED,
                          f"已自动重试 {self.retry_limit} 次仍未成功；本次点击未发生，职位未投递",
-                         checkpoint="failed_before_submit")
+                         checkpoint="failed_transient_before_submit")
 
     async def _run_once(self, job_id: int, *, require_reply: bool = False) -> None:
         lock = BrowserExecutionLock(self.data_root / "private" / "browser-session.lock", self.state.id or f"delivery:{job_id}")
@@ -356,7 +341,8 @@ class DeliveryAutomationService:
                         raise ValueError("当前模拟站求职者账号与授权任务不一致")
                     self.state.mock_applicant_id = applicant_id
                     self._update(DeliveryTaskStatus.RUNNING, "已核对求职者账号", checkpoint="applicant_bound")
-                observation = await self.adapter.prepare(page, job_url)
+                observation = await self.adapter.prepare(page, job_url, before_communication=lambda:
+                    self._update(DeliveryTaskStatus.RUNNING, "即将发起已授权的沟通", checkpoint="communication_started"))
                 self.state.last_checked_at = datetime.now(UTC)
                 self._update(DeliveryTaskStatus.RUNNING, "已读取投递页面", url=page.url)
                 if observation.intervention_reason:
@@ -424,14 +410,22 @@ class DeliveryAutomationService:
         except Exception as exc:
             detail = str(exc)[:500] if isinstance(exc, (ValueError, RuntimeError)) else (
                 f"浏览器操作失败（{type(exc).__name__}）；请核对模拟站与运行记录，不会自动重试")
-            if submit_started:
+            if submit_started or self.state.checkpoint in {"communication_started", "communication_unconfirmed"}:
                 self.jobs.mark_outcome_indeterminate(job_id, detail)
-                self._update(DeliveryTaskStatus.OUTCOME_INDETERMINATE, detail, checkpoint="submission_unconfirmed")
+                self._update(DeliveryTaskStatus.OUTCOME_INDETERMINATE, detail,
+                    checkpoint="submission_unconfirmed" if submit_started else "communication_unconfirmed")
             elif self.state.submitted:
                 self._update(DeliveryTaskStatus.COMPLETED, f"已确认的投递保留；回复监测停止：{detail}", checkpoint="reply_monitor_stopped")
             else:
                 # Nothing was clicked, so the resume was certainly not sent and a
                 # retry cannot duplicate a submission.
-                self._retry_or_fail(job_id, detail)
+                from ..runtime.resilience import classify_failure
+                if isinstance(exc, BrowserLockBusy):
+                    raise
+                if classify_failure(exc, effect="read", started=False).retryable:
+                    self._retry_or_fail(job_id, detail)
+                else:
+                    self.jobs.mark_delivery_failed(job_id, detail)
+                    self._update(DeliveryTaskStatus.FAILED, detail, checkpoint="failed_precondition")
         finally:
             lock.release()

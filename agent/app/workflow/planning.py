@@ -24,7 +24,7 @@ from ..runtime.context import emit, active_run, current_run
 from .validation import (PlanValidationError, normalize_encoding, encoding_schema, dependency_ancestors,
                          resolved_slots, preflight, SLOT_LABELS)
 
-INTERNAL_TOOLS = {"context_action_propose", "context_question_ask"}
+INTERNAL_TOOLS = {"context_action_propose", "context_question_ask", "task_continue"}
 PLANNING_TIMEOUT = 60
 EVIDENCE_TOOLS = {"learning_plan_generate", "mock_delivery_start", "job_results_read", "job_stats_read"}
 MUTATION_CUES = ACTION_PATTERNS  # Compatibility alias, not a second grammar.

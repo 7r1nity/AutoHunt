@@ -21,6 +21,7 @@ class RunContext:
     mutate_dialogue: Callable[[dict], dict] | None = None
     retrieve_history: Callable[[str, int], list[dict]] | None = None
     request_records: Callable[[], list[dict]] | None = None
+    resume_task: Callable | None = None
     enforce_task_scope: bool = False
     user_message: str = ""
     # Only the validated plan runner may install a single-step authority. Model

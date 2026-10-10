@@ -9,7 +9,7 @@ from contextlib import ExitStack
 from pathlib import Path
 
 RESET_PATH = "/api/v1/maintenance/history"
-JOB_TABLES = ("mock_delivery_queue", "delivery_runs", "delivery_previews", "job_review_decisions",
+JOB_TABLES = ("search_recovery", "mock_delivery_queue", "delivery_runs", "delivery_previews", "job_review_decisions",
     "browser_events", "jobs", "browser_tasks", "conversation_messages", "learning_plans")
 RUN_TABLES = ("agent_run_events", "agent_runs", "session_search_state", "session_dialogue_state", "agent_sessions")
 ROUTER_TABLES = ("router_events", "rule_hit_stats", "router_disagreements", "clarify_memory")

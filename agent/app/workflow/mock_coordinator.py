@@ -104,8 +104,9 @@ class MockWorkflowCoordinator:
             except Exception as exc:
                 self.jobs.record_mock_workflow_error(f"{type(exc).__name__}: {exc}")
             try:
-                pending = self.jobs.mock_delivery_queue() or self.jobs.delivery_runs_waiting_reply()
-                await asyncio.wait_for(self.wakeup.wait(), timeout=2 if pending else self.poll_seconds)
+                # Waiting for a human reply is not active browser work. Keep polling
+                # bounded and quiet rather than looping every two seconds for days.
+                await asyncio.wait_for(self.wakeup.wait(), timeout=self.poll_seconds)
             except TimeoutError:
                 pass
             self.wakeup.clear()
@@ -339,7 +340,9 @@ class MockWorkflowCoordinator:
         """
         from ..delivery.automation import wait_expired
         checked = submitted = 0
-        for run in self.jobs.delivery_runs_waiting_reply():
+        for run in self.jobs.delivery_runs_waiting_reply(limit=None):
+            if checked >= 50:
+                break  # A cycle is bounded, but invalid/young rows cannot starve others.
             if ((self.delivery.worker and not self.delivery.worker.done())
                     or (self.browser.worker and not self.browser.worker.done())):
                 break  # a dispatch or another reply check holds the slot
@@ -356,8 +359,8 @@ class MockWorkflowCoordinator:
             if (not owner or not run.get("preview_id") or run.get("action") != "submit_resume"
                     or any(value is None for value in binding.values())):
                 continue
-            if wait_expired(run["started_at"], self.delivery.watch_limits.reply):
-                continue  # expiry is owned by the run's own watchdog
+            if run.get("last_checked_at") and not wait_expired(run["last_checked_at"], self.poll_seconds):
+                continue
             try:
                 view = await self._operation(owner,
                     lambda: self.delivery.resume_authorized_run(run["id"], **binding),
@@ -419,17 +422,7 @@ class MockWorkflowCoordinator:
                     self._finish_queue_item(item, "completed", "已核实简历投递完成")
                     continue
                 if run.status == DeliveryTaskStatus.WAITING_FOR_REPLY:
-                    if wait_expired(run.started_at, self.delivery.watch_limits.reply):
-                        expired = self.jobs.update_delivery_run(run.id, status=DeliveryTaskStatus.FAILED,
-                            checkpoint="reply_timeout", detail="回复等待过期，未自动重试投递")
-                        if self.delivery.current().id == run.id:
-                            self.delivery.state = expired
-                        self._finish_queue_item(item, "blocked", "回复等待过期，请重新核对授权")
-                        continue
-                    self.jobs.update_mock_delivery(job["id"], "dispatched", "等待回复；正在检查", run_id=run.id)
-                    await self._operation(item["session_id"],
-                        lambda: self.delivery.resume_authorized_run(run.id, **item["binding"]), job_id=job["id"])
-                    return
+                    continue  # Reply polling is owned by check_reply_queue, without expiry.
                 if run.status == DeliveryTaskStatus.WAITING_FOR_USER:
                     if wait_expired(run.updated_at, self.delivery.watch_limits.human) and (not self.delivery.worker or self.delivery.worker.done()):
                         expired = self.jobs.update_delivery_run(run.id, status=DeliveryTaskStatus.FAILED,

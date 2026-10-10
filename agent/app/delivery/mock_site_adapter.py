@@ -158,7 +158,7 @@ class MockJobSiteAdapter:
         except Exception:  # noqa: BLE001 - a page probe must never break the flow
             return False
 
-    async def _open_communication(self, page: Page) -> None:
+    async def _open_communication(self, page: Page, *, before_click: Callable[[], object] | None = None) -> None:
         """Open the chat panel once, without waiting 30s on an overlay.
 
         Once the panel is open it covers the button's hit point, so a second
@@ -171,13 +171,15 @@ class MockJobSiteAdapter:
         if not await communicate.count() or not await communicate.first.is_visible():
             return
         try:
+            if before_click:
+                before_click()
             await communicate.first.click(timeout=5_000)
         except Exception as exc:
             if not await self._chat_open(page):
                 raise RuntimeError("发起沟通未获确认；请核对模拟站会话，不会重复点击") from exc
         await page.wait_for_timeout(800)
 
-    async def prepare(self, page: Page, job_url: str) -> MockApplyObservation:
+    async def prepare(self, page: Page, job_url: str, *, before_communication: Callable[[], object] | None = None) -> MockApplyObservation:
         if page.url != job_url:
             await page.goto(job_url, wait_until="domcontentloaded", timeout=30_000)
         await page.locator("#job-hero h1").wait_for(state="visible", timeout=10_000)
@@ -191,9 +193,11 @@ class MockJobSiteAdapter:
 
         if observation.direct_apply:
             if not await self._chat_open(page):
+                if before_communication:
+                    before_communication()
                 await page.locator("#job-hero").get_by_role("button", name="投递后沟通", exact=True).click(timeout=5_000)
             return await self.inspect(page)
-        await self._open_communication(page)
+        await self._open_communication(page, before_click=before_communication)
         return await self.inspect(page)
 
     async def bind_resume(self, page: Page, payload: dict, *, applicant_id: int | None = None,

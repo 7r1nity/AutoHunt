@@ -94,6 +94,10 @@ class JobStore:
                     run_id TEXT NOT NULL, content_hash TEXT NOT NULL, decided_at TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_events_task ON browser_events(task_id);
+                CREATE TABLE IF NOT EXISTS search_recovery (
+                    task_id TEXT PRIMARY KEY, request_json TEXT NOT NULL,
+                    processed_urls_json TEXT NOT NULL DEFAULT '[]'
+                );
                 CREATE TABLE IF NOT EXISTS delivery_previews (
                     id TEXT PRIMARY KEY, job_id INTEGER NOT NULL, status TEXT NOT NULL,
                     payload_json TEXT NOT NULL, payload_digest TEXT NOT NULL,
@@ -648,7 +652,7 @@ class JobStore:
                         "UPDATE delivery_runs SET status='waiting_for_reply',submitted=1,detail=?,checkpoint='submission_confirmed',updated_at=? WHERE id=?",
                         (detail, now, row["id"]),
                     )
-                elif bool(row["submitted"]) or row["checkpoint"] in {"submit_started", "submission_unconfirmed"}:
+                elif bool(row["submitted"]) or row["checkpoint"] in {"communication_started", "communication_unconfirmed", "submit_started", "submission_unconfirmed"}:
                     detail = "后端在提交阶段重启，结果无法确定；已禁止自动重试，请人工核验"
                     db.execute(
                         "UPDATE delivery_runs SET status='outcome_indeterminate',detail=?,checkpoint='restart_after_submit',updated_at=? WHERE id=?",
@@ -737,10 +741,46 @@ class JobStore:
             db.execute("UPDATE jobs SET filter_status=?,filter_evidence=? WHERE id=?",
                 (result["status"], json.dumps(result, ensure_ascii=False), job_id))
 
+    def save_search_request(self, task_id: str, request: dict) -> None:
+        """Canonical internal checkpoint, never a redacted event projection."""
+        with self.lock, self._connect() as db:
+            db.execute("INSERT OR IGNORE INTO search_recovery(task_id,request_json) VALUES (?,?)",
+                       (task_id, json.dumps(request, ensure_ascii=False, sort_keys=True)))
+
+    def search_recovery(self, task_id: str) -> dict:
+        with self.lock, self._connect() as db:
+            row = db.execute("SELECT * FROM search_recovery WHERE task_id=?", (task_id,)).fetchone()
+            touched = db.execute("SELECT DISTINCT jobs.source_url FROM jobs JOIN browser_events e ON "
+                "jobs.id=json_extract(e.sample_json,'$.job_id') WHERE e.task_id=? "
+                "AND e.event_type IN ('job_stored','job_duplicate')", (task_id,)).fetchall()
+        return {"request": json.loads(row["request_json"]) if row else None,
+                "processed_urls": set(json.loads(row["processed_urls_json"]) if row else []) |
+                                  {item["source_url"] for item in touched}}
+
+    def mark_search_processed(self, task_id: str, url: str) -> None:
+        with self.lock, self._connect() as db:
+            row = db.execute("SELECT processed_urls_json FROM search_recovery WHERE task_id=?", (task_id,)).fetchone()
+            if row:
+                urls = set(json.loads(row[0])) | {url}
+                db.execute("UPDATE search_recovery SET processed_urls_json=? WHERE task_id=?",
+                           (json.dumps(sorted(urls), ensure_ascii=False), task_id))
+
     def job_touched_by_task(self, task_id: str, job_id: int) -> bool:
+        """Find a durable receipt for this task/job pair."""
         with self.lock, self._connect() as db:
             rows = db.execute("SELECT sample_json FROM browser_events WHERE task_id=? AND event_type IN ('job_stored','job_duplicate')", (task_id,)).fetchall()
         return any(json.loads(row["sample_json"] or "{}").get("job_id") == job_id for row in rows)
+
+    def reconcile_search_counts(self, task_id: str) -> None:
+        """Repair a crash between a durable job receipt and its counter update."""
+        with self.lock, self._connect() as db:
+            rows = db.execute("SELECT event_type,COUNT(DISTINCT json_extract(sample_json,'$.job_id')) AS n "
+                "FROM browser_events WHERE task_id=? AND event_type IN ('job_stored','job_duplicate') "
+                "GROUP BY event_type", (task_id,)).fetchall()
+        if rows:
+            counts = {row["event_type"]: row["n"] for row in rows}
+            self.update_task(task_id, stored=counts.get("job_stored", 0),
+                duplicates=counts.get("job_duplicate", 0), matched=self.search_report(task_id)["qualified_jobs"])
 
     def search_report(self, task_id: str) -> dict[str, Any]:
         """Summarize only jobs touched by this run, including deduplicated jobs."""
@@ -1182,19 +1222,20 @@ class JobStore:
         return [dict(row) for row in rows]
 
     def delivery_runs_failed_before_submit(self, *, limit: int = 50) -> list[dict]:
-        """Runs whose start failed before any click, so nothing was submitted.
+        """Explicit transient pre-submit failures, including exhausted budgets.
 
-        These are safe to re-dispatch automatically: the checkpoint proves the submit
-        action never began, and the one-use authorisation is still unspent.
+        Legacy/unclassified failures and binding/precondition failures are not
+        evidence for automatic retry. The coordinator also checks the budget,
+        original run binding and withdrawal; it never mints another capability.
         """
         with self.lock, self._connect() as db:
             rows = db.execute(
                 "SELECT * FROM delivery_runs WHERE status='failed' AND submitted=0 "
-                "AND checkpoint='failed_before_submit' ORDER BY started_at LIMIT ?", (limit,)).fetchall()
+                "AND checkpoint='failed_transient_before_submit' ORDER BY started_at LIMIT ?", (limit,)).fetchall()
         return [dict(row) for row in rows]
 
-    def delivery_runs_waiting_reply(self, *, limit: int = 50) -> list[dict]:
-        """Granted runs that still wait for the recruiter, oldest first.
+    def delivery_runs_waiting_reply(self, *, limit: int | None = 50) -> list[dict]:
+        """Granted runs waiting for HR, least recently checked first.
 
         Reply monitoring is a read-only periodic check, so it must be able to find
         these without holding the single delivery worker.
@@ -1202,7 +1243,8 @@ class JobStore:
         with self.lock, self._connect() as db:
             rows = db.execute(
                 "SELECT * FROM delivery_runs WHERE status='waiting_for_reply' "
-                "AND submitted=0 ORDER BY started_at LIMIT ?", (limit,)).fetchall()
+                "AND submitted=0 ORDER BY COALESCE(last_checked_at,''),started_at" +
+                (" LIMIT ?" if limit is not None else ""), (limit,) if limit is not None else ()).fetchall()
         return [dict(row) for row in rows]
 
     def mock_delivery_queue(self, *, session_id: str | None = None, active_only: bool = True) -> list[dict]:

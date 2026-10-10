@@ -103,6 +103,7 @@ class BrowserAutomationService:
                     (ZhaopinAdapter.selector_version if request.source == "zhaopin" else BossAdapter.selector_version)),
                 resume_id=self.candidate_state.read().profile.resume_id,
             )
+            self.store.save_search_request(task_id, request.model_dump(mode="json"))
             source_label = {"mock": "模拟招聘网站", "boss": "BOSS直聘", "zhaopin": "智联招聘"}[request.source]
             self.store.event(task_id, "task_started", f"{source_label} 搜索：{request.query}")
             self.store.event(task_id, "search_constraints", "本次搜索条件（不修改持久化偏好）", sample={
@@ -113,6 +114,31 @@ class BrowserAutomationService:
             })
             self.worker = asyncio.create_task(self._run_guarded(task_id, request), name=f"browser-search-{task_id[:8]}")
             return state
+
+    async def continue_search(self, task_id: str, request: BrowserSearchRequest) -> BrowserTaskView:
+        """Reattach the same read-only search and skip persisted job receipts."""
+        async with self.lifecycle_lock:
+            if self.worker and not self.worker.done():
+                raise RuntimeError("浏览器正在执行或清理，未重放搜索")
+            saved = self.store.search_recovery(task_id)["request"]
+            if not saved:
+                raise ValueError("旧搜索缺少可靠的请求检查点，请明确重新搜索")
+            original = BrowserSearchRequest.model_validate(saved)
+            ignored = {"browser_mode", "search_state_revision"}
+            if (original.dry_run or request.dry_run or
+                    original.model_dump(exclude=ignored) != request.model_dump(exclude=ignored)):
+                raise ValueError("搜索条件、会话已变化或原任务含投递，不能重放为只读续接")
+            state = self.store.get_task(task_id)
+            if state.status == BrowserTaskStatus.COMPLETED:
+                return state
+            self.store.reconcile_search_counts(task_id)
+            self.current_id = task_id
+            self.resume_access_check = True
+            self.gate.set()
+            self.store.update_task(task_id, status=BrowserTaskStatus.STARTING,
+                detail="正在接续原搜索并重新核验登录；已记录职位不会重复分析", takeover_reason=None)
+            self.worker = asyncio.create_task(self._run_guarded(task_id, original), name=f"search-continue-{task_id}")
+            return self.current()
 
     async def _run_guarded(self, task_id: str, request: BrowserSearchRequest) -> None:
         def observe():
@@ -328,12 +354,15 @@ class BrowserAutomationService:
             self.store.event(task_id, "search_results", f"共发现 {len(all_cards)} 个职位链接")
             await self._record_checkpoint(task_id, "search_results", page, screenshot=True)
             cards = self._filter_salary_cards(task_id, cards, request)
+            processed = self.store.search_recovery(task_id)["processed_urls"]
+            cards = [card for card in cards if card.get("url") not in processed]
             if not cards:
                 self.store.update_task(task_id, status=BrowserTaskStatus.COMPLETED, detail="登录有效，但页面中没有识别到职位；可能确实无结果或选择器需要更新")
                 return
 
             candidate_skills, target_roles, excluded_keywords = self._candidate_match_context(queries)
-            stored = duplicates = matched = 0
+            previous_counts = self.store.get_task(task_id)
+            stored, duplicates, matched = previous_counts.stored, previous_counts.duplicates, previous_counts.matched
 
             def _accumulate(deltas: tuple[int, int, int]) -> None:
                 nonlocal stored, duplicates, matched
@@ -373,6 +402,7 @@ class BrowserAutomationService:
                         reason_code="prescreen_skip",
                         sample={"title": str(card.get("title") or "未知职位")[:100], "reason": verdict["reasoning"][:200]},
                     )
+                    self.store.mark_search_processed(task_id, url)
                     continue
                 analysis = JobAnalysis(score=0, decision=verdict["decision"], matched_skills=[], missing_skills=[], reasoning=verdict["reasoning"])
                 _accumulate(self._persist_analysis(task_id, self._detail_from_card(card), analysis, url, request=request))
@@ -551,6 +581,8 @@ class BrowserAutomationService:
         )
         await self._record_checkpoint(task_id, "mock_search_results", page, (await self.mock_adapter.inspect(page)).as_dict())
         cards = self._filter_salary_cards(task_id, cards, request)
+        processed = self.store.search_recovery(task_id)["processed_urls"]
+        cards = [card for card in cards if card.get("url") not in processed]
         if not cards:
             self.store.update_task(task_id, status=BrowserTaskStatus.COMPLETED, detail="搜索完成，但模拟网站没有符合条件的职位")
             return
@@ -566,7 +598,8 @@ class BrowserAutomationService:
         )
         filtered_count = sum(1 for verdict in verdicts if verdict["decision"] == "SKIP")
         self.store.increment_funnel(task_id, filtered=filtered_count)
-        stored = duplicates = matched = 0
+        previous_counts = self.store.get_task(task_id)
+        stored, duplicates, matched = previous_counts.stored, previous_counts.duplicates, previous_counts.matched
         dry_run_candidates: list[tuple[int, int]] = []
         for position, (card, verdict) in enumerate(zip(cards, verdicts), start=1):
             await self._respect_pause()
@@ -584,6 +617,7 @@ class BrowserAutomationService:
                     reason_code="prescreen_skip",
                     sample={"title": str(card.get("title") or "未知职位")[:100], "reason": verdict["reasoning"][:200]},
                 )
+                self.store.mark_search_processed(task_id, url)
                 continue
             self.store.increment_funnel(task_id, visited=1)
             self.store.update_task(task_id, detail=f"正在读取模拟职位 {position}/{len(cards)}")
@@ -593,6 +627,7 @@ class BrowserAutomationService:
                 await self.mock_adapter.wait_for_job_detail(detail_page)
                 detail = await self.mock_adapter.extract_job_detail(detail_page, card)
                 if not self._salary_allowed(task_id, detail, request):
+                    self.store.mark_search_processed(task_id, url)
                     continue
                 match_request = detail_request_from_card(
                     card,
@@ -1264,6 +1299,7 @@ class BrowserAutomationService:
             if existing is not None:
                 self.store.update_job_filter_result(existing, detail.get("filter_evidence", {"status": "fail"}))
             self.store.increment_funnel(task_id, filtered=1)
+            self.store.mark_search_processed(task_id, url)
             return (0, 0, 0)
         if request and request.filters and "filter_status" not in detail:
             # An unread card is never proof of a semantic hard condition.
@@ -1275,10 +1311,12 @@ class BrowserAutomationService:
                 self.store.increment_funnel(task_id, limited=1)
                 return (0, 0, 0)
             if not self._salary_allowed(task_id, detail, request):
+                self.store.mark_search_processed(task_id, url)
                 return (0, 0, 0)
             if request.result_limit and analysis.decision not in {"APPLY", "REVIEW"}:
                 self.store.increment_funnel(task_id, filtered=1)
                 self.store.event(task_id, "job_skipped", analysis.reasoning, reason_code="match_skip")
+                self.store.mark_search_processed(task_id, url)
                 return (0, 0, 0)
         detail.update({
             "title": clean_title(detail.get("title") or ""),

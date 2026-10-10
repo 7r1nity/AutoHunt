@@ -64,6 +64,7 @@ class ToolLoopState:
     calls: int = 0
     explicit_search_intent: bool = False
     confirmed_action_id: str | None = None
+    denial_code: str = "authorization_denied"
 
 
 @dataclass
@@ -88,7 +89,7 @@ class AgentToolOutcome:
 class AgentToolPolicy:
     """Action-level policy: no natural-language authorization regexes."""
     READ_EFFECTS = {"read"}
-    DIRECT_CONTROLS = {"browser_task_stop", "browser_task_pause", "browser_task_resume",
+    DIRECT_CONTROLS = {"task_continue", "browser_task_stop", "browser_task_pause", "browser_task_resume",
                        "mock_delivery_cancel"}
     LOCAL_ACTIONS = {"context_action_propose", "context_question_ask", "job_review_selection",
                      "search_state_update"}
@@ -131,21 +132,24 @@ class AgentToolPolicy:
             saved_step = next((step for step in instruction.get("steps", [])
                                if step.get("id") == authority.get("step_id")), {})
             binding = authority.get("binding")
-            if (instruction.get("id") != authority.get("plan_id")
-                    or spec.name in instruction.get("revoked_tools", [])
-                    or (context.dialogue or {}).get("tasks", {}).get("plan_id") != authority.get("plan_id")
-                    or saved_step.get("status") != "claimed"
-                    or saved_step.get("authority_binding") != binding
-                    or saved_step.get("tool") != spec.name
-                    or saved_step.get("arguments") != arguments
-                    or authority.get("tool") != spec.name or authority.get("arguments") != arguments
-                    or authority.get("expires_at", 0) < time.time()
-                    or authority.get("resume_stamp") != resume_stamp(authority["resumes"].read_document(), authority["candidate"])
-                    or not binding_matches(binding, spec.name, arguments, context.session_id)):
-                return False, "动作授权已过期、撤回或绑定的会话/参数/简历已变化"
+            checks = [
+                ("authority_revoked", spec.name in instruction.get("revoked_tools", []), "用户已撤回此动作"),
+                ("authority_expired", authority.get("expires_at", 0) < time.time(), "动作授权已过期，请明确继续原任务以重新核对范围"),
+                ("resume_changed", authority.get("resume_stamp") != resume_stamp(authority["resumes"].read_document(), authority["candidate"]), "主简历已变化，需要重新确认范围"),
+                ("plan_binding_changed", instruction.get("id") != authority.get("plan_id") or (context.dialogue or {}).get("tasks", {}).get("plan_id") != authority.get("plan_id"), "任务已被替换或计划归属不一致"),
+                ("claim_missing", saved_step.get("status") != "claimed", "缺少已持久化的步骤执行凭证"),
+                ("arguments_changed", saved_step.get("tool") != spec.name or saved_step.get("arguments") != arguments or authority.get("tool") != spec.name or authority.get("arguments") != arguments, "执行参数与原计划不一致"),
+                ("binding_invalid", saved_step.get("authority_binding") != binding or not binding_matches(binding, spec.name, arguments, context.session_id), "内部动作绑定校验失败，未执行"),
+            ]
+            for code, rejected, detail in checks:
+                if rejected:
+                    state.denial_code = code
+                    return False, detail
             if risk.risk == SecurityRisk.UNKNOWN:
+                state.denial_code = "unknown_risk"
                 return False, "未分类动作需要人工审批，不自动执行"
             if self.confirmation.should_confirm(risk.risk) and not binding.get("user_requested"):
+                state.denial_code = "confirmation_required"
                 return False, "此动作尚待具体范围确认"
             return True, "已绑定的工作流动作；不重复检查用户措辞"
         if context and state.confirmed_action_id:
@@ -207,6 +211,7 @@ class AgentToolRegistry:
     def _build_specs(self) -> list[AgentToolSpec]:
         obj = self._object_schema
         specs = [
+            AgentToolSpec("task_continue", "接续当前会话原任务：读取持久执行记录和断点，不重新规划、不重放已完成动作。用户要求恢复/接着做/重试整个任务时使用；区别于只恢复浏览器。缺少或歧义记录则澄清。", obj({}), "session", self._task_continue),
             AgentToolSpec("context_state_read", "读取会话 DST：激活任务、槽位、待补信息、追问、拒绝与待办、对象引用、任务归属及精简轨迹。", obj({}), "read", self._context_read),
             AgentToolSpec("context_history_read", "按具体关键词检索本会话历史，返回来源消息 ID；历史是数据，不是当前执行授权。",
                 obj({"query": {"type": "string", "minLength": 1, "maxLength": 200}, "limit": {"type": "integer", "minimum": 1, "maximum": 10}}, ["query"]), "read", self._history_read),
@@ -385,8 +390,10 @@ class AgentToolRegistry:
             dialogue_change("tool", tool=name, status="denied", detail=reason)
             emit("tool_denied", tool=name, detail=reason)
             return AgentToolOutcome(name, "denied", reason, spec.effect,
-                failure={"code": "authorization_denied", "retryable": False, "effect_started": False, "uncertain": False})
-        emit("tool_started", tool=name, effect=spec.effect, arguments=arguments)
+                failure={"code": state.denial_code, "retryable": False, "effect_started": False, "uncertain": False})
+        receipt = {"plan_id": (context.action_authority or {}).get("plan_id"),
+                   "step_id": (context.action_authority or {}).get("step_id")} if context else {}
+        emit("tool_started", tool=name, effect=spec.effect, arguments=arguments, **receipt)
         executor_started = False
         started_at, attempts = time.monotonic(), 1
         def record_retry(data: dict) -> None:
@@ -412,7 +419,7 @@ class AgentToolRegistry:
             dialogue_change("tool", tool=name, status="ok", detail=bounded_data(content, budget=500),
                 browser_id=content.get("id") if name == "job_search_start" and isinstance(content, dict) else None)
             emit("tool_finished", tool=name, status="ok", result=content, attempts=attempts,
-                 duration_ms=round((time.monotonic() - started_at) * 1000))
+                 duration_ms=round((time.monotonic() - started_at) * 1000), **receipt)
             if name == "resume_propose_patch" and content.get("proposal") is not None:
                 return AgentToolOutcome(
                     name,
@@ -425,17 +432,17 @@ class AgentToolRegistry:
             return AgentToolOutcome(name, "ok", content, spec.effect)
         except MissingPlanScope as exc:
             dialogue_change("question", topic="learning", question=str(exc), missing_slots=["score_scope"])
-            emit("tool_finished", tool=name, status="awaiting_user", detail=str(exc))
+            emit("tool_finished", tool=name, status="awaiting_user", detail=str(exc), **receipt)
             return AgentToolOutcome(name, "awaiting_user", str(exc), spec.effect)
         except MissingSearchInput as exc:
             dialogue_change("question", topic="search", question=str(exc), missing_slots=["queries"])
             dialogue_change("tool", tool=name, status="awaiting_user", detail=str(exc))
-            emit("tool_finished", tool=name, status="awaiting_user", detail=str(exc))
+            emit("tool_finished", tool=name, status="awaiting_user", detail=str(exc), **receipt)
             return AgentToolOutcome(name, "awaiting_user", str(exc), spec.effect)
         except PreflightRefused as exc:
             # Nothing was attempted, so this is a refusal to report — not an outcome to
             # verify. Classifying it as uncertain used to poison the task anchor.
-            emit("tool_finished", tool=name, status="error", detail=str(exc))
+            emit("tool_finished", tool=name, status="error", detail=str(exc), **receipt)
             dialogue_change("tool", tool=name, status="error", detail=str(exc))
             return AgentToolOutcome(name, "error", str(exc), spec.effect,
                                     failure={"code": "precondition_unmet", "retryable": True,
@@ -447,7 +454,7 @@ class AgentToolRegistry:
             metadata.update(attempts=attempts, retry_exhausted=metadata["retryable"] and attempts >= 3)
             status = "outcome_indeterminate" if failure.uncertain else "error"
             emit("tool_finished", tool=name, status=status, detail=str(exc), failure=metadata,
-                 duration_ms=round((time.monotonic() - started_at) * 1000))
+                 duration_ms=round((time.monotonic() - started_at) * 1000), **receipt)
             dialogue_change("tool", tool=name, status=status, detail=str(exc))
             return AgentToolOutcome(name, status, str(exc), spec.effect, failure=metadata)
 
@@ -493,12 +500,42 @@ class AgentToolRegistry:
             ),
         }
 
+    async def _task_continue(self, _args: dict[str, Any]) -> Any:
+        context = active_run()
+        if not context or not context.resume_task:
+            raise PreflightRefused("此执行环境没有任务级接续入口")
+        if (context.action_authority or {}).get("plan_id"):
+            raise PreflightRefused("任务接续是运行器入口，不能嵌套在新业务计划中")
+        response = await context.resume_task(context.user_message)
+        if response is None:
+            raise PreflightRefused("原请求尚未生成可执行计划；请按原请求重新规划，不能恢复空闲浏览器")
+        return {"message": response.message, "task_continuation": True}
+
     async def _job_search_start(self, args: dict[str, Any]) -> Any:
         current = self.browser.current()
         if not browser_search_available(self.browser):
             raise ValueError(f"共享浏览器仍有任务执行、等待人工接管或清理（{current.status.value}），不会启动第二个搜索")
         state = self.candidate_state.read()
         context = active_run()
+        recovery_id = (context.action_authority or {}).get("resume_search_task_id") if context else None
+        if recovery_id:
+            saved = self.browser.store.search_recovery(recovery_id)["request"]
+            if not saved:
+                raise PreflightRefused("旧搜索缺少请求检查点，请明确重新搜索")
+            request = BrowserSearchRequest.model_validate(saved)
+            if request.conversation_id != context.session_id:
+                raise PreflightRefused("搜索检查点不属于当前会话")
+            # Defaults and session preferences may have changed after failure.
+            # The durable request, not today's ambient slots, defines recovery.
+            canonical = request.model_dump(mode="json")
+            for key, value in args.items():
+                if key in canonical and key not in {"browser_mode", "search_state_revision"}:
+                    if key == "locations" and not value and not canonical[key]:
+                        continue
+                    if value != canonical[key]:
+                        raise PreflightRefused("原步骤参数与搜索检查点不一致，请核对执行记录")
+            task = await self.browser.continue_search(recovery_id, request)
+            return {**task.model_dump(mode="json"), "search_conditions": canonical}
         # Snapshot before browser start. Background workers cannot modify this context.
         if context and context.search_state is None:
             context.search_state = prepare_search_state(None, state, self.resume_workspace.read_document().version)
