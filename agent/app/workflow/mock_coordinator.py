@@ -59,6 +59,10 @@ class MockWorkflowCoordinator:
         self.operations: dict[asyncio.Task, str] = {}
         self.operation_jobs: dict[asyncio.Task, int | None] = {}
         self.poll_failures: dict[str, tuple[int, float]] = {}
+        #: The user's own delivery instruction when one was stated ("85分以上直接投递").
+        #: Read only to measure whether a candidate falls inside the boundaries the user
+        #: set; nothing filters or blocks on it yet (stage (c)).
+        self.authorization_scope = None
         #: Observation -> rule matching -> action -> recorded decision.
         self.engine = RuleEngine(build_rules(self))
 
@@ -159,6 +163,32 @@ class MockWorkflowCoordinator:
         except Exception:  # noqa: BLE001 - malformed saved state must not break delivery
             return None
 
+    def remember_authorization_scope(self, message: str, constraints: dict | None = None) -> None:
+        """Record the user's delivery instruction as the boundary of what is authorised.
+
+        Only used for measurement so far. Remembering it here rather than deriving it at
+        delivery time keeps the boundary tied to what the user actually said in the turn
+        that authorised the batch, instead of to whatever the current state happens to be.
+        """
+        from ..core.action_language import score_scope
+        from ..security.risk import ScopedInstruction
+        text = str(message or "").strip()
+        if not text:
+            return
+        try:
+            scope = score_scope(text) or {}
+        except ValueError:
+            return
+        constraints = constraints or {}
+        requirements: dict = {}
+        salary = constraints.get("salary_min")
+        if isinstance(salary, int):
+            requirements["salary_min"] = salary
+        self.authorization_scope = ScopedInstruction(
+            tool="mock_delivery_start", quote=text[:200],
+            min_score=scope.get("min_score"), limit=constraints.get("result_limit"),
+            requirements=requirements)
+
     async def queue_deliveries(self, *, min_score: int, session_id: str, task_id: str | None = None) -> dict:
         if session_id in self.stopping_sessions or "*" in self.stopping_sessions:
             raise PreflightRefused("当前正在停止任务，未加入投递队列")
@@ -183,6 +213,17 @@ class MockWorkflowCoordinator:
                     and self.jobs.latest_delivery_status_for_job(item["id"]) is None]
         binding = {"resume_document_id": document.id, "resume_version": document.version,
                    "resume_digest": resume_document_digest(document)}
+        # Stage (c): measure what the authorization layer would decide and change nothing.
+        # This call must never raise into the delivery path or filter a candidate — a
+        # broken measurement costs a misleading row, and letting it block delivery would
+        # reintroduce exactly the failure mode it exists to quantify.
+        try:
+            from ..security.audit import audit_delivery
+            audit = audit_delivery(candidates=eligible, scope=self.authorization_scope)
+            self.jobs.record_authorization_audit(audit.as_row())
+        except Exception as exc:  # noqa: BLE001
+            self.jobs.record_mock_workflow_error(
+                f"授权度量未记录（不影响投递）：{type(exc).__name__}：{exc}")
         ids = self.jobs.enqueue_mock_deliveries(eligible, session_id=session_id,
             resume_stamp=resume_stamp(document, self.candidate), binding=binding, min_score=min_score)
         self.wakeup.set()

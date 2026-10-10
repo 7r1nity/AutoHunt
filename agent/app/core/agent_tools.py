@@ -705,6 +705,11 @@ class AgentToolRegistry:
         context = active_run()
         if context is None:
             raise PreflightRefused("自动投递需要当前会话")
+        # Remember the user's own instruction as the boundary of what this batch is
+        # authorised to cover. Measurement only for now: queue_deliveries records what
+        # falls inside it without filtering anything yet.
+        self.mock_workflow.remember_authorization_scope(
+            active_run().user_message if active_run() else "", context.search_state)
         task_id = (context.action_authority or {}).get("evidence_task_id")
         return await self.mock_workflow.queue_deliveries(min_score=args["min_score"], session_id=context.session_id, task_id=task_id)
 

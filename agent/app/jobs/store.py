@@ -205,6 +205,16 @@ class JobStore:
                 facts_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL
             )"""
         )
+        db.execute(
+            """CREATE TABLE IF NOT EXISTS authorization_audit (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tool TEXT NOT NULL, risk TEXT NOT NULL, would_confirm INTEGER NOT NULL,
+                policy TEXT NOT NULL DEFAULT '', threshold TEXT NOT NULL DEFAULT '',
+                candidates INTEGER NOT NULL DEFAULT 0, in_scope INTEGER NOT NULL DEFAULT 0,
+                out_of_scope INTEGER NOT NULL DEFAULT 0, detail TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL
+            )"""
+        )
 
     @staticmethod
     def _ensure_column(db: sqlite3.Connection, table: str, column: str, declaration: str) -> None:
@@ -1072,6 +1082,56 @@ class JobStore:
                                (utc_now(), item["id"]))
                     inserted.append(item["id"])
         return inserted
+
+    def record_authorization_audit(self, row: dict) -> None:
+        """Store what the authorization layer would have decided. Never blocks anything."""
+        with self.lock, self._connect() as db:
+            db.execute(
+                "INSERT INTO authorization_audit(tool,risk,would_confirm,policy,threshold,"
+                "candidates,in_scope,out_of_scope,detail,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (row["tool"], row["risk"], row["would_confirm"], row["policy"], row["threshold"],
+                 row["candidates"], row["in_scope"], row["out_of_scope"], row["detail"], utc_now()))
+
+    def authorization_audit(self, *, limit: int = 50) -> list[dict[str, Any]]:
+        with self.lock, self._connect() as db:
+            rows = db.execute("SELECT * FROM authorization_audit ORDER BY id DESC LIMIT ?",
+                              (limit,)).fetchall()
+        output = []
+        for row in rows:
+            item = dict(row)
+            try:
+                item["detail"] = json.loads(item.get("detail") or "{}")
+            except ValueError:
+                item["detail"] = {}
+            output.append(item)
+        return output
+
+    def authorization_audit_summary(self) -> dict[str, Any]:
+        """The numbers stage (c) exists to produce.
+
+        Reads the whole table, so the operator can see how often the gate would have
+        fired and how much the scope boundary would have excluded before either is wired
+        into execution.
+        """
+        with self.lock, self._connect() as db:
+            row = db.execute(
+                "SELECT COUNT(*) runs, COALESCE(SUM(would_confirm),0) confirms, "
+                "COALESCE(SUM(candidates),0) candidates, COALESCE(SUM(in_scope),0) in_scope, "
+                "COALESCE(SUM(out_of_scope),0) out_of_scope FROM authorization_audit").fetchone()
+            by_risk = {r["risk"]: r["n"] for r in db.execute(
+                "SELECT risk, COUNT(*) n FROM authorization_audit GROUP BY risk")}
+        total = int(row["runs"] or 0)
+        return {
+            "batches": total,
+            "would_confirm": int(row["confirms"] or 0),
+            "would_confirm_rate": round((row["confirms"] or 0) / total, 3) if total else 0.0,
+            "candidates": int(row["candidates"] or 0),
+            "in_scope": int(row["in_scope"] or 0),
+            "out_of_scope": int(row["out_of_scope"] or 0),
+            "out_of_scope_rate": round((row["out_of_scope"] or 0) / row["candidates"], 3)
+                                 if row["candidates"] else 0.0,
+            "by_risk": by_risk,
+        }
 
     def record_automation_decision(self, *, rule: str | None, result: str,
                                    considered: tuple[str, ...], facts: dict) -> None:
