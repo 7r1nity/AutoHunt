@@ -545,14 +545,31 @@ class AutoHuntAgent:
         from ..growth.requests import resume_stamp
         stamp = resume_stamp(self.resume_workspace.read_document(), self.candidate_state) if self.resume_workspace else ""
         from ..workflow.requests import is_continuation, resolve_continuation
+        from .task_semantics import retained_reference
         if is_continuation(message):
+            # Branch edits name the existing task, never replace its root with a
+            # short follow-up. Persist revocation even if subsequent planning fails.
+            amendment = retained_reference(message)
+            if amendment:
+                from ..workflow.requests import withdrawn_request
+                root = (context.dialogue or {}).get("task_request") or {}
+                withdrawn = withdrawn_request(context.dialogue or {}, message)
+                if withdrawn:
+                    root = withdrawn.model_dump()
+                    dialogue_change("request_state", request=root)
+                    instruction = (context.dialogue or {}).get("instruction_request") or {}
+                    if instruction.get("original") == root["original"]:
+                        dialogue_change("instruction", request={**instruction, "revoked_tools": root["revoked_tools"]})
+                pending_edit = live_request(context.dialogue or {}, stamp)
+                if pending_edit and not root.get("execution_started"):
+                    return await self._handle_planned(message, previous=pending_edit)
             resolved = resolve_continuation(context.dialogue or {},
                 self.tool_registry.browser if self.tool_registry else None, stamp)
             emit("request_resolution", action=resolved.action, detail=resolved.message)
             if resolved.action == "replan":
                 emit("progress", detail="已定位上文尚未执行的请求，正在重新规划全部目标；不是恢复空闲浏览器")
                 root = (context.dialogue or {}).get("task_request") or {}
-                if root.get("amendments") or root.get("revoked_tools") or root.get("condition_overrides"):
+                if amendment or root.get("amendments") or root.get("revoked_tools") or root.get("condition_overrides"):
                     import time
                     # resolve_continuation has already checked no execution,
                     # ownership, resume and age. Carry only validated user edits,

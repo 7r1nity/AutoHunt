@@ -6,6 +6,7 @@ from decimal import Decimal
 
 
 NUMBER = r"(?:\d{1,3}(?:[,，]\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?|[零〇一二两三四五六七八九十百千万]+)"
+ASSIGNMENT = r"(?:改成|改为|改到|设为|设置为|调整为|调整到|换成|在|为)?\s*[:：]?\s*"
 
 
 def numeric_value(value: str) -> int:
@@ -17,32 +18,25 @@ def numeric_value(value: str) -> int:
     digits.update({"〇": 0, "两": 2})
     if all(char in digits for char in text):
         return int("".join(str(digits[char]) for char in text))
-    total, section, number = 0, 0, 0
-    last_unit = 1
-    for char in text:
-        if char in digits:
-            number = digits[char]
-        elif char in {"十", "百", "千"}:
-            last_unit = {"十": 10, "百": 100, "千": 1000}[char]
-            section += (number or 1)*last_unit
-            number = 0
-        elif char == "万":
-            total += (section+number or 1)*10000
-            section, number, last_unit = 0, 0, 10000
+    if not text or any(char not in digits and char not in "十百千万" for char in text):
+        raise ValueError("数值格式无效")
+    # Decompose at the highest unit, rather than prematurely settling 十 in
+    # 十五千. Supports standard numerals and multiplier phrases with one grammar.
+    for char, unit in (("万", 10000), ("千", 1000), ("百", 100), ("十", 10)):
+        if char not in text:
+            continue
+        if text.count(char) != 1:
+            raise ValueError("数值单位重复")
+        left, right = text.split(char)
+        prefix = numeric_value(left) if left else 1
+        if len(right) == 1 and right in digits and unit >= 100:
+            suffix = digits[right] * (unit // 10)
+        elif right:
+            suffix = numeric_value(right.lstrip("零〇") or "零")
         else:
-            raise ValueError("数值格式无效")
-    # Spoken 一万五 / 一千五 are 15000 / 1500, not 10005 / 1005: a quantity ending in a
-    # bare digit after a unit omits that unit. The shorthand requires the numeral to end
-    # in digit-after-unit; "十五千" states its unit, so it is 15000 and must not be scaled
-    # down (it used to parse as 5010). Note `number` is always 0 here because the unit
-    # consumed it, so the test reads the text instead.
-    trailing_omission = (last_unit >= 100 and len(text) >= 2 and text[-1] in digits
-                         and text[-2] in {"十", "百", "千", "万"} and not re.search(r"[零〇]", text))
-    return total + section + number * (last_unit // 10 if trailing_omission else 1)
-
-
-def employment_requirement(message: str) -> bool:
-    return bool(re.search(r"(?:只要|仅|尽量|优先|要求|找|排除|不要|不考虑).{0,12}(?:实习|校招|应届|社招|兼职)|(?:实习|校招|应届|社招).{0,5}(?:优先|为主)", message))
+            suffix = 0
+        return prefix * unit + suffix
+    raise ValueError("数值格式无效")
 
 
 def missing_search_message(has_resume: bool) -> str:
@@ -230,7 +224,7 @@ def explicit_search_constraints(message: str, *, unresolved: list[str] | None = 
         if key in fields and fields[key] != value:
             raise ValueError(f"{key} 存在冲突值，请明确最终条件")
         fields[key] = value
-    count_pattern = rf"(?:找|搜(?:索)?|需要|提供|给我|目标数量|结果数量|岗位数量|职位数量|数量)\s*[:：]?\s*({NUMBER})\s*(?:份|个|条)"
+    count_pattern = rf"(?:找|搜(?:索)?|需要|提供|给我|目标数量|结果数量|岗位数量|职位数量|数量)\s*{ASSIGNMENT}({NUMBER})\s*(?:份|个|条)"
     for count in re.finditer(count_pattern, message):
         put("result_limit", numeric_value(count[1]))
     # A standalone count is a result target even without repeating '找/数量'.
@@ -238,9 +232,9 @@ def explicit_search_constraints(message: str, *, unresolved: list[str] | None = 
     # not accidentally parsed as a number of jobs.
     for count in re.finditer(rf"(?:^|[\s，,；;])({NUMBER})\s*(?:份|个|条)(?:左右|上下)?(?=$|[\s，,；;。])", message):
         put("result_limit", numeric_value(count[1]))
-    for count in re.finditer(rf"(?:目标数量|结果数量|岗位数量|职位数量|数量)\s*[:：]?\s*({NUMBER})(?![\d,，.])", message):
+    for count in re.finditer(rf"(?:目标数量|结果数量|岗位数量|职位数量|数量)\s*{ASSIGNMENT}({NUMBER})(?![\d,，.])", message):
         put("result_limit", numeric_value(count[1]))
-    salary_pattern = (rf"(?:薪资|月薪|工资|薪水|薪酬)(?:水平)?\s*(?:在|为|至少|不低于|不要低于|最低|达到|大于)?\s*"
+    salary_pattern = (rf"(?:薪资|月薪|工资|薪水|薪酬)(?:水平)?\s*{ASSIGNMENT}(?:至少|不低于|不要低于|最低|达到|大于)?\s*"
                       rf"({NUMBER})(?![\d,，.])\s*([kK千万]|元)?\s*(?:/月|每月)?\s*(以上|以下|以内|不超过)?")
     salaries = list(re.finditer(salary_pattern, message))
     if not salaries:

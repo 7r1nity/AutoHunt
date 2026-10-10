@@ -76,6 +76,9 @@ def leaf(text="合成筛选条件"):
 
 async def evaluate(case, scratch):
     kind, p, e = case["kind"], case["payload"], case["expected"]
+    if kind == "semantics":
+        from .semantics_contract import evaluate as semantics_evaluate
+        return await semantics_evaluate(case, REGISTRY)
     if kind == "authority":
         message = p["message"]
         parsed = parse_search_message(message)
@@ -303,6 +306,8 @@ async def execution_case(scenario, database):
 async def supplementary(scratch):
     """Adversarial lifecycle, idempotency, routing and schema cases."""
     specs = []
+    from .semantics_contract import cases as semantic_cases
+    specs.extend(semantic_cases())
     for scenario in ("retry_read", "no_retry_write", "permission_no_retry", "cancel_retry", "watch_idle", "watch_human", "watch_active", "joined_cancel", "root_after_repair", "retained_idle", "duplicate_tool", "loop_budget", "resume_refresh", "filter_source", "filter_depth", "filter_unknown_operator"):
         specs.append(dict(id="adversarial-" + scenario, kind="adversarial", family=scenario, split="challenge", payload={"scenario": scenario}, expected={"contract": scenario}))
     # Small-model policy, with no small-model inference: this tests degradation,

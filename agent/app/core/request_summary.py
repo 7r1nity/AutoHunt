@@ -34,7 +34,7 @@ def is_search_summary(message: str) -> bool:
 
 def requested_search_summary(message: str) -> str | None:
     """Ground the summary's object; a gap/resume summary is not a results read."""
-    from .action_language import positive_action
+    from .task_semantics import understand
     from .search_contract import downstream_condition_scopes
     learning_spans = [(start, end) for start, end, tool in downstream_condition_scopes(message)
                       if tool == "learning_plan_generate"]
@@ -43,7 +43,7 @@ def requested_search_summary(message: str) -> str | None:
         prefix = re.split(r"[，,。；;\n]|然后|并且|同时|接着", before)[-1]
         suffix = re.split(r"[，,。；;\n]|然后|并且|同时|接着", message[match.end():])[0]
         clause = prefix + match.group() + suffix
-        if not positive_action(clause) or re.search(r"如果|假如|假设|举例|例如|我说过|上次说|[‘’`『』]", clause):
+        if not understand(message).bind("job_results_read", clause):
             continue
         # Explicit results objects still apply, even alongside a learning goal.
         explicit_search = bool(re.search(

@@ -19,6 +19,7 @@ from ..runtime.dialogue import bounded_data, compact_state, resolve_reference, A
 from ..runtime.search_state import merge_search_state, prepare_search_state
 from .search_contract import explicit_search_constraints, missing_search_message, safe_role_keyword
 from .search_language import parse_search_message
+from .task_semantics import understand, binding_valid, command_grounded
 from .job_filters import filter_schema
 from ..runtime.resilience import classify_failure, safe_retry
 
@@ -38,6 +39,13 @@ class AgentToolSpec:
     parameters: dict[str, Any]
     effect: str
     executor: Callable[[dict[str, Any]], Awaitable[Any]]
+
+    def capability_contract(self) -> dict:
+        from .task_semantics import ACTION_PATTERNS
+        return {"tool": self.name, "effect": self.effect,
+                "action": self.name if self.name in ACTION_PATTERNS else None,
+                "requires_user_command": self.effect != "read",
+                "argument_schema": self.parameters}
 
     def openai_schema(self) -> dict[str, Any]:
         return {
@@ -80,7 +88,6 @@ class AgentToolOutcome:
 
 class AgentToolPolicy:
     READ_EFFECTS = {"read"}
-    EXPLICIT_MUTATION_TERMS = ("更新", "修改", "设置", "移除", "删除", "去除", "保存")
 
     def authorize(
         self,
@@ -101,41 +108,48 @@ class AgentToolPolicy:
         context = active_run()
         authority = context.action_authority if context else None
         if authority:
-            from ..workflow.planning import command_grounded
             from ..growth.requests import resume_stamp
             instruction = (context.dialogue or {}).get("instruction_request") or {}
             if instruction.get("id") == authority.get("plan_id") and spec.name in instruction.get("revoked_tools", []):
                 return False, "用户已撤回该工作流动作，不能沿用原授权"
+            binding = authority.get("binding")
+            if binding:
+                saved_step = next((step for step in instruction.get("steps", [])
+                                   if step.get("id") == authority.get("step_id")), {})
+                grounded = (instruction.get("id") == authority.get("plan_id")
+                    and saved_step.get("authority_binding") == binding
+                    and saved_step.get("tool") == spec.name
+                    and saved_step.get("arguments") == arguments
+                    and binding_valid(binding, spec.name, authority["sources"]))
+            else:
+                # Read old checkpoints conservatively during migration. New
+                # validated plans always use the persisted semantic binding.
+                grounded = command_grounded(spec.name, user_message, authority["sources"])
             if (authority.get("tool") != spec.name or authority.get("arguments") != arguments
                     or authority.get("command") != user_message
                     or authority.get("expires_at", 0) < time.time()
                     or authority.get("resume_stamp") != resume_stamp(authority["resumes"].read_document(), authority["candidate"])
-                    or not command_grounded(spec.name, user_message, authority["sources"])):
+                    or not grounded):
                 return False, "工作流步骤授权已失效或参数不一致"
             return True, "当前用户授权的有限工作流步骤；仍需参数、引用与执行器校验"
         if spec.name == "context_action_propose":
             return (active_run() is not None, "只创建待确认动作，不构成执行授权")
         if spec.name == "job_review_selection":
-            if re.search(r"不要|先别|怎么|如何|是否|[？?]", user_message) or not re.search(r"(?:通过|同意|接受).{0,8}审核|审核.{0,8}(?:通过|同意)|批准", user_message):
+            if not understand(user_message).commands(spec.name):
                 return False, "本地审核需要明确的审核命令"
             return True, "只记录本地审核，不发起沟通或投递"
         if spec.name == "search_state_update":
-            from .search_contract import simple_search_patch
-            from .main_agent import _KNOWN_CITIES, _search_command
             if active_run() is None:
                 return False, "会话状态工具需要当前会话"
             from ..runtime.dialogue import slot_answer_patch
             if slot_answer_patch(active_run().dialogue or {}, user_message):
                 return True, "根据明确追问补充单个槽位，不启动搜索"
-            if re.search(r"怎么|如何|为什么|是否|能不能|建议|合理|[？?]", user_message):
-                return False, "询问不是修改会话条件的授权"
-            if not (simple_search_patch(user_message, _KNOWN_CITIES) or _search_command(user_message)
-                    or re.search(r"(?:改|换|调整|设置|取消|去掉|不限|地点|城市|数量|关键词|方向|薪资|月薪)", user_message)):
+            meaning = understand(user_message)
+            if not (meaning.commands(spec.name) or meaning.commands("job_search_start")):
                 return False, "没有明确的搜索条件调整意图"
             return True, "只更新本会话条件，不授权浏览器操作"
         if state.external_effect_started:
             return False, "本轮已经执行过一个外部副作用操作，禁止继续执行第二个"
-        compact = user_message.replace(" ", "")
         if spec.name == "mock_delivery_start":
             from .action_language import explicit_mock_delivery
             if not explicit_mock_delivery(user_message):
@@ -143,7 +157,7 @@ class AgentToolPolicy:
             if re.search(r"boss|直聘|智联|猎聘|真实网站", user_message, re.I):
                 return False, "自动投递只支持本地模拟站，不支持真实招聘网站"
         elif spec.name == "mock_delivery_cancel":
-            if not re.search(r"(?:停止|取消|关闭|暂停|不要再)自动投递", compact):
+            if not understand(user_message).commands(spec.name):
                 return False, "停止投递队列需要明确的停止命令"
         elif spec.name == "job_search_start":
             parsed = parse_search_message(user_message)
@@ -152,10 +166,10 @@ class AgentToolPolicy:
             if parsed.reason == "conflicting_parameters":
                 return False, "同一搜索条件出现重复且冲突的值；请先明确最终城市、数量或薪资，不猜测执行"
         elif spec.name == "preference_update":
-            if not any(term in compact for term in self.EXPLICIT_MUTATION_TERMS) or not any(term in compact for term in ("偏好", "长期", "持久化")):
+            if not understand(user_message).commands(spec.name):
                 return False, "更新持久化偏好需要用户明确要求修改"
         elif spec.name == "resume_propose_patch":
-            if not any(term in compact for term in ("修改简历", "更新简历", "改成", "改为", "压缩", "删除")):
+            if not understand(user_message).commands(spec.name):
                 return False, "生成简历修改提案需要明确的修改要求"
         elif spec.name == "learning_plan_generate":
             from ..growth.requests import continued_plan_scope
@@ -164,7 +178,6 @@ class AgentToolPolicy:
             if not is_explicit_plan_request(user_message) and continuation is None:
                 return False, "生成持久化学习计划需要用户明确发出命令"
         elif spec.name in {"browser_task_resume", "browser_task_stop", "browser_task_pause"}:
-            from ..workflow.planning import command_grounded
             if not command_grounded(spec.name, user_message, [user_message]):
                 return False, "浏览器控制需要本轮明确正向指令，询问或引用不授权"
         if spec.effect == "external":

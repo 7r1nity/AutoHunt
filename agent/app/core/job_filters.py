@@ -14,6 +14,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ..llm.base import LLMRequest
+from .task_semantics import condition_mode
 
 
 class FilterExpression(BaseModel):
@@ -21,6 +22,7 @@ class FilterExpression(BaseModel):
     op: Literal["condition", "all", "any", "not"]
     text: str = Field(default="", max_length=400)
     quote: str = Field(default="", max_length=1000)
+    mode: Literal["require", "prefer", "allow"] = "require"
     children: list[FilterExpression] = Field(default_factory=list, max_length=16)
 
     @model_validator(mode="after")
@@ -28,7 +30,7 @@ class FilterExpression(BaseModel):
         if self.op == "condition":
             if not self.text.strip() or self.children:
                 raise ValueError("筛选叶节点需要用户条件原文，不能包含子节点")
-        elif self.text or not self.children or self.op == "not" and len(self.children) != 1:
+        elif self.mode != "require" or self.text or not self.children or self.op == "not" and len(self.children) != 1:
             raise ValueError("组合节点仅包含子节点；not 必须有且只有一个子节点")
         def count(node, depth=1):
             if depth > 4:
@@ -46,6 +48,8 @@ def filter_schema(depth=4):
     properties = {"op": {"type": "string", "enum": ["condition", "all", "any", "not"]},
                   "text": {"type": "string", "maxLength": 400},
                   "quote": {"type": "string", "maxLength": 1000, "description": "用户的连续原文；text可补齐此原文中的语义省略，不得增添要求"}}
+    properties["mode"] = {"type": "string", "enum": ["require", "prefer", "allow"],
+        "description": "叶节点强度：必须=require，尽量/优先=prefer，可以有/也可以=allow；组合节点仅require"}
     if depth > 1:
         properties["children"] = {"type": "array", "maxItems": 16, "items": filter_schema(depth - 1)}
     else:
@@ -57,17 +61,28 @@ def validate_filter(value, sources=()):
     expression = FilterExpression.model_validate(value)
     if sources and any(not any((leaf.quote or leaf.text) in source for source in sources) for leaf in expression.leaves()):
         raise ValueError("筛选条件必须引用用户原文或已保存的会话条件，不能由模型添加偏好")
+    if sources:
+        for leaf in expression.leaves():
+            mode = condition_mode(leaf.quote or leaf.text)
+            if leaf.mode != mode:
+                raise ValueError("条件强度与原文不一致；请引用该子条件的完整独立片段，不能把偏好升为硬条件或放宽硬条件")
     return expression
 
 
 def combine(expression, verdicts):
-    if expression.op == "condition":
-        return next(verdicts)
-    values = [combine(child, verdicts) for child in expression.children]
-    if expression.op == "not":
-        return {"pass": "fail", "fail": "pass", "unknown": "unknown"}[values[0]]
-    decisive, neutral = ("fail", "pass") if expression.op == "all" else ("pass", "fail")
-    return decisive if decisive in values else neutral if all(value == neutral for value in values) else "unknown"
+    def visit(node):
+        if node.op == "condition":
+            value = next(verdicts)
+            return value if node.mode == "require" else None
+        values = [visit(child) for child in node.children]
+        values = [value for value in values if value is not None]
+        if not values:
+            return None
+        if node.op == "not":
+            return {"pass": "fail", "fail": "pass", "unknown": "unknown"}[values[0]]
+        decisive, neutral = ("fail", "pass") if node.op == "all" else ("pass", "fail")
+        return decisive if decisive in values else neutral if all(value == neutral for value in values) else "unknown"
+    return visit(expression) or "pass"
 
 
 def filter_digest(expression):
@@ -81,7 +96,7 @@ def filter_summary(value):
     node = validate_filter(value)
     def render(node):
         if node.op == "condition":
-            return node.text
+            return {"require": "", "prefer": "优先（不排除其他）：", "allow": "允许包含："}[node.mode] + node.text
         parts = [render(child) for child in node.children]
         return "非（" + parts[0] + "）" if node.op == "not" else "（" + (" 且 " if node.op == "all" else " 或 ").join(parts) + "）"
     return render(node)
@@ -143,5 +158,7 @@ async def evaluate_filter(generate, expression, facts):
         # asyncio cancellation is BaseException: user stop must propagate.
         judgments = [{**item, "status": "unknown", "reason": "筛选服务不可用或输出不完整，需核实", "evidence": []} for item in judgments]
     result["status"] = combine(expression, iter(item["status"] for item in judgments))
-    result["conditions"] = [{"text": leaf.text, "quote": leaf.quote or leaf.text, **item} for leaf, item in zip(leaves, judgments)]
+    result["conditions"] = [{"text": leaf.text, "quote": leaf.quote or leaf.text, "mode": leaf.mode, **item} for leaf, item in zip(leaves, judgments)]
+    result["preferences"] = [item for item in result["conditions"] if item["mode"] == "prefer"]
+    result["ranking_applied"] = False  # Annotated preference, not global-site ranking.
     return result

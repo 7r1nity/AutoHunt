@@ -50,7 +50,8 @@ def is_continuation(message: str) -> bool:
     text = message.strip()
     if text == "重新开始":
         return False  # Existing explicit temporary-context reset, not task retry.
-    return bool(CONTINUE.fullmatch(text) or BOUND_RETRY.fullmatch(text))
+    from ..core.task_semantics import retained_reference
+    return bool(CONTINUE.fullmatch(text) or BOUND_RETRY.fullmatch(text) or retained_reference(text))
 
 
 def action_request(message: str) -> bool:
@@ -58,12 +59,10 @@ def action_request(message: str) -> bool:
     from ..core.request_summary import is_request_summary, is_search_summary
     if is_continuation(message) or is_request_summary(message) or is_search_summary(message) or not re.search(r"[\w\u4e00-\u9fff]", message):
         return False  # References and repair signals are not new task definitions.
-    from .planning import command_grounded, MUTATION_CUES
-    from ..core.action_language import action_clauses
-    clauses = action_clauses(message)
-    return any(command_grounded(tool, clause.strip(), [message])
-               for tool in MUTATION_CUES if tool not in {"browser_task_resume", "browser_task_pause", "browser_task_stop", "search_state_update"}
-               for clause in clauses)
+    from ..core.task_semantics import understand, ACTION_PATTERNS
+    meaning = understand(message)
+    return any(meaning.commands(tool) for tool in ACTION_PATTERNS if tool not in {
+        "browser_task_resume", "browser_task_pause", "browser_task_stop", "mock_delivery_cancel", "search_state_update"})
 
 
 def request_selector(message: str) -> str:
@@ -249,20 +248,20 @@ def stale_questions(questions: list[str], record: TaskRequest | None,
     carried salary_min=15000. Only the questions this module can check are filtered;
     anything else is still asked, because answering for the user would be worse.
     """
-    facts: dict[str, bool] = {}
-    sources = [*(steps or []), {"arguments": getattr(record, "arguments", {}) if record else {}}]
+    facts = dict(record.conditions if record else {})
+    sources = steps or []
     for step in sources:
         for key, value in (step.get("arguments") or {}).items():
             if value is not None:
-                facts[key] = True
+                facts[key] = value
     for key, value in (conditions or {}).items():
         if value is not None:
-            facts[key] = True
+            facts[key] = value
 
     def satisfied(value) -> bool:
         # A list or a number counts; an empty list means "no restriction" and does
         # not satisfy a question that asks for one.
-        return bool(value) if not isinstance(value, (int, float)) else True
+        return bool(value) if type(value) not in {int, float} else True
 
     checks = (
         (r"最低月薪|月薪下限|薪资限制", "salary_min"),

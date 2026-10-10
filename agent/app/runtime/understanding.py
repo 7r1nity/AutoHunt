@@ -42,7 +42,9 @@ def turn_role(message: str, *, patch: dict | None = None) -> TurnRole:
         return TurnRole("command", True)
     if patch:
         return TurnRole("update")
-    if search.action == "results" or re.search(r"为什么|怎么|如何|是否|[？?]", text):
+    from ..core.task_semantics import understand
+    meaning = understand(text)
+    if search.action == "results" or any(item.kind == "question" for item in meaning.actions):
         return TurnRole("question")
     return TurnRole("unresolved")
 

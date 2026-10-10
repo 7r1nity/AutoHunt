@@ -91,11 +91,8 @@ def _comparable(text: str) -> str:
 
 
 def is_explicit_plan_request(message: str) -> bool:
-    from ..core.action_language import positive_action
-    compact = re.sub(r"\s+", "", message)
-    if not positive_action(message):
-        return False
-    return bool(re.search(r"(?:生成|制定|创建|规划|更新|补充|做一份|给我一份|帮我做|帮我写).{0,16}(?:学习计划|成长计划|提升计划|行动方案|学习方案)", compact))
+    from ..core.task_semantics import understand
+    return bool(understand(message).commands("learning_plan_generate"))
 
 
 class LearningPlanService:

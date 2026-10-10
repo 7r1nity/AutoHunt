@@ -21,6 +21,8 @@ from ..core.action_language import positive_action, score_scope, score_scope_in_
 from ..core.search_contract import (explicit_search_constraints, safe_role_keyword,
                                   downstream_condition_scopes, search_constraint_text)
 from ..core.search_language import parse_search_message
+from ..core.task_semantics import (ACTION_PATTERNS, command_grounded, understand_sources,
+                                   retained_reference, binding_for)
 from ..llm.base import LLMRequest
 from ..runtime.context import emit, active_run, current_run
 from .validation import (PlanValidationError, normalize_encoding, encoding_schema, dependency_ancestors,
@@ -29,27 +31,11 @@ from .validation import (PlanValidationError, normalize_encoding, encoding_schem
 INTERNAL_TOOLS = {"context_action_propose", "context_question_ask"}
 PLANNING_TIMEOUT = 60
 EVIDENCE_TOOLS = {"learning_plan_generate", "mock_delivery_start", "job_results_read", "job_stats_read"}
-MUTATION_CUES = {
-    "job_search_start": r"搜索|检索|查找|(?:帮我|我想|我希望|请|再).*找|^找",
-    "search_state_update": r"改|换|调整|设置|不限|取消.*限制|城市|地点|数量|薪资|月薪|方向|关键词",
-    "preference_update": r"(?:更新|修改|设置|调整|保存).*(?:长期|持久化|偏好)",
-    "resume_propose_patch": r"(?:修改|更新|补充|润色|优化|美化|精简|压缩|删除|加入|写进).*(?:简历|项目|经历)|(?:简历|项目|经历).*(?:改|删|优化|精简|润色)",
-    "learning_plan_generate": r"(?:生成|制定|创建|规划|更新|补充|安排|做|写|给我).*(?:学习计划|成长计划|提升计划|行动方案|学习方案)",
-    "mock_delivery_start": r"投递|提交申请|(?:发送|提交)简历",
-    "mock_delivery_cancel": r"(?:停止|取消|关闭|暂停|不要再).*投递",
-    "browser_task_stop": r"停止|中断|取消|结束搜索|别搜了",
-    "browser_task_pause": r"暂停|先停|停一停",
-    "browser_task_resume": r"继续|恢复|接着|确认登录|登录完成|验证完成",
-    "job_review_selection": r"(?:通过|同意|接受|批准).*审核|审核.*(?:通过|同意|批准)",
-}
+MUTATION_CUES = ACTION_PATTERNS  # Compatibility alias, not a second grammar.
 
 
 def revoked(tool: str, sources: list[str]) -> bool:
-    pattern = {"mock_delivery_start": r"(?:不要|不再|先别|取消)(?:再|自动)?投递|不投递",
-               "learning_plan_generate": r"(?:不要|不再|先别|取消)(?:生成|更新)?.*(?:学习计划|成长计划)",
-               "job_search_start": r"不要(?:再)?(?:搜索|检索)|别搜|取消搜索"}.get(tool)
-    return bool(pattern and any(re.search(pattern, clause) for source in sources[1:]
-                               for clause in action_clauses(source)))
+    return tool in understand_sources(tuple(sources)).revoked_tools
 
 
 class Strict(BaseModel):
@@ -79,55 +65,6 @@ class RequestDraft(Strict):
     steps: list[PlannedStep] = Field(default_factory=list, max_length=8)
     questions: list[str] = Field(default_factory=list, max_length=8)
     reply: str = Field(default="", max_length=1500)
-
-
-def command_grounded(tool: str, quote: str, sources: list[str]) -> bool:
-    """A model cannot carve a positive command out of a negative/question/quote."""
-    cue = MUTATION_CUES.get(tool)
-    # Search authority has ONE grammar shared with routing and the runtime gate.
-    # A second cue list previously rejected '给我找工作' after parsing accepted it.
-    search_command = tool in {"job_search_start", "search_state_update"} and bool(quote) and parse_search_message(quote).authorized
-    if not cue or not quote or not (re.search(cue, quote, re.I) or search_command):
-        return False
-    if tool == "job_search_start" and not parse_search_message(quote).authorized:
-        return False  # "根据搜索结果生成计划" mentions search, but does not start one.
-    if tool == "mock_delivery_start" and re.search(
-            r"^(?:请|帮我)?\s*(?:查看|读取|统计|总结|分析|根据|基于|了解).{0,20}投递(?:状态|进度|记录|结果|情况|统计|数据)", quote):
-        return False  # An action mentioned as input/status is not its execution.
-    for source in sources:
-        if re.match(r"\s*(?:如果|假如|假设|要是)", source):
-            continue
-        for occurrence in re.finditer(re.escape(quote), source):
-            prefix = source[:occurrence.start()]
-            # Clause boundaries, not arbitrary word deletion. Keep negation and
-            # modality before the quoted command ("不要" / "如果" / "怎么").
-            prefix = re.split(ACTION_BOUNDARY + r"|[？?]", prefix)[-1]
-            suffix = re.split(ACTION_BOUNDARY, source[occurrence.end():])[0]
-            guarded = prefix + quote + suffix
-            # Quoted text inside a command is a criterion value ("JD包含‘海外市场’"), not
-            # evidence that the whole command is being quoted. Testing the intact span
-            # for quotes made command_grounded false for every request whose criteria
-            # contain one, so a legitimate search was refused; search_language already
-            # distinguishes a quoted criterion from a quoted command.
-            from ..core.search_language import is_conditional_criterion, strip_quoted_spans
-            unquoted = strip_quoted_spans(guarded)
-            if re.search(r"建议|能否|能不能|可不可以|[“”‘’\"`『』]", unquoted):
-                continue
-            # 如果/假设 conditioning the *command* is a hypothetical; conditioning a
-            # criterion ("如果是实习必须有转正机会") qualifies the search and is honoured.
-            if re.search(r"如果|假如|假设|要是", unquoted) and not is_conditional_criterion(unquoted):
-                continue
-            if tool in {"mock_delivery_cancel", "browser_task_stop"}:
-                if not re.search(r"怎么|如何|为什么|是否|不要(?:停止|取消|中断)|别(?:停止|取消)|不(?:停止|取消)|[？?]", guarded):
-                    return True
-            elif tool == "job_search_start":
-                # Negative job constraints are not negative search consent.
-                # Inspect the intact source clause, never a carved positive span.
-                if parse_search_message(guarded).authorized and parse_search_message(source).reason != "negated":
-                    return True
-            elif positive_action(guarded):
-                return True
-    return False
 
 
 def live_request(dialogue: dict, stamp: str) -> dict | None:
@@ -292,7 +229,9 @@ async def plan_request(llm, registry, message: str, *, dialogue: dict, condition
             "不要外包/不需要经验等是否定岗位条件，不是否定搜索；给我找工作本身是明确搜索授权。"
             "可以有实习/实习也可以仅表示允许包含，不等于只找实习，也不是必须提供转正机会；不能因此排除社招。"
             "新条件在原会话filters上增补或改动，仅明确取消才能清除；修改后提交完整树。"
-            "filters是硬条件，不能把尽量/优先自动升级为必须；当前不支持通用软偏好排序，需要澄清该偏好是否可不排序或改为硬条件。"
+            "filters叶节点mode区分require(必须)、prefer(尽量/优先)、allow(可以有/也可以)，组合节点mode=require。"
+            "每个叶节点quote引用本子条件完整原文，不能引用混合不同强度的一整段而丢失作用域。"
+            "软偏好只作证据标注，不排除其他岗位、不承诺全站最优排序；允许包含不限制其他类型，不需让用户改成硬条件。"
             "先查看简历再提出修改、读结果再查看某职位、条件更新后重新搜索，也要写真实depends_on。"
             "投递仅本地模拟站有限队列，必须有明确分数下限；高/低匹配无数字则追问，不能默认90。"
             "成长/学习/提升计划同义；更新也是显式请求。scope_quote分别引用各动作的匹配分范围，"
@@ -309,7 +248,12 @@ async def plan_request(llm, registry, message: str, *, dialogue: dict, condition
             "输出不得包含type/json_object等格式元数据。以下是完整输出schema："
             + json.dumps(RequestDraft.model_json_schema(), ensure_ascii=False)
         ), user_message=json.dumps({"message": message, "pending_request": previous,
-            "conditions": conditions, "dialogue": model_dialogue, "capabilities": schemas}, ensure_ascii=False),
+            "conditions": conditions, "dialogue": model_dialogue, "capabilities": schemas,
+            "action_semantics": understand_sources(tuple([previous["original"], *previous.get("answers", []), message]
+                if previous else [message])).public(),
+            "capability_contracts": [{"tool": spec.name, "effect": spec.effect,
+                "action": spec.capability_contract()["action"]} for spec in registry._tools.values()
+                if spec.name not in INTERNAL_TOOLS]}, ensure_ascii=False),
         context="将意图分类、参数完整性、动作授权和执行状态分别判断。", fast=True,
         json_output=True, max_output_tokens=4096)
     # Deterministic extraction could not fully consume these spans. They are not
@@ -333,16 +277,9 @@ def contextual_draft(message: str, previous: dict | None, schemas: list[dict]) -
     Every returned draft still crosses the same source/authority/constraint gate.
     """
     from ..core.action_language import plan_scope_answer
-    from ..core.search_contract import employment_requirement
-    from .requests import employment_dropped
     original = previous["original"] if previous else message
-    answers = [*previous.get("answers", []), message] if previous else []
-    dropped = employment_dropped(previous, answers)
-    search_schema = next((s["function"]["parameters"] for s in schemas if s["function"]["name"] == "job_search_start"), {})
-    if employment_requirement(original) and not dropped and not any(key in search_schema.get("properties", {}) for key in ("recruitment_types", "employment_type", "employment_types")):
-        if any(command_grounded("job_search_start", c.strip(), [original]) for c in re.split(r"[，,。；;\n]", original)):
-            return RequestDraft(continuation=bool(previous), goals=[Goal(quote=original, disposition="clarify")],
-                questions=["当前执行器不支持实习/校招等招聘类型的筛选或优先排序。原请求的其他目标保留；是否去掉招聘类型条件后继续？"])
+    # Open constraints belong to the generic filter contract. A failed regex or
+    # absent legacy employment-type field is not a capability denial.
     if previous and previous.get("status") == "clarifying" and plan_scope_answer(message):
         clauses = action_clauses(original)
         actions = {name for name in MUTATION_CUES for c in clauses if command_grounded(name, c, [original])}
@@ -388,6 +325,8 @@ def _validate_draft(draft: RequestDraft, registry, message: str, *, dialogue: di
     original = previous["original"] if continued else message
     answers = [*previous.get("answers", []), message][-12:] if continued else []
     sources = [original, *answers]
+    meaning = understand_sources(tuple(sources))
+    emit("task_semantics", **meaning.public())
     # Models sometimes collapse double spaces/newlines while copying a source.
     # Restore the exact continuous raw span rather than expanding trusted sources
     # to arbitrary dialogue/history or spending another model round on spacing.
@@ -446,13 +385,6 @@ def _validate_draft(draft: RequestDraft, registry, message: str, *, dialogue: di
                 raise PlanValidationError("missing_summary_read", "整体搜索总结需要独立的结果读取步骤", tool="job_results_read")
             for read in summary_reads:
                 read["arguments"]["summary"] = True
-    # Unsupported filters are capability gaps, not an excuse to silently drop them.
-    from ..core.search_contract import employment_requirement
-    from .requests import employment_dropped
-    dropped_employment = continued and employment_dropped(previous, answers)
-    if employment_requirement(original) and not dropped_employment and any(step["tool"] == "job_search_start" for step in steps):
-        if not all(step["arguments"].get("filters") for step in planned_searches):
-            questions.append("规划尚未保留招聘类型条件，请明确是否作为必须满足的条件；不会忽略条件执行。")
     if any(goal.disposition == "unsupported" for goal in draft.goals):
         questions.append("请求含暂不支持的目标；请明确是否只执行支持的部分。" + draft.reply)
     explicit = {}
@@ -530,7 +462,8 @@ def _validate_draft(draft: RequestDraft, registry, message: str, *, dialogue: di
             candidates = action_clauses(quote)
             grounded = next((clause for clause in candidates
                              if clause and command_grounded(name, clause, sources)), None)
-            bound_reference = bool(continued and is_continuation(message) and quote and quote in message)
+            bound_reference = bool(continued and (is_continuation(message) or retained_reference(message))
+                                   and quote and quote in message)
             if grounded is None and bound_reference:
                 # A retry names the task, not a new action/keyword. Recover only
                 # this tool's uniquely authorized action from its bound root.
@@ -558,7 +491,13 @@ def _validate_draft(draft: RequestDraft, registry, message: str, *, dialogue: di
                 quote = step["command_quote"] = grounded
                 quote_grounded = True
         if spec.effect != "read" and not quote_grounded:
-            raise PlanValidationError("missing_authority", f"{name} 未获得当前用户的明确授权", category="block", tool=name)
+            meaning = understand_sources(tuple(sources))
+            # A wrong citation of an existing command is a planner defect. Lack of
+            # a real command remains a block; repairing JSON cannot grant consent.
+            category = "repair" if meaning.commands(name) else "block"
+            raise PlanValidationError("missing_authority", f"{name} 未获得当前用户的明确授权", category=category, tool=name)
+        if quote_grounded:
+            step["authority_binding"] = binding_for(meaning.bind(name, quote), sources)
         try:
             registry.validate_arguments(encoding_schema(spec.parameters), args)
         except ValueError as exc:
@@ -812,7 +751,10 @@ def _validate_draft(draft: RequestDraft, registry, message: str, *, dialogue: di
     return {"id": previous["id"] if continued else uuid.uuid4().hex, "original": original, "answers": answers,
         "condition_overrides": overrides, "verified_conditions": verified_conditions,
         "revoked_tools": revoked_tools,
-        "validation": {"version": 2, "issues": [{"code": "user_information_required", "category": "clarify", "detail": q} for q in dict.fromkeys(questions)]},
+        "understanding": {**meaning.public(), "goals": [{"id": step["id"], "tool": step["tool"],
+            "conditions": step["arguments"], "depends_on": step["depends_on"],
+            "authority_binding": step.get("authority_binding")} for step in steps]},
+        "validation": {"version": 3, "issues": [{"code": "user_information_required", "category": "clarify", "detail": q} for q in dict.fromkeys(questions)]},
         "goals": goals, "steps": steps, "questions": list(dict.fromkeys(questions)),
         "reply": draft.reply, "resume_stamp": stamp, "turn": dialogue.get("turn", 0),
         "expires_at": time.time() + (600 if questions else 1800), "status": "clarifying" if questions else "ready"}

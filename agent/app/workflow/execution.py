@@ -24,7 +24,8 @@ def persist(plan: dict) -> None:
         plan["revoked_tools"] = sorted(set(plan.get("revoked_tools", [])) | set(previous.get("revoked_tools", [])))
     dialogue_change("instruction", request={"revoked_tools": plan.get("revoked_tools", []), "condition_overrides": plan.get("condition_overrides", {}), **{key: plan[key] for key in
         ("id", "original", "answers", "questions", "resume_stamp", "turn", "expires_at", "status", "goals")},
-        "steps": [{key: step.get(key) for key in ("id", "tool", "arguments", "depends_on", "missing_slots", "status")}
+        "understanding": plan.get("understanding"),
+        "steps": [{key: step.get(key) for key in ("id", "tool", "arguments", "depends_on", "missing_slots", "status", "authority_binding")}
                   for step in plan["steps"]]})
 
 
@@ -76,6 +77,7 @@ async def advance(plan: dict, registry) -> list[dict]:
                 "resume_stamp": plan["resume_stamp"], "expires_at": plan["expires_at"],
                 "candidate": registry.candidate_state, "resumes": registry.resume_workspace,
                 "evidence_task_id": task_id, "plan_id": plan["id"], "step_id": step["id"]}
+            authority["binding"] = step.get("authority_binding")
             step.update(status="claimed")
             persist(plan)  # Durable claim BEFORE the executor or any write.
             emit("plan_step", step_id=step["id"], tool=step["tool"], status="claimed", depends_on=step["depends_on"])
