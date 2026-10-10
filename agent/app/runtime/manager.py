@@ -374,7 +374,7 @@ class AgentRuntime:
 
     async def watch_plan(self, run_id: str):
         """Observe asynchronous dependencies without holding model/session slots."""
-        from ..workflow.execution import advance, DONE, persist, render_step
+        from ..workflow.execution import advance, DONE, persist, completion_lines
         run = self.store.get(run_id)
         # A missing plan checkpoint must not raise a bare KeyError that hides the
         # reason. The clarifying questions survive in the dialogue state, so the
@@ -469,10 +469,11 @@ class AgentRuntime:
                             current_run.reset(token)
             if all(step["status"] in DONE for step in plan["steps"]):
                 if not self.store.has_event(run_id, "workflow_summary") and any(step.get("task_id") or step.get("proposal_id") for step in plan["steps"]):
-                    lines = [render_step(step) for step in plan["steps"] if step["tool"] != "job_search_start" or step["status"] != "completed"]
-                    message = "任务编排结果：\n\n" + ("\n\n".join(lines) or "搜索已完成，暂无其他待执行动作。")
-                    self.jobs.add_conversation_message("assistant", message, conversation_id=run["session_id"], run_id=f"plan:{run_id}")
-                    self.store.event(run_id, "workflow_summary", {"message": message, "statistics_changed": True, "plans_changed": True})
+                    lines = completion_lines(plan, self.store.events(run_id))
+                    if lines:
+                        message = "任务编排结果：\n\n" + "\n\n".join(lines)
+                        self.jobs.add_conversation_message("assistant", message, conversation_id=run["session_id"], run_id=f"plan:{run_id}")
+                        self.store.event(run_id, "workflow_summary", {"message": message, "statistics_changed": True, "plans_changed": True})
                 uncertain = any(step["status"] == "outcome_indeterminate" for step in plan["steps"])
                 failed = any(step["status"] in {"failed", "blocked", "skipped"} for step in plan["steps"])
                 self.finish(run_id, "outcome_indeterminate" if uncertain else "failed" if failed else "completed",
@@ -630,10 +631,12 @@ class AgentRuntime:
         if any(event["kind"] == "browser_summary" and event["data"].get("task_id") == browser.id for event in self.store.events(run_id)):
             return
         from ..jobs.search_reporting import render_search_report
+        report_rendered = True
         try:
             report = self.jobs.search_report(browser.id)
             message = render_search_report(browser, report)
         except (KeyError, ValueError):
+            report_rendered = False
             message = "搜索已结束；部分详情尚未读取，可在看板核对已保存结果。"
             report = {"jobs": []}
         self.jobs.add_conversation_message("assistant", message, conversation_id=run["session_id"], run_id=f"summary:{run_id}:{browser.id}")
@@ -644,7 +647,7 @@ class AgentRuntime:
                           for item in report["jobs"]], "displayed": True})
         self.store.event(run_id, "browser_summary", {"task_id": browser.id, "message": message, "discovered": browser.discovered,
                                                     "stored": browser.stored, "duplicates": browser.duplicates,
-                                                    "report": report, "statistics_changed": True})
+                                                    "report": report, "report_rendered": report_rendered, "statistics_changed": True})
 
     async def cancel(self, run_id: str) -> dict:
         run = self.store.get(run_id)

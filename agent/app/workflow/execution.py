@@ -34,6 +34,30 @@ def render_step(step: dict) -> str:
     return public_reply(tool_reply(step["tool"], step["status"], result))
 
 
+def completion_lines(plan: dict, events: list[dict]) -> list[str]:
+    """Do not republish a search report already delivered by its task watcher.
+
+    Deduplicate by this run's durable task identity, not by text or tool name.
+    Keep failed reads, other searches and explicit detail/list reads visible.
+    """
+    published = {event["data"].get("task_id") for event in events
+                 if event["kind"] == "browser_summary"
+                 and event["data"].get("report_rendered", True)} - {None, ""}
+    lines = []
+    for step in plan["steps"]:
+        if step["status"] == "completed":
+            if step["tool"] == "job_search_start" and step.get("task_id") in published:
+                continue
+            result = step.get("result") or {}
+            if (step["tool"] == "job_results_read" and isinstance(result, dict)
+                    and isinstance(result.get("search_report"), dict)
+                    and isinstance(result.get("search_task"), dict)
+                    and result["search_task"].get("id") in published):
+                continue
+        lines.append(render_step(step))
+    return lines
+
+
 async def advance(plan: dict, registry) -> list[dict]:
     """Claim writes before execution, continue independent branches only.
 

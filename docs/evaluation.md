@@ -2,6 +2,8 @@
 
 ## 最新动作契约
 
+新增搜索报告契约 `python -m evaluation.reporting_contract`：14 项通过，验证按搜索任务 ID 去重、纯搜索与复合任务输出、异步完成后读取、失败/显式读取保留、报告兜底及重启恢复。使用临时加密 SQLite 和生产 `AgentRuntime.watch_plan`，不执行招聘动作，不调用外部模型，也不代表前端或浏览器 E2E。逐例日志保留在本地忽略目录 `agent/test-results/reporting-contract/20261010T144034.370754Z/`；历史重复消息不自动删除。
+
 新增按需脱敏契约 `python -m evaluation.privacy_contract`：14 项通过，真实 SQLite 加密/明文往返与持久化动作审批、258 个引用值、模型/MCP/调试输出副本隔离；无外部模型和浏览器调用。设计、日志与限制见 [隐私边界](privacy-boundaries.md)。
 
 当前组件入口 `python -m evaluation.action_contract` 使用脚本模型与合成执行器，保存测试事件与失败轮次，不调用外部模型或用户浏览器。15 项通过（含 288 个脚本变体），不能视为模型准确率或浏览器 E2E。旧 `evaluation.run` 的原句授权、引用忠实度等断言仍是旧契约，完整复跑存在失败和替身错误，未被掩盖；计数、原因与日志见 [当前架构与验证](model-interpretation-actions.md)。以下保留历史评估背景。
