@@ -1102,6 +1102,18 @@ class JobStore:
             output.append(item)
         return output
 
+    def mark_job_needs_review(self, job_id: int, detail: str) -> None:
+        """Park a job for human review, with the reason visible on the card.
+
+        Used when an automatic path has run out of budget: the job must stop looking
+        like active work, and the board must say what needs a human.
+        """
+        with self.lock, self._connect() as db:
+            db.execute("UPDATE jobs SET stage='review',mode='需要人工核验',last_seen_at=? WHERE id=? "
+                       "AND stage NOT IN ('waiting','interview','rejected')", (utc_now(), job_id))
+            db.execute("UPDATE mock_delivery_queue SET status='blocked',detail=?,updated_at=? WHERE job_id=?",
+                       (detail[:400], utc_now(), job_id))
+
     def all_delivery_runs(self, *, limit: int = 200) -> list[dict]:
         """Every run, newest first, for the automation loop's observation."""
         with self.lock, self._connect() as db:

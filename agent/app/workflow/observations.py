@@ -24,11 +24,17 @@ def board_facts(jobs) -> dict:
         "reply_candidates": jobs.delivery_runs_waiting_reply(limit=50),
         "failed_starts": jobs.delivery_runs_failed_before_submit(limit=50),
     }
-    stalled = []
+    # Split pre-click failures by remaining retry budget. Retrying is only safe while
+    # the budget lasts; past it the only useful action is to hand the job to a human,
+    # and that needs its own rule or the job is retried forever.
+    retry_limit = 3
+    stalled, exhausted = [], []
     for run in facts["failed_starts"]:
-        if str(run.get("recruiter_reply") or "").strip():
-            stalled.append(run)
+        if not str(run.get("recruiter_reply") or "").strip():
+            continue
+        (exhausted if int(run.get("attempts") or 0) >= retry_limit else stalled).append(run)
     facts["stalled_replied_runs"] = stalled
+    facts["exhausted_runs"] = exhausted
     return facts
 
 

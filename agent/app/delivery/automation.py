@@ -294,8 +294,15 @@ class DeliveryAutomationService:
         else:
             self.jobs.mark_delivery_failed(
                 job_id, f"{detail[:300]}；已自动重试 {self.retry_limit} 次仍未成功，需人工核对")
-            self._update(DeliveryTaskStatus.FAILED, f"已自动重试 {self.retry_limit} 次仍未成功",
-                         checkpoint="retry_exhausted")
+            # The checkpoint keeps its meaning "the submit click never happened" — it is
+            # the only value that proves no résumé can have been sent, and the recovery
+            # query selects on exactly that string. Encoding "given up" here instead would
+            # silently kill that query: nothing would ever match again and the whole retry
+            # subsystem would cease to exist without raising anything. The exhausted state
+            # is carried by the attempt count and the detail.
+            self._update(DeliveryTaskStatus.FAILED,
+                         f"已自动重试 {self.retry_limit} 次仍未成功；本次点击未发生，职位未投递",
+                         checkpoint="failed_before_submit")
 
     async def _run_once(self, job_id: int, *, require_reply: bool = False) -> None:
         lock = BrowserExecutionLock(self.data_root / "private" / "browser-session.lock", self.state.id or f"delivery:{job_id}")
