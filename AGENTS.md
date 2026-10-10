@@ -13,9 +13,12 @@ The account's repositories page is not a Git remote URL.
 - Inspect the local branch, remote, status and applicable instructions first.
 - Verify changes with relevant tests before committing and pushing.
 - Automated test sources, fixtures and runners were removed at the user's request
-  on 2026-10-08. Do not recreate them without a new request. Use syntax, type/build
-  checks and safe diagnostics for current verification, and disclose that there
-  is no automated regression coverage. Historical test documentation is archival.
+  on 2026-10-08. On 2026-10-10 the user explicitly requested a larger persistent
+  evaluation corpus, runners, results and failure diagnosis, authorizing their
+  recreation. Use `agent/evaluation` for the new isolated benchmark. Historical
+  test documentation remains archival; distinguish component tests, synthetic
+  model evaluations and full browser end-to-end coverage. External model runs
+  require consent for the destination/data and an explicit request budget.
 - Stage only intended source, tests, configuration templates and documentation.
 - Never commit `.env` secrets, resumes, application/chat history, databases,
   runtime backups, screenshots or browser login/profile data. Preserve them locally.

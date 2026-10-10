@@ -27,6 +27,7 @@ __pycache__/
 .pytest-tmp*/
 .test-tmp*/
 agent/test-results/
+/test-results/
 *.log
 *.tsbuildinfo
 .DS_Store

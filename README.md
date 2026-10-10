@@ -80,9 +80,10 @@ pnpm --dir frontend dev --hostname 127.0.0.1
 | [架构与完整功能清单](docs/architecture.md) | 当前调用链、18 个 MCP 工具、存储和实现边界 |
 | [代码审查记录](docs/code-review.md) | 已修问题、剩余风险和冗余清理原则 |
 | [请求校验契约](docs/validation-contract.md) | 来源驱动规范化、内部规划修正、真实澄清与权限拦截边界 |
+| [评估入口与结果](docs/evaluation.md) | 新版隔离契约、合成模型评估、日志及已发现问题 |
 | [TODO](docs/TODO.md) | P0/P1/P2 优先级及逐项验收条件 |
-| [测试评估与交付标准](docs/testing-and-delivery.md) | 历史验证记录与设计标准；测试源码现已移除 |
-| [浏览器测试说明](docs/browser-testing.md) | 历史隔离测试设计；测试入口现已移除 |
+| [测试评估与交付标准](docs/testing-and-delivery.md) | 旧版验证记录与设计标准，仅作历史参考 |
+| [浏览器测试说明](docs/browser-testing.md) | 旧版浏览器测试设计，仅作历史参考 |
 
 ## 验证
 
@@ -90,6 +91,6 @@ pnpm --dir frontend dev --hostname 127.0.0.1
 .\scripts\verify.ps1
 ```
 
-自动化测试源码、夹具和执行入口已按项目负责人要求移除。当前验证仅检查 Python 语法、前端类型与生产构建，不等于行为或浏览器回归验证；文档中的旧测试记录仅作为历史设计参考。运行数据默认位于 `agent/data`，可通过 `AUTOHUNT_DATA_ROOT` 指向独立目录。不要把私有原件、浏览器会话、运行日志或 `.env` 提交到仓库。不要同时用不同数据根连接同一个 CDP 会话：它们不会共享同一把锁。
+2026-10-10 按新的明确请求恢复了隔离评估入口 `agent/evaluation`；运行方法、失败基线和覆盖边界见[评估说明](docs/evaluation.md)。上面的脚本仅检查语法、类型与构建，不替代行为评估。运行数据默认位于 `agent/data`，可通过 `AUTOHUNT_DATA_ROOT` 指向独立目录。不要把私有原件、浏览器会话、运行日志或 `.env` 提交到仓库。不要同时用不同数据根连接同一个 CDP 会话：它们不会共享同一把锁。
 
 修改浏览器锁后请完整重启后端，使搜索和投递执行器使用同一版本。后端暂不应以多个 uvicorn worker 部署；当前状态与队列仍有进程内单例。

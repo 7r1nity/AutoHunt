@@ -13,4 +13,4 @@ try {
     & pnpm build
     if ($LASTEXITCODE -ne 0) { throw "Frontend production build failed ($LASTEXITCODE)." }
 } finally { Pop-Location }
-Write-Host "Syntax, type and build checks passed. Automated regression tests have been removed."
+Write-Host "Syntax, type and build checks passed. Run agent/evaluation separately for behavioral contracts; see docs/evaluation.md."

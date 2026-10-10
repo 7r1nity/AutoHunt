@@ -57,9 +57,12 @@ Log in to BOSS in that visible Chrome window. In AutoHunt choose **现有 Chrome
 
 Do not expose the CDP port outside localhost and do not use your everyday Chrome profile as the remote-debugging profile.
 
-Automated test sources and runners were removed at the project owner's request.
-Use `scripts/verify.ps1` from the repository root for syntax, type and build checks;
-these checks do not replace behavioral or browser regression tests.
+The owner authorized a new persistent synthetic evaluation suite on 2026-10-10.
+From this directory run `.venv/Scripts/python.exe -m evaluation.run` for isolated
+contracts, adding `--browser-fixtures` for intercepted headless Chromium pages.
+See [evaluation instructions](../docs/evaluation.md). External model evaluation
+requires separate consent and a bounded call budget. Known failures are retained,
+not hidden with expected-failure markers. Static checks remain in `scripts/verify.ps1`.
 
 Run the local MCP server over stdio:
 
