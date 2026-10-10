@@ -35,6 +35,20 @@ class PlanValidationError(ValueError):
         self.issues = issues or [self.issue]
 
 
+def _normalise_spacing(value: str) -> str:
+    """Collapse runs of whitespace so a copied span can be compared to its source.
+
+    The model routinely collapses the double spaces a user typed, and planning already
+    repairs that where it can (restore_quote_spacing). Comparing exactly here defeated
+    that repair for any source containing a double space: "帮我找十五份  月薪15k以上的工作"
+    became "帮我找十五份 月薪15k以上的工作", the exact containment test failed, and every
+    repair attempt repeated the same failure until the plan was reported as
+    "内部规划修正后仍未通过校验". A citation that differs from its source only in
+    whitespace is still the user's own words, so spacing must not decide authority.
+    """
+    return re.sub(r"\s+", " ", value).strip()
+
+
 def preflight(steps: list[dict], goals: list[dict], sources: list[str], tools: set[str]) -> None:
     """Report all structural defects together, instead of repairing one ID at a time."""
     issues: list[ValidationIssue] = []
@@ -51,9 +65,13 @@ def preflight(steps: list[dict], goals: list[dict], sources: list[str], tools: s
     citations = [(f"goals[{index}].quote", "", goal["quote"]) for index, goal in enumerate(goals)]
     citations.extend((f"steps[{step['id']}].{field}", step["tool"], step[field])
                      for step in steps for field in ("command_quote", "scope_quote") if step[field])
+    normalised = [_normalise_spacing(source) for source in sources]
     for field, tool, quote in citations:
-        if not any(quote in source for source in sources):
-            issues.append(ValidationIssue("invalid_citation", "repair", "引用必须来自有效用户原话", tool, field))
+        if any(quote in source for source in sources):
+            continue
+        if any(_normalise_spacing(quote) in source for source in normalised if _normalise_spacing(quote)):
+            continue
+        issues.append(ValidationIssue("invalid_citation", "repair", "引用必须来自有效用户原话", tool, field))
     for step in steps:
         if step["tool"] not in tools:
             issues.append(ValidationIssue("unknown_tool", "repair", "工具不在已提供能力中", step["tool"]))
