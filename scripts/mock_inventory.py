@@ -6,6 +6,7 @@ The provenance ledger makes reruns idempotent without editing existing jobs.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sqlite3
 from collections import Counter
@@ -142,11 +143,14 @@ def generate_jobs() -> list[dict]:
     return records
 
 
-def append_inventory(database: Path, backup_dir: Path) -> dict:
+def append_inventory(database: Path, backup_dir: Path, *, jobs: list[dict] | None = None,
+                     batch: str = BATCH) -> dict:
     database = database.resolve(strict=True)
     if not database.is_file() or database.suffix != ".db":
         raise ValueError("必须显式指定已存在的模拟网站 SQLite .db 文件")
-    jobs = generate_jobs()
+    jobs = generate_jobs() if jobs is None else jobs
+    if not jobs or len({job['key'] for job in jobs}) != len(jobs):
+        raise ValueError("岗位批次必须非空且每个键唯一")
     db = sqlite3.connect(database, timeout=30)
     db.row_factory = sqlite3.Row
     try:
@@ -156,7 +160,7 @@ def append_inventory(database: Path, backup_dir: Path) -> dict:
         if not required <= tables:
             raise ValueError("目标数据库不是模拟招聘网站数据库")
         employers = db.execute("SELECT id,COALESCE(company_name,name) company FROM users WHERE role='employer' ORDER BY id LIMIT 30").fetchall()
-        if len(employers) != 30:
+        if len(employers) != 30 and any('company_name' not in job for job in jobs):
             raise ValueError("需存在原有30个招聘方账号；此脚本不创建、替换或删除账号")
         backup_dir = backup_dir.resolve()
         backup_dir.mkdir(parents=True, exist_ok=True)
@@ -167,13 +171,44 @@ def append_inventory(database: Path, backup_dir: Path) -> dict:
         db.execute("""CREATE TABLE IF NOT EXISTS autohunt_seed_ledger (
             batch TEXT NOT NULL, fixture_key TEXT NOT NULL, job_id INTEGER NOT NULL,
             PRIMARY KEY(batch,fixture_key), UNIQUE(job_id))""")
+        if any('metadata' in job for job in jobs):
+            # Kept outside jobs/JobOut: never exposed as evidence to the Agent.
+            db.execute("""CREATE TABLE IF NOT EXISTS autohunt_inventory_metadata (
+                job_id INTEGER PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE,
+                batch TEXT NOT NULL, metadata TEXT NOT NULL)""")
         before = {table: db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] for table in required}
-        existing = {row[0] for row in db.execute("SELECT fixture_key FROM autohunt_seed_ledger WHERE batch=?", (BATCH,))}
+        protected = {table: db.execute('SELECT COUNT(*) FROM "' + table.replace('"', '""') + '"').fetchone()[0]
+                     for table in tables - {'jobs', 'users', 'autohunt_seed_ledger',
+                                             'autohunt_inventory_metadata', 'sqlite_sequence'}}
+        original_users = db.execute('SELECT * FROM users ORDER BY id').fetchall()
+        existing = {row[0] for row in db.execute("SELECT fixture_key FROM autohunt_seed_ledger WHERE batch=?", (batch,))}
+        stale = db.execute("""SELECT COUNT(*) FROM autohunt_seed_ledger l
+            LEFT JOIN jobs j ON j.id=l.job_id WHERE l.batch=? AND j.id IS NULL""", (batch,)).fetchone()[0]
+        if stale:
+            raise RuntimeError("批次台账包含已删除职位，需人工核对后再追加")
+        company_accounts = {}
+        created_users = 0
         inserted = 0
         for index, job in enumerate(jobs):
             if job["key"] in existing:
                 continue
-            employer = employers[index % len(employers)]
+            if 'company_name' in job:
+                company = job['company_name']
+                if company not in company_accounts:
+                    email = f"inventory-{hashlib.sha256(company.encode()).hexdigest()[:24]}@example.invalid"
+                    account = db.execute("SELECT id,role,company_name FROM users WHERE email=?", (email,)).fetchone()
+                    if account and (account['role'] != 'employer' or account['company_name'] != company):
+                        raise RuntimeError("模拟招聘方账号冲突，未修改任何已有账号")
+                    if account:
+                        company_accounts[company] = account['id']
+                    else:
+                        cursor = db.execute("""INSERT INTO users (role,name,email,company_name,created_at)
+                            VALUES ('employer',?,?,?,?)""", (f'{company}招聘团队', email, company, job['created_at']))
+                        company_accounts[company] = cursor.lastrowid
+                        created_users += 1
+                employer = dict(id=company_accounts[company], company=company)
+            else:
+                employer = employers[index % len(employers)]
             cursor = db.execute("""INSERT INTO jobs
                 (employer_id,title,company_name,department,category,city,salary_min,salary_max,
                  experience_required,education,description,requirements,skills,headcount,status,created_at)
@@ -183,16 +218,28 @@ def append_inventory(database: Path, backup_dir: Path) -> dict:
                 job["description"], json.dumps(job["requirements"], ensure_ascii=False),
                 json.dumps(job["skills"], ensure_ascii=False), job["headcount"], job["status"], job["created_at"],
             ))
-            db.execute("INSERT INTO autohunt_seed_ledger VALUES (?,?,?)", (BATCH, job["key"], cursor.lastrowid))
+            db.execute("INSERT INTO autohunt_seed_ledger VALUES (?,?,?)", (batch, job["key"], cursor.lastrowid))
+            if 'metadata' in job:
+                db.execute("INSERT INTO autohunt_inventory_metadata VALUES (?,?,?)",
+                           (cursor.lastrowid, batch, json.dumps(job['metadata'], ensure_ascii=False)))
             inserted += 1
         after = {table: db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] for table in required}
-        for table in required - {"jobs"}:
+        for table in required - {"jobs", "users"}:
             if before[table] != after[table]:
                 raise RuntimeError(f"非职位数据被修改：{table}")
+        if after['users'] - before['users'] != created_users:
+            raise RuntimeError("模拟招聘方新增数量不一致")
+        for account in original_users:
+            if tuple(db.execute('SELECT * FROM users WHERE id=?', (account['id'],)).fetchone()) != tuple(account):
+                raise RuntimeError("已有账号被修改")
+        for table, count in protected.items():
+            if db.execute('SELECT COUNT(*) FROM "' + table.replace('"', '""') + '"').fetchone()[0] != count:
+                raise RuntimeError(f"已有业务数据被修改：{table}")
         if after["jobs"] - before["jobs"] != inserted:
             raise RuntimeError("新增职位数未通过核验")
         db.commit()
-        return dict(batch=BATCH, inserted=inserted, before=before, after=after, backup=str(backup),
+        return dict(batch=batch, inserted=inserted, created_employers=created_users,
+                    before=before, after=after, backup=str(backup),
                     **inventory_summary(jobs))
     except BaseException:
         db.rollback()
