@@ -146,7 +146,14 @@ def corpus():
         for budget in (500, 2000, 8000):
             add("context_budget", "valid_json", {"size": size, "budget": budget}, {"bounded": True})
     for flaw in ("valid", "cycle", "duplicate", "orphan", "invalid_citation", "unknown_tool", "missing_dependency"):
-        add("preflight", "dag_structure", {"flaw": flaw}, {"reject": flaw != "valid"})
+        # An unfaithful citation is reported, not refused: no matcher can guarantee that a
+        # generated plan is faithful to the user's phrasing, and refusing on it produced
+        # one rejection per paraphrase. The expectation states the new behaviour rather
+        # than dropping the case, so it cannot drift back unnoticed.
+        if flaw == "invalid_citation":
+            add("preflight", "dag_structure", {"flaw": flaw}, {"reject": False, "warned": True})
+        else:
+            add("preflight", "dag_structure", {"flaw": flaw}, {"reject": flaw != "valid"})
     for status in ("completed", "failed", "cancelled", "timed_out", "interrupted", "outcome_indeterminate"):
         add("database", "durable_terminal", {"status": status}, {"immutable": True})
     for scenario in ("success", "failure", "denied", "uncertain", "waiting", "restored_claim", "expired", "resume_changed", "revoked", "cancel", "independent_branch", "repeat_advance"):

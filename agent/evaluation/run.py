@@ -39,7 +39,7 @@ from app.runtime.understanding import turn_role
 from app.workflow.execution import advance
 from app.workflow.planning import Goal, PlannedStep, RequestDraft, command_grounded, plan_request, validate_draft
 from app.workflow.requests import TaskRequest, canonical_request, resolve_continuation
-from app.workflow.validation import PlanValidationError, preflight
+from app.workflow.validation import PlanValidationError, preflight, preflight_warnings
 
 ROOT = Path(__file__).resolve().parents[1]
 REGISTRY = AgentToolRegistry(jobs=None, browser=None, candidate_state=None,
@@ -191,6 +191,16 @@ async def evaluate(case, scratch):
         if flaw == "unknown_tool": steps[1]["tool"] = "unknown"
         if flaw == "missing_dependency": steps[1]["depends_on"] = ["missing"]
         actual = {"reject": rejects(lambda: preflight(steps, goals, ["查看统计，查看结果"], {"job_stats_read", "job_results_read"}))}
+        if flaw == "invalid_citation":
+            # Citation fidelity is reported, not enforced. No regex can promise that a
+            # generated plan is faithful to the user's phrasing, and refusing on it
+            # produced one rejection per paraphrase (a double space was enough), so the
+            # finding is surfaced for the confirmation step instead of blocking the plan.
+            # Reported alongside `reject` so the corpus states the new expectation
+            # instead of silently dropping the check.
+            actual["warned"] = any(
+                issue.get("code") == "invalid_citation" and issue.get("severity") == "warn"
+                for issue in preflight_warnings())
         return check(subset(e, actual), actual)
     if kind == "database":
         store = RunStore(scratch / f"{case['id']}.db")

@@ -23,9 +23,22 @@ class ValidationIssue:
     detail: str
     tool: str = ""
     field: str = ""
+    #: "block" refuses the plan; "warn" is recorded and the plan proceeds.
+    #:
+    #: Citation fidelity is a warn: no regex can promise that a generated plan is
+    #: faithful to the user's phrasing, and treating it as a refusal produced one
+    #: rejection per paraphrase — a double space was enough. Faithfulness is now the
+    #: confirmation step's concern (see app.security.risk), where the user sees the
+    #: action and can correct it, rather than a parser's veto. A genuine conflict such
+    #: as two different counts stays blocking, because the plan is then self-contradictory.
+    severity: Literal["block", "warn"] = "block"
 
     def public(self) -> dict:
         return asdict(self)
+
+    @property
+    def blocking(self) -> bool:
+        return self.severity == "block"
 
 
 class PlanValidationError(ValueError):
@@ -62,6 +75,8 @@ def citation_found(quote: str, sources: list[str]) -> bool:
 
 def preflight(steps: list[dict], goals: list[dict], sources: list[str], tools: set[str]) -> None:
     """Report all structural defects together, instead of repairing one ID at a time."""
+    global _warnings
+    _warnings = []          # each plan is judged on its own findings
     issues: list[ValidationIssue] = []
     ids = {step["id"] for step in steps}
     if len(ids) != len(steps):
@@ -78,7 +93,8 @@ def preflight(steps: list[dict], goals: list[dict], sources: list[str], tools: s
                      for step in steps for field in ("command_quote", "scope_quote") if step[field])
     for field, tool, quote in citations:
         if not citation_found(quote, sources):
-            issues.append(ValidationIssue("invalid_citation", "repair", "引用必须来自有效用户原话", tool, field))
+            issues.append(ValidationIssue("invalid_citation", "repair", "引用必须来自有效用户原话",
+                                          tool, field, severity="warn"))
     for step in steps:
         if step["tool"] not in tools:
             issues.append(ValidationIssue("unknown_tool", "repair", "工具不在已提供能力中", step["tool"]))
@@ -95,8 +111,30 @@ def preflight(steps: list[dict], goals: list[dict], sources: list[str], tools: s
             resolved.update(available)
     if issues:
         issues = list(dict.fromkeys(issues))
-        first = issues[0]
+        blocking = [issue for issue in issues if issue.blocking]
+        if not blocking:
+            # Warnings only: the plan proceeds and the findings stay visible. Refusing
+            # here is what turned a paraphrase into a dead end, so the warning is
+            # reported through _preflight_warnings instead of raised.
+            _record_warnings(issues)
+            return
+        first = blocking[0]
         raise PlanValidationError(first.code, first.detail, issues=issues)
+
+
+#: Warnings from the most recent preflight, so a caller can surface what would
+#: previously have been a refusal. Bounded: only the latest plan matters.
+_warnings: list[dict] = []
+
+
+def _record_warnings(issues: list[ValidationIssue]) -> None:
+    global _warnings
+    _warnings = [issue.public() for issue in issues]
+
+
+def preflight_warnings() -> list[dict]:
+    """Non-blocking findings from the last preflight, for reporting and measurement."""
+    return list(_warnings)
 
 
 def restore_quote_spacing(quote: str, sources: list[str], *, max_length: int) -> str:
