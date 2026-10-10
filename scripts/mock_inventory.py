@@ -10,6 +10,7 @@ import hashlib
 import json
 import sqlite3
 from collections import Counter
+from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -165,7 +166,7 @@ def append_inventory(database: Path, backup_dir: Path, *, jobs: list[dict] | Non
         backup_dir = backup_dir.resolve()
         backup_dir.mkdir(parents=True, exist_ok=True)
         backup = backup_dir / f"mock-site-before-{datetime.now(UTC).strftime('%Y%m%d-%H%M%S-%f')}.db"
-        with sqlite3.connect(backup) as destination:
+        with closing(sqlite3.connect(backup)) as destination:
             db.backup(destination)
         db.execute("BEGIN IMMEDIATE")
         db.execute("""CREATE TABLE IF NOT EXISTS autohunt_seed_ledger (
