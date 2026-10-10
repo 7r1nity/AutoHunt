@@ -17,9 +17,7 @@ from ..memory.stores import MemoryStore
 from ..runtime.context import active_run, emit, save_search_state, dialogue_change, scoped_browser, browser_availability, browser_search_available
 from ..runtime.dialogue import bounded_data, compact_state, resolve_reference, ACTION_TOOLS
 from ..runtime.search_state import merge_search_state, prepare_search_state
-from .search_contract import explicit_search_constraints, missing_search_message, safe_role_keyword
-from .search_language import parse_search_message
-from .task_semantics import understand, binding_valid, command_grounded
+from .search_contract import missing_search_message
 from .job_filters import filter_schema
 from ..runtime.resilience import PreflightRefused, classify_failure, safe_retry
 
@@ -88,102 +86,87 @@ class AgentToolOutcome:
 
 
 class AgentToolPolicy:
+    """Action-level policy: no natural-language authorization regexes."""
     READ_EFFECTS = {"read"}
+    DIRECT_CONTROLS = {"browser_task_stop", "browser_task_pause", "browser_task_resume",
+                       "mock_delivery_cancel"}
+    LOCAL_ACTIONS = {"context_action_propose", "context_question_ask", "job_review_selection",
+                     "search_state_update"}
 
-    def authorize(
-        self,
-        spec: AgentToolSpec,
-        arguments: dict[str, Any],
-        user_message: str,
-        state: ToolLoopState,
-    ) -> tuple[bool, str]:
+    def __init__(self):
+        import os
+        from ..security.risk import ConfirmRisky, AlwaysConfirm, SecurityRisk
+        policy = os.getenv("AUTOHUNT_APPROVAL_POLICY", "risk").lower()
+        threshold = os.getenv("AUTOHUNT_APPROVAL_THRESHOLD", "HIGH").upper()
+        try:
+            level = SecurityRisk(threshold)
+            if level == SecurityRisk.UNKNOWN:
+                level = SecurityRisk.HIGH
+        except ValueError:
+            level = SecurityRisk.HIGH
+        # Never-confirm is intentionally not a way to bypass account/resume scope.
+        self.confirmation = AlwaysConfirm() if policy == "always" else ConfirmRisky(threshold=level)
+
+    def authorize(self, spec: AgentToolSpec, arguments: dict[str, Any],
+                  user_message: str, state: ToolLoopState) -> tuple[bool, str]:
+        from ..security.action_grants import binding_matches
+        from ..security.risk import grade_action, SecurityRisk
         state.calls += 1
         if state.calls > 8:
-            return False, "工具循环超过安全上限"
+            return False, "工具循环超过有限预算"
         digest = json.dumps([spec.name, arguments], ensure_ascii=False, sort_keys=True, default=str)
         if digest in state.seen_calls:
-            return False, "禁止在同一轮重复执行完全相同的工具调用"
+            return False, "相同调用已经处理，禁止重复执行"
         state.seen_calls.add(digest)
-        if spec.effect in self.READ_EFFECTS:
+        if spec.effect == "read":
             return True, "只读工具"
         context = active_run()
         authority = context.action_authority if context else None
+        risk = grade_action(spec.name, arguments, effect=spec.effect)
+        emit("action_policy", tool=spec.name, risk=str(risk.risk),
+             policy=self.confirmation.describe(), bound=bool(authority))
         if authority:
             from ..growth.requests import resume_stamp
             instruction = (context.dialogue or {}).get("instruction_request") or {}
-            if instruction.get("id") == authority.get("plan_id") and spec.name in instruction.get("revoked_tools", []):
-                return False, "用户已撤回该工作流动作，不能沿用原授权"
+            saved_step = next((step for step in instruction.get("steps", [])
+                               if step.get("id") == authority.get("step_id")), {})
             binding = authority.get("binding")
-            if binding:
-                saved_step = next((step for step in instruction.get("steps", [])
-                                   if step.get("id") == authority.get("step_id")), {})
-                grounded = (instruction.get("id") == authority.get("plan_id")
-                    and saved_step.get("authority_binding") == binding
-                    and saved_step.get("tool") == spec.name
-                    and saved_step.get("arguments") == arguments
-                    and binding_valid(binding, spec.name, authority["sources"]))
-            else:
-                # Read old checkpoints conservatively during migration. New
-                # validated plans always use the persisted semantic binding.
-                grounded = command_grounded(spec.name, user_message, authority["sources"])
-            if (authority.get("tool") != spec.name or authority.get("arguments") != arguments
-                    or authority.get("command") != user_message
+            if (instruction.get("id") != authority.get("plan_id")
+                    or spec.name in instruction.get("revoked_tools", [])
+                    or (context.dialogue or {}).get("tasks", {}).get("plan_id") != authority.get("plan_id")
+                    or saved_step.get("status") != "claimed"
+                    or saved_step.get("authority_binding") != binding
+                    or saved_step.get("tool") != spec.name
+                    or saved_step.get("arguments") != arguments
+                    or authority.get("tool") != spec.name or authority.get("arguments") != arguments
                     or authority.get("expires_at", 0) < time.time()
                     or authority.get("resume_stamp") != resume_stamp(authority["resumes"].read_document(), authority["candidate"])
-                    or not grounded):
-                return False, "工作流步骤授权已失效或参数不一致"
-            return True, "当前用户授权的有限工作流步骤；仍需参数、引用与执行器校验"
-        if spec.name == "context_action_propose":
-            return (active_run() is not None, "只创建待确认动作，不构成执行授权")
-        if spec.name == "job_review_selection":
-            if not understand(user_message).commands(spec.name):
-                return False, "本地审核需要明确的审核命令"
-            return True, "只记录本地审核，不发起沟通或投递"
-        if spec.name == "search_state_update":
-            if active_run() is None:
-                return False, "会话状态工具需要当前会话"
-            from ..runtime.dialogue import slot_answer_patch
-            if slot_answer_patch(active_run().dialogue or {}, user_message):
-                return True, "根据明确追问补充单个槽位，不启动搜索"
-            meaning = understand(user_message)
-            if not (meaning.commands(spec.name) or meaning.commands("job_search_start")):
-                return False, "没有明确的搜索条件调整意图"
-            return True, "只更新本会话条件，不授权浏览器操作"
-        if state.external_effect_started:
-            return False, "本轮已经执行过一个外部副作用操作，禁止继续执行第二个"
-        if spec.name == "mock_delivery_start":
-            from .action_language import explicit_mock_delivery
-            if not explicit_mock_delivery(user_message):
-                return False, "自动投递需要本轮明确的自动投递命令及最低匹配分；泛化确认不能授权"
-            if re.search(r"boss|直聘|智联|猎聘|真实网站", user_message, re.I):
-                return False, "自动投递只支持本地模拟站，不支持真实招聘网站"
-        elif spec.name == "mock_delivery_cancel":
-            if not understand(user_message).commands(spec.name):
-                return False, "停止投递队列需要明确的停止命令"
-        elif spec.name == "job_search_start":
-            parsed = parse_search_message(user_message)
-            if not parsed.authorized:
-                return False, f"本轮不是明确的新搜索命令（{parsed.reason}）；查询、否定、提问或引用不授权启动"
-            if parsed.reason == "conflicting_parameters":
-                return False, "同一搜索条件出现重复且冲突的值；请先明确最终城市、数量或薪资，不猜测执行"
-        elif spec.name == "preference_update":
-            if not understand(user_message).commands(spec.name):
-                return False, "更新持久化偏好需要用户明确要求修改"
-        elif spec.name == "resume_propose_patch":
-            if not understand(user_message).commands(spec.name):
-                return False, "生成简历修改提案需要明确的修改要求"
-        elif spec.name == "learning_plan_generate":
-            from ..growth.requests import continued_plan_scope
-            context = active_run()
-            continuation = continued_plan_scope(context.dialogue or {}, user_message, arguments.pop("_resume_stamp", "")) if context else None
-            if not is_explicit_plan_request(user_message) and continuation is None:
-                return False, "生成持久化学习计划需要用户明确发出命令"
-        elif spec.name in {"browser_task_resume", "browser_task_stop", "browser_task_pause"}:
-            if not command_grounded(spec.name, user_message, [user_message]):
-                return False, "浏览器控制需要本轮明确正向指令，询问或引用不授权"
-        if spec.effect == "external":
-            state.external_effect_started = True
-        return True, "通过安全策略"
+                    or not binding_matches(binding, spec.name, arguments, context.session_id)):
+                return False, "动作授权已过期、撤回或绑定的会话/参数/简历已变化"
+            if risk.risk == SecurityRisk.UNKNOWN:
+                return False, "未分类动作需要人工审批，不自动执行"
+            if self.confirmation.should_confirm(risk.risk) and not binding.get("user_requested"):
+                return False, "此动作尚待具体范围确认"
+            return True, "已绑定的工作流动作；不重复检查用户措辞"
+        if context and state.confirmed_action_id:
+            item = next((item for item in (context.dialogue or {}).get("pending", [])
+                         if item.get("id") == state.confirmed_action_id), {})
+            if (item.get("status") == "claimed" and item.get("tool") == spec.name
+                    and item.get("arguments") == arguments and spec.name != "mock_delivery_start"):
+                return True, "已人工确认的具体提案"
+            return False, "确认提案与执行动作不一致"
+        if spec.name in self.LOCAL_ACTIONS:
+            return (context is not None, "仅当前会话的本地动作，不提交简历")
+        if spec.name in self.DIRECT_CONTROLS:
+            return (context is not None and not arguments, "参数为空的会话内任务控制，执行器检查任务归属")
+        if spec.name == "job_search_start" and state.explicit_search_intent:
+            # Only an exact operation-only quick route may set this marker.
+            # It carries no extracted keywords or criteria.
+            if any(key in arguments for key in ("query", "queries", "dry_run")):
+                return False, "快捷搜索只能继承条件；新岗位或试运行由模型解析"
+            return (context is not None, "明确快捷搜索，复用当前条件")
+        return False, "需先解析为受范围约束的动作或确认提案"
+
 
 
 class AgentToolRegistry:
@@ -391,53 +374,6 @@ class AgentToolRegistry:
             return AgentToolOutcome(name, "denied", "工具不在允许列表中", "unknown",
                 failure={"code": "unknown_tool", "retryable": False, "effect_started": False, "uncertain": False})
         context = active_run()
-        planned = bool(context and context.action_authority and context.action_authority.get("tool") == name)
-        if name == "mock_delivery_start" and not planned:
-            from .action_language import explicit_mock_delivery
-            try:
-                arguments = explicit_mock_delivery(user_message) or arguments
-            except ValueError as exc:
-                return AgentToolOutcome(name, "error", str(exc), spec.effect)
-        if name == "learning_plan_generate" and not planned:
-            from .action_language import score_scope
-            from ..growth.requests import continued_plan_scope, resume_stamp
-            stamp = resume_stamp(self.resume_workspace.read_document(), self.candidate_state)
-            try:
-                scope = score_scope(user_message) if is_explicit_plan_request(user_message) else (
-                    continued_plan_scope((active_run().dialogue or {}) if active_run() else {}, user_message, stamp))
-            except ValueError as exc:
-                return AgentToolOutcome(name, "error", str(exc), spec.effect)
-            # Scope cannot be invented or widened by model-supplied arguments.
-            context = active_run()
-            request = (context.dialogue or {}).get("learning_request") if context else None
-            focus = user_message if is_explicit_plan_request(user_message) else (
-                f"{request['message']}；范围更新：{user_message}" if request and scope is not None else user_message)
-            arguments = {"focus": focus[:400], **(scope or {}), "_resume_stamp": stamp}
-            if is_explicit_plan_request(user_message):
-                arguments.update({key: value for key, value in explicit_search_constraints(
-                    user_message, include_action_scopes=True).items() if key == "salary_min"})
-            elif request and scope is not None:
-                # Score amendments replace the score range, not other filters.
-                if "salary_min" in request.get("scope", {}):
-                    arguments["salary_min"] = request["scope"]["salary_min"]
-        if name == "job_search_start" and not planned:
-            parsed = parse_search_message(user_message)
-            if parsed.authorized:
-                explicit = {key: value for key, value in parsed.fields.items()
-                            if key in {"query", "queries", "locations", "salary_min", "result_limit", "max_jobs"}}
-                if explicit.get("queries"):
-                    explicit["query"] = explicit["queries"][0]
-                arguments = {**arguments, **explicit_search_constraints(user_message), **explicit}
-        exact_patch = None
-        if name == "search_state_update" and not planned:
-            from .search_contract import simple_search_patch
-            from .main_agent import _KNOWN_CITIES
-            from ..runtime.dialogue import slot_answer_patch
-            exact_patch = simple_search_patch(user_message, _KNOWN_CITIES)
-            if not exact_patch and active_run():
-                exact_patch = slot_answer_patch(active_run().dialogue or {}, user_message)
-            if exact_patch:
-                arguments = exact_patch
         try:
             allowed, reason = self.policy.authorize(spec, arguments, user_message, state)
         except Exception as exc:
@@ -460,35 +396,11 @@ class AgentToolRegistry:
         try:
             self.validate_arguments(spec.parameters, arguments)
             if name == "job_search_start":
-                from .main_agent import _fallback_query
-                candidate = self.candidate_state.read()
-                context = active_run()
                 baseline = (context.search_state or {}).get("queries") if context else None
                 supplied = arguments.get("queries") or ([arguments["query"]] if arguments.get("query") else [])
-                normalize = lambda value: re.sub(r"\s+", "", str(value)).casefold()
-                confirmed_search = bool(context and state.confirmed_action_id and any(
-                    item.get("id") == state.confirmed_action_id and item.get("status") == "claimed"
-                    and item.get("tool") == name and item.get("arguments") == arguments
-                    for item in (context.dialogue or {}).get("pending", [])
-                ))
-                # A model-supplied keyword is not itself evidence of user intent.
-                # Without a resume/preference/session baseline it must be grounded
-                # in this user's words; a generic "帮我找工作" cannot invent a role.
-                if not confirmed_search and not baseline and not _fallback_query(self.candidate_state) and (
-                    not supplied or any(normalize(role) not in normalize(user_message) for role in supplied)
-                ):
-                    raise MissingSearchInput(missing_search_message(bool(candidate.profile.resume_id)))
-            if name == "search_state_update" and not exact_patch and not planned:
-                mentions = {
-                    "queries": bool(re.search(r"关键词|岗位|职位|方向|工作|简历", user_message)) or any(str(item) in user_message for item in arguments.get("queries") or []),
-                    "locations": bool(re.search(r"城市|地点", user_message)) or any(str(item) in user_message for item in arguments.get("locations") or []),
-                    "result_limit": bool(re.search(r"数量|[个份条]|多少", user_message)),
-                    "salary_min": bool(re.search(r"薪资|月薪|薪水|工资|待遇|\d\s*[kK千万]", user_message)),
-                    "max_jobs": bool(re.search(r"候选|读取|预算", user_message)),
-                    "use_resume_profile": "简历" in user_message or not arguments.get("use_resume_profile"),
-                }
-                if any(not mentions.get(field, False) for field in arguments):
-                    raise ValueError("只允许修改用户本轮明确提到的搜索条件；未提及字段应省略")
+                if not supplied and not baseline and not prepare_search_state(
+                        {}, self.candidate_state.read(), self.resume_workspace.read_document().version).get("queries"):
+                    raise MissingSearchInput(missing_search_message(bool(self.candidate_state.read().profile.resume_id)))
             executor_started = True
             context = active_run()
             request = (context.dialogue or {}).get("task_request") if context else None
@@ -612,8 +524,10 @@ class AgentToolRegistry:
             raise MissingSearchInput(missing_search_message(bool(state.profile.resume_id)))
         if not queries:
             queries = [query]
-        if any(not safe_role_keyword(keyword) for keyword in [query, *queries]):
-            raise ValueError("搜索关键词包含请求条件；请仅使用岗位名称，把数量与薪资放入 result_limit 和 salary_min")
+        if any(len(keyword) > 80 or any(ord(char) < 32 for char in keyword) for keyword in [query, *queries]):
+            raise PreflightRefused("岗位词长度或格式无效，请由模型重新提取")
+        if args.get("dry_run") and args.get("source", "mock") != "mock":
+            raise PreflightRefused("真实网站不支持沟通投递试运行")
         locations = [str(item).strip() for item in args.get("locations", []) if str(item).strip()]
         if "locations" not in args and not locations and state.preferences.locations.source == "user_confirmed":
             locations = state.preferences.locations.values[:3]
@@ -659,9 +573,8 @@ class AgentToolRegistry:
         if context is None:
             raise ValueError("没有当前会话")
         state = merge_search_state(context.search_state or {}, args, self.candidate_state.read(), self.resume_workspace.read_document().version)
-        from .search_contract import safe_role_keyword
-        if "queries" in args and any(not safe_role_keyword(keyword) for keyword in state["queries"]):
-            raise ValueError("岗位关键词包含未解析的描述；请提供简短的岗位名称")
+        if any(len(keyword) > 80 or any(ord(char) < 32 for char in keyword) for keyword in state["queries"]):
+            raise ValueError("岗位关键词过长或包含控制字符")
         return save_search_state(state, user_edit=args)
 
     async def _preference_read(self, _args: dict[str, Any]) -> Any:
@@ -709,7 +622,7 @@ class AgentToolRegistry:
         # authorised to cover. Measurement only for now: queue_deliveries records what
         # falls inside it without filtering anything yet.
         self.mock_workflow.remember_authorization_scope(
-            active_run().user_message if active_run() else "", context.search_state)
+            active_run().user_message if active_run() else "", context.search_state, min_score=args["min_score"])
         task_id = (context.action_authority or {}).get("evidence_task_id")
         return await self.mock_workflow.queue_deliveries(min_score=args["min_score"], session_id=context.session_id, task_id=task_id)
 

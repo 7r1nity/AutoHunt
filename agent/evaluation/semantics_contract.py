@@ -55,6 +55,16 @@ def cases():
         add("control", message=text, allowed=False)
     for mode, verdict in itertools.product(("require", "prefer", "allow"), ("pass", "fail", "unknown")):
         add("modality", mode=mode, verdict=verdict)
+    search_starts = ("帮我找十五份", "帮我找15份", "给我十五份", "推荐十五个")
+    for start, routed in itertools.product(search_starts, (False, True)):
+        add("dispatch_start", message=f"{start} 月薪15k以上的工作 85分以上的直接投递 可以是实习但是不要外包",
+            routed=routed)
+    for message, fast in (("85分以上的直接投递", True), ("匹配分数90以上自动投递", True),
+                          ("自动投递匹配度85以上的职位", True),
+                          ("85分以上直接投递，不要外包", False),
+                          ("85分以上直接投递，可以是实习", False),
+                          ("替我筛选十五个岗位，85分以上直接投递", False)):
+        add("delivery_shortcut", message=message, fast=fast)
     for scenario in ("quoted_value", "optional", "prefer", "require", "wrong_citation_repair",
                      "retained_root", "revoked_plan", "tampered_binding", "runtime_no_reparse",
                      "unknown_fallback", "partial_dispatch", "partial_failed_dispatch", "amend_numeric",
@@ -136,7 +146,95 @@ async def evaluate(case, registry):
         result = combine(tree, iter([p["verdict"]]))
         assert result == (p["verdict"] if p["mode"] == "require" else "pass"), result
         return {"status": result}
+    if family == "dispatch_start":
+        return await dispatch_start(p["message"], p["routed"], registry)
+    if family == "delivery_shortcut":
+        from app.core.action_language import delivery_shortcut
+        result = delivery_shortcut(p["message"])
+        assert bool(result) == p["fast"], result
+        return {"shortcut": result}
     return await pipeline(p["scenario"], registry)
+
+
+async def dispatch_start(message, routed, registry):
+    """Exercise the real foreground entry before any account exists.
+
+    Stub only the planner/model and browser side effect: actual validation and
+    DAG execution must issue search, not account-binding delivery preflight.
+    """
+    from app.core.main_agent import AutoHuntAgent
+    from app.core.agent_tools import AgentToolOutcome
+    from app.workflow.execution import begin, advance
+    from app.growth.requests import resume_stamp
+    from app.intent.router import IntentRouter
+    from app.intent.rules import RuleEngine
+    context = active_run()
+    context.dialogue = {"turn": 1}
+    context.search_state = {"queries": ["金融分析师"], "source": "mock"}
+    workspace = NS(read_document=lambda: NS(id="synthetic", version=1))
+    candidate = NS(read=lambda: NS(profile=NS(resume_id="synthetic")))
+    stamp = resume_stamp(workspace.read_document(), candidate)
+    calls, plans, routes = [], [], []
+    account = {"account_bound": False}
+    async def execute(name, arguments, *, user_message, state):
+        allowed, reason = AgentToolPolicy().authorize(registry._tools[name], arguments, user_message, state)
+        assert allowed, reason
+        calls.append(name)
+        if name == "job_search_start":
+            return AgentToolOutcome(name, "ok", {"id": "synthetic-search", "status": "awaiting_login",
+                "query": "金融分析师", "detail": "浏览器已打开，等待登录验证"}, "external")
+        if not account["account_bound"]:
+            return AgentToolOutcome(name, "error", "请先在模拟站登录求职者账号并完成一次搜索，以绑定账号", "external")
+        assert context.action_authority["evidence_task_id"] == "synthetic-search"
+        return AgentToolOutcome(name, "ok", {"message": "已加入模拟队列", "queued": 1}, "external")
+    local = NS(_tools=registry._tools, schemas=registry.schemas, validate_arguments=registry.validate_arguments,
+               resume_workspace=workspace, candidate_state=candidate, mock_workflow=NS(), execute=execute)
+    agent = object.__new__(AutoHuntAgent)
+    agent.tool_registry, agent.resume_workspace, agent.candidate_state = local, workspace, candidate
+    agent.router = NS(rule_engine=RuleEngine()) if routed else None
+    agent._conversation_history = []
+    filters = {"op": "all", "children": [
+        {"op": "condition", "text": "可以是实习", "quote": "可以是实习", "mode": "allow"},
+        {"op": "condition", "text": "不要外包", "quote": "不要外包", "mode": "require"}]}
+    data = draft(message, [step(quote=message.split("85分以上")[0].strip(),
+        result_limit=15, salary_min=15000, filters=filters),
+        {**step("mock_delivery_start", "85分以上的直接投递", min_score=85), "id": "delivery"}])
+    data["steps"][0]["slot_evidence"] = {"result_limit": message.split(" 月薪")[0]}
+    async def handle(message, *, previous=None):
+        model = ScriptedModel(data)
+        plan = await plan_request(model, local, message, dialogue=context.dialogue,
+            conditions=context.search_state, stamp=stamp)
+        plans.append(plan)
+        return await begin(plan, local)
+    async def route(message):
+        # Use the actual router's compound decision; no classifier/model API.
+        router = object.__new__(IntentRouter)
+        router.rule_engine = agent.router.rule_engine
+        router._last_decision = {}
+        router._scoped_hash = lambda _: "synthetic"
+        router._record = lambda *_: None
+        outcome = await router.route(message)
+        assert outcome.intent == "compound_request" and outcome.decision == "llm", outcome
+        routes.append(outcome.layer)
+        return await handle(message)
+    agent._handle_planned, agent._handle_routed = handle, route
+    reply = await agent._dispatch_contextual_message(message, None)
+    assert calls == ["job_search_start"], {"calls": calls, "reply": reply.message}
+    plan = plans[0]
+    assert not plan["questions"] and plan["steps"][0]["status"] == "waiting_external"
+    assert plan["steps"][1]["status"] == "pending" and not account["account_bound"]
+    # Opening / login verification is not search completion or account binding.
+    await advance(plan, local)
+    assert calls == ["job_search_start"]
+    account["account_bound"] = True
+    plan["steps"][0]["status"] = "completed"  # Confirmed synthetic search completion.
+    await advance(plan, local)
+    await advance(plan, local)
+    assert calls == ["job_search_start", "mock_delivery_start"], calls
+    assert plan["steps"][1]["status"] == "completed", plan
+    return {"calls": calls, "routes": routes, "login_waited": True,
+            "result_limit": plan["steps"][0]["arguments"]["result_limit"],
+            "salary_min": plan["steps"][0]["arguments"]["salary_min"]}
 
 
 async def pipeline(scenario, registry):

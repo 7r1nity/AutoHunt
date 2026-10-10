@@ -361,7 +361,7 @@ class CandidateProfileExtractor:
             normalized_text = text.casefold()
             evidenced_skills = [skill for skill in payload.skills if skill.casefold() in normalized_text]
             skills = _clean_values([*resume.keywords, *evidenced_skills], limit=100)
-            roles = _clean_values([*payload.role_suggestions, *resume.role_suggestions], limit=20)
+            roles = _clean_values(payload.role_suggestions, limit=20)
             return CandidateProfileView(
                 resume_id=resume.id,
                 skills=skills,
@@ -377,15 +377,13 @@ class CandidateProfileExtractor:
 
     @staticmethod
     def _fallback(resume: ResumeView) -> CandidateProfileView:
-        role = resume.role_suggestions[0] if resume.role_suggestions else None
         skill_text = "、".join(resume.keywords[:8]) or "尚未识别明确技能"
         return CandidateProfileView(
             resume_id=resume.id,
             skills=resume.keywords,
-            role_suggestions=resume.role_suggestions,
-            summary=(f"简历显示候选人可能适合{role}方向；已识别技能：{skill_text}。" if role
-                     else "简历内容已导入，尚未识别到明确岗位方向；请补充目标岗位。"),
-            extractor="deterministic",
+            role_suggestions=[],
+            summary=f"简历已导入；已识别技能：{skill_text}。岗位方向模型提取未完成，请重试解析或指定目标岗位。",
+            extractor="model_unavailable",
         )
 
 

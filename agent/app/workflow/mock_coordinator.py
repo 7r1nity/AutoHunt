@@ -163,21 +163,16 @@ class MockWorkflowCoordinator:
         except Exception:  # noqa: BLE001 - malformed saved state must not break delivery
             return None
 
-    def remember_authorization_scope(self, message: str, constraints: dict | None = None) -> None:
+    def remember_authorization_scope(self, message: str, constraints: dict | None = None, *, min_score: int | None = None) -> None:
         """Record the user's delivery instruction as the boundary of what is authorised.
 
         Only used for measurement so far. Remembering it here rather than deriving it at
         delivery time keeps the boundary tied to what the user actually said in the turn
         that authorised the batch, instead of to whatever the current state happens to be.
         """
-        from ..core.action_language import score_scope
         from ..security.risk import ScopedInstruction
         text = str(message or "").strip()
         if not text:
-            return
-        try:
-            scope = score_scope(text) or {}
-        except ValueError:
             return
         constraints = constraints or {}
         requirements: dict = {}
@@ -186,7 +181,7 @@ class MockWorkflowCoordinator:
             requirements["salary_min"] = salary
         self.authorization_scope = ScopedInstruction(
             tool="mock_delivery_start", quote=text[:200],
-            min_score=scope.get("min_score"), limit=constraints.get("result_limit"),
+            min_score=min_score, limit=constraints.get("result_limit"),
             requirements=requirements)
 
     async def queue_deliveries(self, *, min_score: int, session_id: str, task_id: str | None = None) -> dict:

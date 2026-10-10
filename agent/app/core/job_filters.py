@@ -58,14 +58,13 @@ def filter_schema(depth=4):
 
 
 def validate_filter(value, sources=()):
+    """Validate the condition tree, not the wording used to request it.
+
+    Sources are retained for API compatibility/audit. Condition strength and
+    paraphrases are model interpretation. JD evidence is still verified by
+    evaluate_filter before a hard condition can pass.
+    """
     expression = FilterExpression.model_validate(value)
-    if sources and any(not any((leaf.quote or leaf.text) in source for source in sources) for leaf in expression.leaves()):
-        raise ValueError("筛选条件必须引用用户原文或已保存的会话条件，不能由模型添加偏好")
-    if sources:
-        for leaf in expression.leaves():
-            mode = condition_mode(leaf.quote or leaf.text)
-            if leaf.mode != mode:
-                raise ValueError("条件强度与原文不一致；请引用该子条件的完整独立片段，不能把偏好升为硬条件或放宽硬条件")
     return expression
 
 

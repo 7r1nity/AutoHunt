@@ -44,51 +44,9 @@ def missing_search_message(has_resume: bool) -> str:
     return f"{reason}，本会话也没有明确的搜索岗位，因此我还没有启动搜索。请先上传简历，或告诉我想找什么岗位；没有简历也可以按你指定的岗位搜索。"
 
 
-#: Prefixes the job site itself uses as a specialisation in front of a role word
-#: ("NLP算法工程师", "AI算法工程师"). Only these may be dropped when widening a role
-#: label — a generic rule would mangle ordinary titles such as 交易员 or 分析师.
-SITE_ROLE_PREFIXES = (
-    "AI", "LLM", "NLP", "CV", "AIGC", "RAG", "Agent", "MLOps", "SRE",
-    "大模型", "机器学习", "深度学习", "强化学习", "多模态", "视觉", "语音",
-    "推荐", "搜索", "广告", "风控", "量化", "数据挖掘", "自然语言",
-    # Seniority words the site never puts in a title; dropping them lets
-    # "高级 LLM 算法工程师" reach the titles that do exist.
-    "高级", "资深", "初级", "中级", "专家",
-)
-
-
 def browser_search_keyword(value: str) -> str:
-    """Reduce a role label to a term the job site can actually match.
-
-    The site matches a literal substring, and its titles put at most one known
-    specialisation in front of the role word. Only that specialisation is dropped,
-    and only when a role word follows, so 分析师/交易员/专员 and every other plain
-    role title survive untouched.
-    """
-    text = re.sub(r"\s+", " ", str(value or "")).strip()
-    if not text:
-        return ""
-    pattern = "|".join(sorted((re.escape(item) for item in SITE_ROLE_PREFIXES), key=len, reverse=True))
-    # Peel every leading prefix, not just the first: "高级 LLM 算法工程师" carries a
-    # seniority word and a direction, and "AI/LLM 算法工程师" carries a slash-joined
-    # pair. Both must reduce all the way to the role word, and a prefix is only dropped
-    # when something follows it.
-    #: one prefix, or several joined by slashes: "AI", "LLM", "AI/LLM/NLP"
-    run = rf"(?:{pattern})(?:\s*/\s*(?:{pattern}))*"
-    stripped = text
-    while True:
-        reduced = re.sub(rf"^{run}\s+", "", stripped, count=1, flags=re.I).strip()
-        if reduced == stripped or not reduced:
-            break
-        stripped = reduced
-    if stripped and re.search(r"[\u4e00-\u9fff]", stripped) and len(stripped) >= 2:
-        return stripped
-    # A slash inside the role word itself ("数据分析/建模"): keep the first part.
-    if "/" in text:
-        head = text.split("/", 1)[0].strip()
-        if head:
-            return head
-    return text
+    """Lossless formatting only: model-selected semantic keywords stay intact."""
+    return re.sub(r"\s+", " ", str(value or "")).strip()
 
 
 def simple_search_patch(message: str, cities: tuple[str, ...]) -> dict | None:

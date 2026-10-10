@@ -48,6 +48,8 @@ _RISK_ORDER = {SecurityRisk.LOW: 1, SecurityRisk.MEDIUM: 2, SecurityRisk.HIGH: 3
 
 #: Irreversible or bulk effects. Submitting a résumé cannot be taken back.
 _IRREVERSIBLE_TOOLS = frozenset({"mock_delivery_start"})
+# Browser search reads a website; it does not contact recruiters or submit.
+_READ_TOOLS = frozenset({"job_search_start"})
 #: Read-only tools never need confirmation; this is classification, not leniency.
 _READ_EFFECT = "read"
 
@@ -86,7 +88,7 @@ def grade_action(tool: str, arguments: dict[str, Any] | None = None, *,
                  explicit_instruction: str = "") -> ActionRisk:
     """Grade one action. Unknown tools grade UNKNOWN rather than being assumed safe."""
     arguments = arguments or {}
-    if effect == _READ_EFFECT:
+    if effect == _READ_EFFECT or tool in _READ_TOOLS and not arguments.get("dry_run"):
         return ActionRisk(SecurityRisk.LOW, tool, "只读操作，无外部副作用",
                           authorised_by=explicit_instruction)
     if tool in _IRREVERSIBLE_TOOLS:
@@ -96,7 +98,7 @@ def grade_action(tool: str, arguments: dict[str, Any] | None = None, *,
         else:
             reason = "对外投递且不可撤销，影响范围未知"
         return ActionRisk(SecurityRisk.HIGH, tool, reason, authorised_by=explicit_instruction)
-    if effect == "write":
+    if effect in {"write", "session"}:
         return ActionRisk(SecurityRisk.MEDIUM, tool, "可回退的写入", authorised_by=explicit_instruction)
     if effect == "external":
         return ActionRisk(SecurityRisk.HIGH, tool, "对外副作用", authorised_by=explicit_instruction)

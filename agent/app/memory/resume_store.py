@@ -51,18 +51,6 @@ SKILL_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("RAG", (" rag", "检索增强生成")),
 )
 
-ROLE_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("全栈工程师", ("full stack", "full-stack", "全栈")),
-    ("前端工程师", ("frontend", "front-end", "前端")),
-    ("后端工程师", ("backend", "back-end", "后端")),
-    ("AI工程师", ("ai engineer", "artificial intelligence", "人工智能", "大模型", "llm")),
-    ("机器学习工程师", ("machine learning", "机器学习", "ml engineer")),
-    ("数据工程师", ("data engineer", "数据工程")),
-    ("软件工程师", ("software engineer", "software developer", "软件工程师", "软件开发")),
-    ("DevOps工程师", ("devops", "site reliability", "sre")),
-)
-
-
 class ResumeError(ValueError):
     pass
 
@@ -138,25 +126,10 @@ def extract_resume_text(filename: str, data: bytes) -> str:
 
 
 def analyze_resume_text(text: str) -> tuple[list[str], list[str], str]:
+    """Local skill highlighting only; semantic role/search extraction is model-owned."""
     normalized = f" {text.lower()} "
     skills = [label for label, patterns in SKILL_PATTERNS if any(pattern in normalized for pattern in patterns)]
-    scored_roles: list[tuple[int, int, str]] = []
-    for order, (role, patterns) in enumerate(ROLE_PATTERNS):
-        score = sum(normalized.count(pattern) for pattern in patterns)
-        if score:
-            scored_roles.append((score, -order, role))
-    scored_roles.sort(reverse=True)
-    roles = [role for _, _, role in scored_roles[:3]]
-    if not roles:
-        if any(skill in skills for skill in ("React", "Next.js", "Vue", "Angular")):
-            roles = ["前端工程师"]
-        elif any(skill in skills for skill in ("FastAPI", "Django", "Spring Boot", "Node.js")):
-            roles = ["后端工程师"]
-        elif any(skill in skills for skill in ("PyTorch", "TensorFlow", "LLM", "RAG")):
-            roles = ["AI工程师"]
-    primary_skills = [skill for skill in skills if skill in {"Python", "Java", "Go", "TypeScript", "React", "Next.js", "Node.js", "LLM"}]
-    suggested_query = " ".join([roles[0], *primary_skills[:2]])[:120] if roles else ""
-    return skills[:20], roles, suggested_query
+    return skills[:20], [], ""
 
 
 class ResumeStore:

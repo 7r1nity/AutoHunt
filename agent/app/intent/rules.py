@@ -22,7 +22,7 @@ from pathlib import Path
 
 from .normalize import normalize_text, security_text
 from .store import RouterStore
-from ..core.search_language import parse_search_message, COMMAND_PATTERN
+from ..core.search_language import COMMAND_PATTERN
 
 BUILTIN_RULESET_VERSION = 1
 
@@ -244,32 +244,14 @@ class RuleEngine:
         normalized = normalize_text(text)
         security = security_text(text)
         negated = bool(_NEGATION_RE.search(normalized))
-        parsed_search = parse_search_message(text)
         if negated:
             self._hit("p4_negation_guard")
         for rule, compiled in self._compiled:
             if negated and rule.intent in ACTION_INTENTS:
                 continue
-            if rule.intent in {"pause_search", "resume_search", "stop_search"}:
-                from ..workflow.planning import command_grounded
-                tool = {"pause_search": "browser_task_pause", "resume_search": "browser_task_resume", "stop_search": "browser_task_stop"}[rule.intent]
-                if not command_grounded(tool, text, [text]):
-                    continue  # Normalization must not erase quotation/question polarity.
-                action = {"pause_search": "pause", "resume_search": "resume", "stop_search": "stop"}[rule.intent]
-                if parsed_search.complete and parsed_search.action == action:
-                    self._hit(rule.id)
-                    return RuleMatch(rule.id, rule.category, rule.intent, rule.reason)
             subject = security if rule.category == "P0" else normalized
-            if rule.intent == "list_jobs" and parsed_search.action == "results":
-                self._hit(rule.id)
-                return RuleMatch(rule.id, rule.category, rule.intent, rule.reason)
-            if rule.intent == "search_jobs":
-                # Overlays cannot authorize partly parsed prose or negative/
-                # interrogative requests just because a loose regex matches.
-                if parsed_search.authorized and parsed_search.complete:
-                    self._hit(rule.id)
-                    return RuleMatch(rule.id, rule.category, rule.intent, rule.reason)
-                continue
+            # This is only an intent hint. Model planning, not this matcher,
+            # extracts role words, numeric slots and compound conditions.
             for pattern in compiled:
                 if pattern.search(subject):
                     self._hit(rule.id)

@@ -16,7 +16,7 @@ def compile_context(saved: dict, conditions: dict, history: list[dict] | None = 
     now = time.time() if clock is None else clock
     routing = purpose == "router"
     task, instruction = saved.get("task_request") or {}, saved.get("instruction_request") or {}
-    root = {key: task.get(key) for key in ("id", "origin_run_id", "run_id", "original", "status",
+    root = {key: task.get(key) for key in ("id", "origin_run_id", "run_id", "original", "interpretation", "status",
         "conditions", "condition_overrides", "amendments", "revoked_tools", "execution_started", "failure", "resume_stamp", "updated_at")} if task else None
     if root and routing and len(root.get("original") or "") > 1000:
         root["original"] = root["original"][:1000]

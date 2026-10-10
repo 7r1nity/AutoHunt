@@ -6,6 +6,7 @@ user intent, invokes a tool or replays an effect. Every candidate is revalidated
 from __future__ import annotations
 
 import re
+from contextvars import ContextVar
 from dataclasses import asdict, dataclass
 from typing import Literal
 
@@ -49,21 +50,11 @@ class PlanValidationError(ValueError):
 
 
 def citation_found(quote: str, sources: list[str]) -> bool:
-    """Whether a plan citation is the user's own words.
+    """Audit whether a copied citation appears in user text (whitespace tolerant).
 
-    Two comparisons, both sanctioning *whitespace only*: an exact match, then the same
-    comparison with whitespace runs collapsed. Nothing else is normalised — not
-    punctuation, not case, not digits — because loosening those would let text the user
-    never wrote become an authorised parameter, which is the whole point of the check.
-
-    The collapsed comparison matches what planning already does when it repairs a copied
-    span (restore_quote_spacing documents the same restriction). Without it, that repair
-    was defeated for any source containing a double space — "帮我找十五份  月薪15k以上的
-    工作" collapsed to a single space, the exact test failed, and each repair round
-    repeated the failure until the turn was reported as "内部规划修正后仍未通过校验".
-
-    This is the single definition of "citation present", so planning and validation cannot
-    drift apart again; the whitespace rule lives in one place.
+    A mismatch is a non-blocking trace warning, not authorization or proof of
+    intent. Semantic paraphrases and normalized business parameters belong to
+    the model; execution authority binds the resulting structured action.
     """
     if not quote.strip():
         return False
@@ -75,8 +66,7 @@ def citation_found(quote: str, sources: list[str]) -> bool:
 
 def preflight(steps: list[dict], goals: list[dict], sources: list[str], tools: set[str]) -> None:
     """Report all structural defects together, instead of repairing one ID at a time."""
-    global _warnings
-    _warnings = []          # each plan is judged on its own findings
+    _warnings.set([])       # isolated per concurrent planning context
     issues: list[ValidationIssue] = []
     ids = {step["id"] for step in steps}
     if len(ids) != len(steps):
@@ -100,7 +90,7 @@ def preflight(steps: list[dict], goals: list[dict], sources: list[str], tools: s
             issues.append(ValidationIssue("unknown_tool", "repair", "工具不在已提供能力中", step["tool"]))
         if step["id"] in step["depends_on"] or not set(step["depends_on"]) <= ids:
             issues.append(ValidationIssue("invalid_dependency", "repair", "步骤依赖无效", step["tool"]))
-    if not issues:
+    if not any(issue.blocking for issue in issues):
         resolved: set[str] = set()
         while len(resolved) < len(ids):
             available = {step["id"] for step in steps if step["id"] not in resolved
@@ -111,6 +101,7 @@ def preflight(steps: list[dict], goals: list[dict], sources: list[str], tools: s
             resolved.update(available)
     if issues:
         issues = list(dict.fromkeys(issues))
+        _record_warnings([issue for issue in issues if not issue.blocking])
         blocking = [issue for issue in issues if issue.blocking]
         if not blocking:
             # Warnings only: the plan proceeds and the findings stay visible. Refusing
@@ -124,17 +115,16 @@ def preflight(steps: list[dict], goals: list[dict], sources: list[str], tools: s
 
 #: Warnings from the most recent preflight, so a caller can surface what would
 #: previously have been a refusal. Bounded: only the latest plan matters.
-_warnings: list[dict] = []
+_warnings: ContextVar[list[dict]] = ContextVar("plan_validation_warnings", default=[])
 
 
 def _record_warnings(issues: list[ValidationIssue]) -> None:
-    global _warnings
-    _warnings = [issue.public() for issue in issues]
+    _warnings.set([issue.public() for issue in issues])
 
 
 def preflight_warnings() -> list[dict]:
     """Non-blocking findings from the last preflight, for reporting and measurement."""
-    return list(_warnings)
+    return list(_warnings.get())
 
 
 def restore_quote_spacing(quote: str, sources: list[str], *, max_length: int) -> str:

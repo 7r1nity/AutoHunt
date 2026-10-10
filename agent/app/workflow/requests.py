@@ -9,6 +9,7 @@ import re
 import time
 import uuid
 from dataclasses import dataclass
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -20,6 +21,7 @@ class TaskRequest(BaseModel):
     origin_run_id: str = ""
     original: str = Field(min_length=1, max_length=12000)
     status: str = "planning"
+    interpretation: Literal["legacy", "model"] = "legacy"
     resume_stamp: str = ""
     conditions: dict = Field(default_factory=dict)
     amendments: list[dict] = Field(default_factory=list, max_length=12)
@@ -79,20 +81,15 @@ def capture_request(saved: dict, message: str, run_id: str, stamp: str, conditio
     if old.get("original") == message and (retry or old.get("run_id") == run_id) and not old.get("execution_started") and old.get("status") not in {"finished", "cancelled", "outcome_indeterminate"}:
         return TaskRequest.model_validate({**old, "run_id": run_id, "status": "planning", "failure": "",
             "resume_stamp": old.get("resume_stamp") or stamp})
-    from ..core.search_contract import explicit_search_constraints
-    try:
-        explicit = explicit_search_constraints(message)
-    except ValueError:
-        explicit = {}  # Conflict remains for the planner/executor to reject.
     return TaskRequest(original=message, run_id=run_id, origin_run_id=run_id,
-        resume_stamp=stamp, conditions={**conditions, **explicit})
+        resume_stamp=stamp, conditions=dict(conditions))
 
 
 def amended_request(saved: dict, conditions: dict, message: str, source: str, fields: set[str] | None = None) -> TaskRequest | None:
     """Only an observed, validated session edit updates requirements; no authority."""
     from ..core.search_language import parse_search_message
     root = saved.get("task_request") or {}
-    if not root or not parse_search_message(root.get("original", "")).authorized:
+    if not root or not (root.get("interpretation") == "model" or parse_search_message(root.get("original", "")).authorized):
         return None
     changed = {key: value for key, value in conditions.items()
         if key in {"queries", "locations", "result_limit", "salary_min", "max_jobs", "query_source", "resume_stamp", "source", "filters"}
@@ -140,7 +137,7 @@ def canonical_request(saved: dict, history: list[dict], records: list[dict] | No
     They provide execution evidence; no historical authorization/token is imported.
     """
     current = saved.get("task_request") or {}
-    if selector != "first" and action_request(current.get("original", "")):
+    if selector != "first" and (current.get("interpretation") == "model" or action_request(current.get("original", ""))):
         return TaskRequest.model_validate(current)
     from datetime import datetime
     from ..runtime.dialogue import REJECT

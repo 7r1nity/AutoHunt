@@ -240,7 +240,7 @@ def condition_mode(text: str) -> str:
         return "require"
     # Employer eligibility ("公司接受应届生/学历不限") is not the user's
     # permission to include any job. Do not weaken it through a shared word.
-    if re.search(r"可以有|也可以|也行|^接受|我(?:也)?(?:可以)?接受", text):
+    if re.search(r"可以(?:有|是|包含)|也可以|也行|^接受|我(?:也)?(?:可以)?接受", text):
         return "allow"
     return "require"
 

@@ -6,7 +6,7 @@ import re
 
 from .models import AgentLane, BrowserTaskStatus, ChatResponse, JobPreferenceUpdate, ToolEvent
 from .agent_tools import AgentToolRegistry, ToolLoopState
-from .search_contract import explicit_search_constraints, simple_search_patch, safe_role_keyword
+from ..runtime.search_state import prepare_search_state
 from .search_language import parse_search_message, SEARCH_CITIES, role_fragments
 from .replies import public_reply, tool_reply
 from ..intent.catalog import DEFAULT_DIRECT_INTENTS
@@ -191,8 +191,9 @@ def _search_command(message: str) -> dict | None:
 
 
 def _fast_search_hint(message: str) -> dict | None:
-    parsed = parse_search_message(message)
-    return parsed.hint() if parsed.complete else None
+    """Operation-only fast route; all new semantic parameters go to models."""
+    text = message.strip().rstrip("。！!").strip()
+    return {} if re.fullmatch(r"(?:请)?(?:帮我找工作|开始搜索|再次搜索|再次检索|重新搜索|重新检索|再搜一次|按现有条件(?:再次|重新)?(?:搜索|检索))", text) else None
 
 
 def _parse_refinement_fields(message: str) -> dict:
@@ -372,30 +373,11 @@ class AutoHuntAgent:
         """Execute an unambiguous search command without an LLM routing round-trip."""
         state = self.candidate_state.read()
         session = (active_run().search_state or {}) if active_run() else {}
-        locations = list(search_hint["locations"] if "locations" in search_hint else session.get("locations", []))
-        if not locations and "locations" not in search_hint and "locations" not in session and state.preferences.locations.source == "user_confirmed":
-            locations = state.preferences.locations.values[:3]
-        queries = (session.get("queries") if not search_hint.get("query") and not search_hint.get("direction") else None) or _compose_queries(
-            search_hint.get("query"),
-            search_hint.get("direction"),
-            locations,
-            self.candidate_state,
-        )
+        queries = session.get("queries") or prepare_search_state(
+            {}, state, self.resume_workspace.read_document().version).get("queries") or []
         if not queries:
             return self._missing_search_response()
-        arguments = {
-            "query": queries[0],
-            "queries": queries,
-            "locations": locations,
-            **{name: session[name] for name in ("result_limit", "salary_min", "max_jobs") if session.get(name) is not None},
-            **{name: search_hint[name] for name in ("result_limit", "salary_min", "max_jobs") if search_hint.get(name) is not None},
-            **explicit_search_constraints(message),
-        }
-        if not search_hint.get("query") and not search_hint.get("direction"):
-            # Let the executor inherit the session/resume rather than treating
-            # an automatically selected fallback as an explicit role override.
-            arguments.pop("query")
-            arguments.pop("queries")
+        arguments = {}  # Inherit the saved model-extracted state in the executor.
         outcome = await self.tool_registry.execute(
             "job_search_start",
             arguments,
@@ -452,14 +434,13 @@ class AutoHuntAgent:
         emit("progress", detail="正在识别请求并读取当前简历与偏好")
         context = active_run()
         context.user_message = message
-        patch = simple_search_patch(message, _KNOWN_CITIES)
+        patch = None  # Semantic search edits are parsed by models, never regex.
         engine = getattr(self.router, "rule_engine", None)
         safety_match = engine.match(message) if engine else None
         if safety_match and safety_match.category == "P0":
             response = await self._handle_routed(message)
         else:
             self._begin_context(message)
-            patch = patch or slot_answer_patch(context.dialogue or {}, message)
             from ..runtime.understanding import turn_role
             role = turn_role(message, patch=patch)
             emit("turn_understanding", role=role.kind, new_task=role.new_task,
@@ -502,7 +483,7 @@ class AutoHuntAgent:
         if stripped not in {"退出当前任务", "不办了", "重置上下文", "清空会话状态", "重新开始"} and not REJECT.fullmatch(stripped):
             current_request = (context.dialogue or {}).get("task_request") or {}
             selector = request_selector(message)
-            if not action_request(current_request.get("original", "")) or selector == "first":
+            if (current_request.get("interpretation") != "model" and not action_request(current_request.get("original", ""))) or selector == "first":
                 history = getattr(self, "_history_source", self._conversation_history)
                 epoch = (context.dialogue or {}).get("history_epoch", 0)
                 if epoch:
@@ -516,7 +497,7 @@ class AutoHuntAgent:
                 if recovered:
                     dialogue_change("request_state", request=recovered.model_dump())
                     previous = (context.dialogue or {}).get("instruction_request") or {}
-                    if previous and not action_request(previous.get("original", "")):
+                    if previous and current_request.get("interpretation") != "model" and not action_request(previous.get("original", "")):
                         # Discard only the polluted interpretation, never history,
                         # search conditions, live executors or valid task plans.
                         dialogue_change("instruction", request=None)
@@ -610,7 +591,9 @@ class AutoHuntAgent:
                 dialogue_change("request_state", request={**root, "revoked_tools": sorted(set(root.get("revoked_tools", [])) | set(pending["revoked_tools"]))})
         engine = getattr(self.router, "rule_engine", None)
         known_match = engine.match(message) if engine else None
-        if pending and pending_slot_answer(message, pending, rule_match=known_match) and not REJECT.fullmatch(stripped):
+        if pending and not REJECT.fullmatch(stripped) and stripped not in {"停止", "先中断", "停止任务", "停止搜索", "暂停搜索"}:
+            # The model decides whether this is an amendment, confirmation or
+            # new topic. A failed regex must not detach the original request.
             return await self._handle_planned(message, previous=pending)
         search_action = parse_search_message(message)
         if search_action.authorized or REJECT.fullmatch(stripped) or search_action.action in {"stop", "pause"}:
@@ -632,19 +615,6 @@ class AutoHuntAgent:
             return await self._handle_routed(message) if self.router else await self._handle_planned(message)
         if CONFIRM.fullmatch(stripped) or REJECT.fullmatch(stripped):
             return await self._resolve_context_confirmation(stripped)
-        from .action_language import explicit_mock_delivery
-        if self.tool_registry and self.tool_registry.mock_workflow:
-            try:
-                delivery_scope = explicit_mock_delivery(message)
-            except ValueError as exc:
-                return ChatResponse(message=str(exc), lane=AgentLane.APPLICATION)
-            tool = "mock_delivery_cancel" if re.search(r"(?:停止|取消|关闭|暂停|不要再)自动投递", message) else "mock_delivery_start" if delivery_scope else None
-            if tool:
-                if tool == "mock_delivery_cancel":
-                    dialogue_change("task", kind="plan_id", id="", status="cancelled", bind=True)
-                outcome = await self.tool_registry.execute(tool, delivery_scope or {}, user_message=message, state=ToolLoopState())
-                return ChatResponse(message=outcome.content["message"] if outcome.status == "ok" else str(outcome.content),
-                    lane=AgentLane.APPLICATION, tool_events=[ToolEvent(tool=tool, status=outcome.status, detail=str(outcome.content)[:300])])
         from .job_followups import job_followup_request
         detail_request = job_followup_request(stripped, context.dialogue or {})
         if detail_request and self.tool_registry:
@@ -675,19 +645,6 @@ class AutoHuntAgent:
                     tool_events=[ToolEvent(tool="search_state_update", status="ok", detail="仅更新明确字段")])
             else:
                 response = ChatResponse(message=str(outcome.content), lane=AgentLane.APPLICATION)
-        elif _is_mock_dry_run_request(message) and _search_command(message) is not None:
-            simple_dry_run = re.sub(r"(?i)^(?:dry[ -]run|试运行)\s*", "", message).strip()
-            if _fast_search_hint(simple_dry_run) is None:
-                if self.tool_registry is not None and hasattr(self.llm, "generate_with_tools"):
-                    return await self._handle_planned(message)
-                return ChatResponse(message="试运行条件尚未完整解析，没有启动浏览器。请明确岗位、城市、数量和月薪条件。", lane=AgentLane.APPLICATION)
-            hint = _fast_search_hint(simple_dry_run) or _search_command(message) or {}
-            state = self.candidate_state.read()
-            locations = list(hint.get("locations") or [])
-            if not locations and state.preferences.locations.source == "user_confirmed":
-                locations = state.preferences.locations.values[:3]
-            queries = _compose_queries(hint.get("query"), hint.get("direction"), locations, self.candidate_state)
-            response = self._confirm_search_response(queries, locations, dry_run=True)
         elif self.router is not None:
             response = await self._handle_routed(message)
         else:
@@ -753,14 +710,14 @@ class AutoHuntAgent:
         if self.router:
             self.router.record_final(message, "plan_clarifying" if plan["questions"] else
                 "+".join(dict.fromkeys(step["tool"] for step in plan["steps"])) or "answer")
-        if tracked and previous and not action_request(plan["original"]):
-            # A semantic detour/read is not a replacement task definition.
-            dialogue_change("request_state", request=prior_root)
-            tracked = False
+        # Model-understood actions are task anchors even on a rule miss.
+        tracked = bool(plan["questions"] or any(
+            step["effect"] != "read" for step in plan["steps"]))
         if tracked:
             # The planner can decide that a semantic reply is a new task. Never
             # leave memory bound to the old request after that decision.
             task_request = capture_request(context.dialogue or {}, plan["original"], context.run_id, stamp, context.search_state or {})
+            task_request.interpretation = "model"
             task_request.status = "clarifying" if plan["questions"] else "running" if plan["steps"] else "finished"
             task_request.revoked_tools = plan.get("revoked_tools", [])
             task_request.conditions.update(plan.get("verified_conditions", {}))
@@ -828,13 +785,10 @@ class AutoHuntAgent:
                 lane=AgentLane.CANDIDATE,
                 tool_events=[ToolEvent(tool="intent_router", status="blocked", detail=outcome.intent)],
             )
-        if self.learning_plans is not None and self._learning_plan_command(message):
-            return await self._handle_plain(message)
-        # Classification confidence is not parameter-completeness confidence.
-        # Never let a direct/clarify route strip constraints from a search request.
-        if outcome.intent == "search_jobs" and _fast_search_hint(message) is None:
-            emit("progress", detail="复杂搜索请求：交给主模型解析简历方向、数量与筛选条件")
-            return await self._handle_plain(message)
+        from ..workflow.planning import shortcut_safe
+        if not shortcut_safe(message):
+            # A route label is not a parameter parser and cannot discard goals.
+            return await self._handle_planned(message)
         if outcome.decision == "clarify":
             labels = "、".join(f"「{option.label}」" for option in outcome.clarify_options)
             dialogue_change("clarify", message=message, options=[option.label for option in outcome.clarify_options])
@@ -1100,59 +1054,10 @@ class AutoHuntAgent:
             raise
 
     async def _handle_plain(self, message: str) -> ChatResponse:
-        from ..growth.requests import continued_plan_scope, resume_stamp
-        from ..workflow.planning import shortcut_safe
-        continued = continued_plan_scope((active_run().dialogue or {}) if active_run() else {}, message,
-            resume_stamp(self.resume_workspace.read_document(), self.candidate_state)) if self.resume_workspace else None
-        # Only the bounded continuation of a previously executed single plan
-        # request uses this compatibility fast path. New goals use the planner.
-        if self.learning_plans is not None and continued is not None and shortcut_safe(message):
-            if self.tool_registry is not None:
-                outcome = await self.tool_registry.execute(
-                    "learning_plan_generate", {"focus": message[:400]},
-                    user_message=message, state=ToolLoopState(),
-                )
-                if outcome.status != "ok":
-                    return ChatResponse(message=str(outcome.content), lane=AgentLane.GROWTH,
-                        tool_events=[ToolEvent(tool=outcome.tool, status=outcome.status, detail=str(outcome.content)[:300])])
-                plan = outcome.content
-            else:
-                try:
-                    plan = await self.learning_plans.generate(message)
-                except ValueError as exc:
-                    return ChatResponse(message=str(exc), lane=AgentLane.GROWTH)
-            gaps = plan["gaps"]
-            return ChatResponse(
-                message=(
-                    f"已根据当前简历和 **{plan['jobs_analyzed']} 份 JD** 生成学习计划《{plan['title']}》。"
-                    f"识别 {len(gaps)} 项有原文证据的差距；请打开「成长计划」查看逐步任务、练习产物与验收标准。"
-                    "完成后提交真实实践证据，可生成技能或项目简历补充提案。"
-                ),
-                lane=AgentLane.GROWTH,
-                tool_events=[ToolEvent(tool="learning_plan_generate", status="ok", detail=f"生成 {len(gaps)} 项计划，依据 {plan['jobs_analyzed']} 份 JD")],
-            )
         if self.tool_registry is None:
             return await self._handle_legacy(message)
-        parsed_search = parse_search_message(message)
-        search_hint = parsed_search.hint()
-        if parsed_search.authorized:
-            emit("search_parse", action=parsed_search.action, complete=parsed_search.complete,
-                 reason=parsed_search.reason, fields=parsed_search.fields)
-        lowered = message.lower()
-        resume_evidence_update = (
-            any(term in lowered for term in ("加入简历", "更新简历", "补充简历", "记录到简历", "写进简历", "add to resume"))
-            and any(term in lowered for term in ("实习", "项目", "课程", "代码", "工作经历", "intern", "project"))
-        )
-        fast_search = bool(
-            search_hint is not None
-            and not _is_job_results_request(message)
-            and not resume_evidence_update
-            and not _is_resume_review_request(message)
-            and not _is_resume_update_request(message)
-            and not any(term in lowered for term in _PREFERENCE_UPDATE_VERBS)
-            and not _parse_search_term_removal(message)
-            and _fast_search_hint(message) is not None
-        )
+        search_hint = _fast_search_hint(message)
+        fast_search = search_hint is not None
         try:
             response = (
                 await self._start_search_without_llm(message, search_hint)
@@ -1174,7 +1079,7 @@ class AutoHuntAgent:
         return response
 
     async def _handle_tool_loop(self, message: str) -> ChatResponse:
-        search_hint = _search_command(message)
+        search_hint = _fast_search_hint(message)
         instructions = (
             "你是 AutoHunt 主 Agent。根据用户真实意图选择高层工具，并在每次工具 Observation 后决定继续调用或回答。"
             "对用户用自然语言解释结果，禁止照搬工具名、JSON、Python字典、内部槽位或检查点；这些只保留在运行记录。"

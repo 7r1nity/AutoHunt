@@ -94,6 +94,29 @@ def explicit_mock_delivery(message: str) -> dict | None:
     return scope
 
 
+def delivery_shortcut(message: str) -> tuple[str, dict] | None:
+    """Completely consume a *single* batch command, not just its score.
+
+    This is an optimization grammar, never an independent authorization rule.
+    Additional goals/criteria belong to the complete planner; it must not drop
+    them or check account binding before a preceding search has run.
+    """
+    meaning = understand(message)
+    text = re.sub(r"\s+", "", message).rstrip("。！!")
+    prefix = r"(?:请|帮我|现在|先)*(?:把|将)?"
+    if (meaning.commands("mock_delivery_cancel") and re.fullmatch(
+            prefix + r"(?:停止|取消|关闭|暂停|不要再)(?:所有|全部)?(?:自动|批量)?投递", text)):
+        return "mock_delivery_cancel", {}
+    label = r"(?:匹配(?:分数|分|度)?|分数|评分)?"
+    minimum = label + r"(?:在|为)?(?:\d{1,3}(?:分)?(?:及)?(?:以上|之上)|(?:不低于|至少|>=|≥|高于|大于|>)\d{1,3}(?:分)?)"
+    objects = r"(?:的)?(?:岗位|职位)?(?:都)?"
+    action = r"(?:自动|批量|直接)投递(?:简历)?"
+    if not re.fullmatch(prefix + r"(?:" + minimum + objects + action + r"|" + action + minimum + objects + r")", text):
+        return None
+    scope = explicit_mock_delivery(message)
+    return ("mock_delivery_start", scope) if scope else None
+
+
 def plan_scope_answer(message: str) -> dict | None:
     """Only an elliptical range answer, not a new topic or a quoted instruction."""
     if not positive_action(message):

@@ -129,12 +129,6 @@ class IntentRouter:
             outcome = RouteOutcome("llm", "compound_request", "context:task_reference")
             self._record(outcome, qhash, started)
             return outcome  # Generic continuation must never bind directly to a browser.
-        from ..workflow.planning import shortcut_safe
-        if (not match or match.category != "P0") and not shortcut_safe(message):
-            outcome = RouteOutcome("llm", "compound_request", "rule:complete_goal_required")
-            self._record(outcome, qhash, started)
-            self._last_decision[qhash] = outcome
-            return outcome
         if match is not None:
             outcome = RouteOutcome(
                 decision="blocked" if match.category == "P0" else self._decision_for(match.intent),
@@ -145,22 +139,6 @@ class IntentRouter:
             self._record(outcome, qhash, started)
             if match.category != "P0":
                 self._last_decision[qhash] = outcome
-            return outcome
-
-        # A complete parameter grammar is also a rule hit. Do not spend a small
-        # model round-trip on common role/city/count/salary commands.
-        from ..core.search_language import parse_search_message
-        parsed_search = parse_search_message(message)
-        if parsed_search.authorized and parsed_search.complete:
-            outcome = RouteOutcome(decision="direct", intent="search_jobs", layer="rule:complete_search")
-            self._record(outcome, qhash, started)
-            self._last_decision[qhash] = outcome
-            return outcome
-        if parsed_search.authorized:
-            # Intent is already clear; only parameter reasoning is missing.
-            # Skip the classification-only model, which cannot fill those fields.
-            outcome = RouteOutcome(decision="llm", intent="search_jobs", layer="rule:search_needs_parameters")
-            self._record(outcome, qhash, started)
             return outcome
 
         # --- P5: clarify memory ---------------------------------------------

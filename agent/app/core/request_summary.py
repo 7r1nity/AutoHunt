@@ -97,7 +97,7 @@ def request_context(saved: dict) -> dict:
         "active_intent": saved.get("active_intent", "general"),
         "turn": saved.get("turn", 0), "revision": saved.get("revision", 0),
         "task_request": {key: request.get(key) for key in
-            ("id", "origin_run_id", "original", "conditions", "amendments", "revoked_tools", "status", "execution_started", "failure")} if request else None,
+            ("id", "origin_run_id", "original", "interpretation", "conditions", "amendments", "revoked_tools", "status", "execution_started", "failure")} if request else None,
         "instruction": {key: instruction.get(key) for key in
             ("id", "original", "status", "questions", "answers", "revoked_tools")} if instruction else None,
         "tasks": saved.get("tasks", {}),
@@ -113,12 +113,14 @@ def request_context(saved: dict) -> dict:
 def request_summary(saved: dict, conditions: dict, history: list[dict] | None = None) -> str:
     from ..workflow.requests import action_request, failed_history_request
     request = saved.get("task_request") or saved.get("instruction_request") or {}
-    if not action_request(request.get("original", "")) and history:
+    recognized = request.get("interpretation") == "model" or action_request(request.get("original", ""))
+    if not recognized and history:
         recovered = failed_history_request(history)
         request = recovered.model_dump() if recovered else {}
+        recognized = bool(recovered)
     original = request.get("original", "")
     lines = []
-    if original and action_request(original):
+    if original and recognized:
         # Quote the actual request; never convert defaults into user requirements.
         lines += ["你最近记录的任务是：", "> " + original[:2000].replace("\n", "\n> ")]
         status = request.get("status")
@@ -126,7 +128,7 @@ def request_summary(saved: dict, conditions: dict, history: list[dict] | None = 
         # browser ran or that session defaults were already updated.
         from .search_contract import explicit_search_constraints
         try:
-            requirements = {**explicit_search_constraints(original), **{key: value for key, value in request.get("conditions", {}).items()
+            requirements = {**(explicit_search_constraints(original) if request.get("interpretation") != "model" else {}), **{key: value for key, value in request.get("conditions", {}).items()
                 if value is not None or key in request.get("condition_overrides", {}) or any(key in item.get("fields", {}) for item in request.get("amendments", []))}}
         except ValueError:
             requirements = {}
@@ -149,6 +151,6 @@ def request_summary(saved: dict, conditions: dict, history: list[dict] | None = 
             lines.append("任务状态：" + labels.get(status, "请查看运行记录") + "。")
     else:
         lines.append("当前没有可核对的完整任务请求；不能把简历推导的岗位方向当成你已确认的全部需求。")
-    heading = "原任务已记录的搜索要求（尚未执行）：" if original and action_request(original) and not request.get("execution_started") else "当前会话搜索条件："
+    heading = "原任务已记录的搜索要求（尚未执行）：" if original and recognized and not request.get("execution_started") else "当前会话搜索条件："
     lines += ["", search_summary(conditions).replace("当前会话搜索条件：", heading, 1), "", "以上是需求与条件回顾，没有启动搜索或修改任何条件。"]
     return "\n".join(lines)
