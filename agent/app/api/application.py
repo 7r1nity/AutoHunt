@@ -329,7 +329,7 @@ async def run_events(run_id: str, after: int = Query(default=0, ge=0)):
 async def run_steps(run_id: str, after: int = Query(default=0, ge=0)) -> list[dict]:
     try:
         run_store.get(run_id)
-        return run_store.events(run_id, after)
+        return run_store.public_events(run_id, after)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="运行记录不存在") from exc
 

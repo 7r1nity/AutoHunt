@@ -114,7 +114,7 @@ def topic_for(message: str, previous: str = "general") -> str:
 
 
 def trace(state: DialogueState, kind: str, source: str, **data):
-    item = {"turn": state.turn, "kind": kind, "source": source, **redact(data)}
+    item = {"turn": state.turn, "kind": kind, "source": source, **copy.deepcopy(data)}
     state.trace.append(item)
     if len(state.trace) > 32:
         old = state.trace.pop(0)
@@ -462,16 +462,8 @@ def bounded_data(value: Any, *, budget: int = 8000) -> str:
         if isinstance(item, str) and len(item) > string_limit:
             return item[:string_limit] + "…[内容省略，可用工具查询]"
         return item
-    def sanitize(item, key=""):
-        if isinstance(item, dict):
-            return {name: sanitize(content, name) for name, content in item.items()}
-        if isinstance(item, list):
-            return [sanitize(content) for content in item]
-        if key in {"id", "source", "browser_id", "delivery_id", "action_id", "snapshot_id", "run_id", "resume_stamp", "content_hash"} and isinstance(item, str) and re.fullmatch(r"[A-Za-z0-9_:-]{1,128}", item):
-            return item
-        return redact(item)
     for string_limit, list_limit in ((1500, 30), (600, 12), (240, 6), (80, 3)):
-        text = json.dumps(shrink(sanitize(value), string_limit, list_limit), ensure_ascii=False, default=str)
+        text = json.dumps(shrink(redact(value), string_limit, list_limit), ensure_ascii=False, default=str)
         if len(text) <= budget:
             return text
     envelope = {key: value[key] for key in ("status", "tool") if isinstance(value, dict) and key in value}

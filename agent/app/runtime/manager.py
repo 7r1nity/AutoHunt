@@ -826,7 +826,7 @@ class AgentRuntime:
         self.store.get(run_id)
         cursor = after
         while True:
-            events = self.store.events(run_id, cursor)
+            events = self.store.public_events(run_id, cursor)
             for event in events:
                 cursor = event["seq"]
                 yield f"id: {cursor}\nevent: {event['kind']}\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"

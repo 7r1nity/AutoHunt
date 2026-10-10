@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from ..core.security import redact, redact_text
+from ..core.security import redact
 from .base import LLMProvider, LLMRequest, LLMResult, LLMToolResult
 from .deepseek_provider import DeepSeekProvider
 from .mock_provider import MockLLMProvider
@@ -48,9 +48,9 @@ class LLMManager:
         emit("model", detail="正在调用模型", strategy="fast" if request.fast else "detailed")
         safe_request = replace(
             request,
-            instructions=redact_text(request.instructions),
-            user_message=redact_text(request.user_message),
-            context=redact_text(request.context),
+            instructions=redact(request.instructions),
+            user_message=redact(request.user_message),
+            context=redact(request.context),
         )
         return await self._provider().generate(safe_request)
 
@@ -70,9 +70,10 @@ class LLMManager:
         provider = self._provider()
         emit("model", detail="正在选择工具或生成回答", provider=getattr(provider, "name", "custom"), model=getattr(provider, "model", "custom"))
         arguments = dict(
-            instructions=redact_text(instructions),
-            # Preserve tool-call identifiers; sanitize only model-visible content.
-            messages=[{**message, "content": redact(message.get("content"))} for message in messages],
+            instructions=redact(instructions),
+            # Include native tool-call argument JSON in the boundary projection.
+            # The original messages/checkpoints remain untouched for execution.
+            messages=redact(messages),
             tools=tools,
         )
         if active_run() and isinstance(provider, DeepSeekProvider):

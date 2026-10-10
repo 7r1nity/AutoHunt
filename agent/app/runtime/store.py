@@ -2,14 +2,15 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 import sqlite3
 import threading
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
-from ..core.security import redact, redact_text
+from cryptography.fernet import Fernet, InvalidToken
+
+from ..core.security import redact
 
 
 TERMINAL = {"completed", "failed", "cancelled", "timed_out", "interrupted", "outcome_indeterminate"}
@@ -21,30 +22,18 @@ def now() -> str:
 
 
 def safe_json(value) -> str:
-    normalized = json.loads(json.dumps(value, ensure_ascii=False, default=lambda item:
-                                      item.model_dump(mode="json") if hasattr(item, "model_dump") else str(item)))
-    def sanitize(item, key=""):
-        if isinstance(item, dict):
-            return {name: sanitize(content, name) for name, content in item.items()}
-        if isinstance(item, list):
-            return [sanitize(content, key) for content in item]
-        if isinstance(item, str):
-            # These typed references are not free-form candidate text. Phone-like
-            # digit runs inside UUIDs/hashes must never corrupt a durable checkpoint.
-            if key in {"id", "run_id", "browser_id", "delivery_id", "task_id", "evidence_task_id",
-                       "tool_call_id", "proposal_id", "plan_id", "resume_stamp", "action_id", "snapshot_id",
-                       "session_id", "conversation_id", "parent_id", "request_id", "operation_id",
-                       "operation_ids", "selected_operation_ids", "evidence_ids", "entity_ids",
-                       "content_hash", "resume_digest", "request_hash", "source"} and re.fullmatch(r"[A-Za-z0-9_:-]{1,128}", item):
-                return item
-            return redact_text(item)
-        return item
-    return json.dumps(sanitize(normalized), ensure_ascii=False)
+    """Lossless internal serialization; 'safe' means valid JSON, not redacted.
+
+    Privacy projections belong at output boundaries, not in execution state.
+    """
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, allow_nan=False,
+        default=lambda item: item.model_dump(mode="json") if hasattr(item, "model_dump") else str(item))
 
 
 class RunStore:
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, data_key: str | None = None):
         self.path = path
+        self.cipher = Fernet(data_key.encode()) if data_key else None
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.lock = threading.RLock()
         with self.connect() as db:
@@ -80,6 +69,20 @@ class RunStore:
             if "error_type" not in {row[1] for row in db.execute("PRAGMA table_info(agent_runs)")}:
                 db.execute("ALTER TABLE agent_runs ADD COLUMN error_type TEXT")
 
+    def _encode(self, value) -> str:
+        encoded = safe_json(value)
+        return "enc:v1:" + self.cipher.encrypt(encoded.encode()).decode() if self.cipher else encoded
+
+    def _load(self, encoded: str):
+        if encoded.startswith("enc:v1:"):
+            if self.cipher is None:
+                raise RuntimeError("AUTOHUNT_DATA_KEY is required to read encrypted runtime state")
+            try:
+                encoded = self.cipher.decrypt(encoded[7:].encode()).decode()
+            except InvalidToken as exc:
+                raise RuntimeError("Runtime state could not be decrypted; execution is not resumed") from exc
+        return json.loads(encoded)
+
     def connect(self):
         db = sqlite3.connect(self.path, timeout=10)
         db.row_factory = sqlite3.Row
@@ -98,7 +101,7 @@ class RunStore:
             db.execute("INSERT OR IGNORE INTO agent_sessions VALUES (?,?,?)", ("default", "默认会话", now()))
 
     def create_session(self, title: str) -> dict:
-        session = {"id": uuid.uuid4().hex, "title": redact_text(title.strip())[:80] or "新会话", "created_at": now()}
+        session = {"id": uuid.uuid4().hex, "title": title.strip()[:80] or "新会话", "created_at": now()}
         with self.lock, self.connect() as db:
             db.execute("INSERT INTO agent_sessions VALUES (?,?,?)", tuple(session.values()))
         return session
@@ -108,7 +111,7 @@ class RunStore:
             if not db.execute("SELECT 1 FROM agent_sessions WHERE id=?", (session_id,)).fetchone():
                 raise KeyError("会话不存在")
             row = db.execute("SELECT conditions FROM session_search_state WHERE session_id=?", (session_id,)).fetchone()
-            return json.loads(row[0]) if row else None
+            return self._load(row[0]) if row else None
 
     def save_search_state(self, session_id: str, conditions: dict) -> dict:
         from .search_state import SearchState
@@ -120,7 +123,7 @@ class RunStore:
                 return conditions
             conditions["revision"] += 1
             db.execute("INSERT INTO session_search_state VALUES (?,?,?) ON CONFLICT(session_id) DO UPDATE SET conditions=excluded.conditions,updated_at=excluded.updated_at",
-                       (session_id, safe_json(conditions), now()))
+                       (session_id, self._encode(conditions), now()))
         return conditions
 
     def dialogue_state(self, session_id: str) -> dict:
@@ -129,7 +132,7 @@ class RunStore:
             if not db.execute("SELECT 1 FROM agent_sessions WHERE id=?", (session_id,)).fetchone():
                 raise KeyError("会话不存在")
             row = db.execute("SELECT state FROM session_dialogue_state WHERE session_id=?", (session_id,)).fetchone()
-        return DialogueState.model_validate(json.loads(row[0]) if row else {}).model_dump(mode="json")
+        return DialogueState.model_validate(self._load(row[0]) if row else {}).model_dump(mode="json")
 
     def mutate_dialogue(self, session_id: str, operation: dict) -> dict:
         from .dialogue import apply_operation
@@ -139,21 +142,23 @@ class RunStore:
             if not db.execute("SELECT 1 FROM agent_sessions WHERE id=?", (session_id,)).fetchone():
                 raise KeyError("会话不存在")
             row = db.execute("SELECT state FROM session_dialogue_state WHERE session_id=?", (session_id,)).fetchone()
-            value = apply_operation(json.loads(row[0]) if row else None, operation)
-            encoded = safe_json(value)
+            value = apply_operation(self._load(row[0]) if row else None, operation)
+            encoded = self._encode(value)
             db.execute("INSERT INTO session_dialogue_state VALUES (?,?,?) ON CONFLICT(session_id) DO UPDATE SET state=excluded.state,updated_at=excluded.updated_at",
                        (session_id, encoded, now()))
-            return json.loads(encoded)
+            return self._load(encoded)
 
     def create(self, session_id: str, request_key: str, kind: str, payload: dict, parent_id: str | None = None, *, control: bool = False) -> tuple[dict, bool]:
-        encoded = json.dumps(redact(payload), ensure_ascii=False, sort_keys=True)
-        digest = hashlib.sha256(encoded.encode()).hexdigest()
+        digest = hashlib.sha256(safe_json(payload).encode()).hexdigest()
+        encoded = self._encode(payload)
         with self.lock, self.connect() as db:
             if not db.execute("SELECT 1 FROM agent_sessions WHERE id=?", (session_id,)).fetchone():
                 raise KeyError("会话不存在")
             previous = db.execute("SELECT * FROM agent_runs WHERE session_id=? AND request_key=?", (session_id, request_key)).fetchone()
             if previous:
-                if previous["request_hash"] != digest or previous["kind"] != kind:
+                # Legacy request hashes were calculated from redacted JSON. Compare
+                # decoded canonical content; never infer missing/masked originals.
+                if self._load(previous["payload"]) != payload or previous["kind"] != kind:
                     raise ValueError("同一请求 ID 已用于不同内容")
                 return self.decode(previous), False
             active = db.execute("SELECT COUNT(*) FROM agent_runs WHERE status IN ('queued','running','waiting_user','waiting_reply','waiting_confirmation','cancelling')").fetchone()[0]
@@ -168,11 +173,12 @@ class RunStore:
         self.event(run_id, "status", {"status": "queued", "detail": "任务已进入队列"})
         return self.get(run_id), True
 
-    @staticmethod
-    def decode(row) -> dict:
+    def decode(self, row) -> dict:
         item = dict(row)
         for name in ("payload", "result", "checkpoint"):
-            item[name] = json.loads(item[name]) if item[name] else None
+            item[name] = self._load(item[name]) if item[name] else None
+        if item.get("error", "") and item["error"].startswith("enc:v1:"):
+            item["error"] = self._load(item["error"])
         return item
 
     def get(self, run_id: str) -> dict:
@@ -198,11 +204,11 @@ class RunStore:
                 "WHERE session_id=? AND kind='chat' ORDER BY created_at DESC LIMIT 500", (session_id,)).fetchall()
             output = []
             for row in reversed(rows):
-                payload, result = json.loads(row["payload"]), json.loads(row["result"] or "{}")
-                checkpoint = json.loads(row["checkpoint"] or "{}")
+                payload, result = self._load(row["payload"]), self._load(row["result"] or "{}")
+                checkpoint = self._load(row["checkpoint"] or "{}")
                 started = bool(row["mutation_started"])
                 if started and is_continuation(payload.get("message", "")) and not any(checkpoint.get(k) for k in ("browser_id", "delivery_id", "plan")):
-                    facts = [{"kind": event["kind"], **json.loads(event["data"])} for event in db.execute(
+                    facts = [{"kind": event["kind"], **self._load(event["data"])} for event in db.execute(
                         "SELECT kind,data FROM agent_run_events WHERE run_id=? AND kind IN ('tool_started','tool_finished') ORDER BY seq", (row["id"],))]
                     if proven_idle_resume(facts):
                         started = False
@@ -223,8 +229,8 @@ class RunStore:
                 raise KeyError(run_id)
             if current["status"] in TERMINAL:
                 return self.get(run_id)
-            values = {key: safe_json(value) if key in {"result", "checkpoint"}
-                      else redact_text(value) if isinstance(value, str) else value for key, value in fields.items()}
+            values = {key: self._encode(value) if key in {"result", "checkpoint"} or (
+                      key == "error" and value is not None and self.cipher) else value for key, value in fields.items()}
             values["updated_at"] = now()
             db.execute(f"UPDATE agent_runs SET {','.join(key+'=?' for key in values)} WHERE id=?", (*values.values(), run_id))
         return self.get(run_id)
@@ -232,9 +238,13 @@ class RunStore:
     def event(self, run_id: str, kind: str, data: dict):
         with self.lock, self.connect() as db:
             db.execute("INSERT INTO agent_run_events (run_id,kind,data,created_at) VALUES (?,?,?,?)",
-                       (run_id, kind, safe_json(data), now()))
+                       (run_id, kind, self._encode(data), now()))
 
     def events(self, run_id: str, after: int = 0) -> list[dict]:
         with self.connect() as db:
             rows = db.execute("SELECT * FROM agent_run_events WHERE run_id=? AND seq>? ORDER BY seq LIMIT 200", (run_id, after)).fetchall()
-        return [{**dict(row), "data": json.loads(row["data"])} for row in rows]
+        return [{**dict(row), "data": self._load(row["data"])} for row in rows]
+
+    def public_events(self, run_id: str, after: int = 0) -> list[dict]:
+        """Boundary copy for diagnostic HTTP/SSE; internal consumers use events()."""
+        return redact(self.events(run_id, after))

@@ -106,7 +106,7 @@ agent = AutoHuntAgent(
     router=intent_router,
     learning_plans=learning_plans,
 )
-run_store = RunStore(settings.data_root / "runtime.db")
+run_store = RunStore(settings.data_root / "runtime.db", settings.data_key)
 agent_runtime = AgentRuntime(run_store, agent, job_store, browser_service, learning_plans, resume_workspace_store)
 agent_runtime.delivery = delivery_service
 mock_workflow.on_delivery_started = agent_runtime.track_delivery
