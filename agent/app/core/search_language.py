@@ -131,10 +131,83 @@ def parse_search_message(message: str) -> SearchLanguage:
         return SearchLanguage(action="search", unresolved=message, reason="conflicting_parameters")
 
 
+#: A question word inside a criterion ("岗位职责需要分析为什么客户流失") is data, not a
+#: question about the request.
+_QUESTION_WORD = re.compile(r"怎么|如何|为什么|是什么|什么意思|是否|能不能|可不可以|可以吗|建议|含义")
+_QUESTION_MARK = re.compile(r"[?？]|吗[。！!]*$")
+
+
+def strip_quoted_spans(text: str) -> str:
+    """Remove quoted spans, including CJK quote pairs.
+
+    Quoted text can be a *criterion value* ("JD包含‘海外市场’") rather than a quoted
+    command, so the two must be told apart before any mention check runs. Public
+    because command_grounded needs the same distinction.
+    """
+    return re.sub(r"[“”‘’\"'`「」『』][^“”‘’\"'`「」『』]*[“”‘’\"'`「」『』]", " ", text)
+
+
+def is_conditional_criterion(text: str) -> bool:
+    """True when 如果/要是 introduces a criterion rather than the whole request.
+
+    "如果是实习必须有转正机会" qualifies the search, so it is honoured; a conditional
+    that opens the request ("如果我说帮我找…") conditions the command itself and stays a
+    veto. A Chinese conditional often drops 就, so the consequence is recognised by its
+    requirement marker too.
+    """
+    if re.match(r"^\s*(?:如果|要是|假设)", strip_quoted_spans(text)):
+        return False
+    return bool(re.search(
+        r"(?:如果|要是|假设)[^，。；]{0,40}(?:就|那么|必须|需要|要求|优先|不要|不能|可以|得有|要有)",
+        text))
+
+
+def _mention_or_question(text: str) -> bool:
+    """True when the user is asking about or quoting a command, not giving one.
+
+    The previous check vetoed the whole message whenever it contained any quote, 如果
+    or 为什么, which blocked legitimate requests whose *criteria* happen to contain
+    them: "帮我找软件工程师岗位，JD包含‘海外市场’",
+    "帮我找软件工程师岗位，如果是实习必须有转正机会",
+    "帮我找软件工程师岗位，岗位职责需要分析为什么客户流失".
+    Three 96-case families in the benchmark failed for exactly that reason, so the
+    marker's *position* now decides instead of its presence:
+
+    * quoted spans are criterion values;
+    * a conditional that opens the request, or whose consequence questions it, is a
+      hypothetical;
+    * a question word confined to a criterion after the command is data.
+    """
+    unquoted = strip_quoted_spans(text)
+    if re.search(r"当我说|我说过|上次说", unquoted):
+        return True
+    # "如果我说帮我找…" is about a hypothetical, not a command. A leading 如果 without a
+    # 就-consequence never resolves, so it stays a veto.
+    if re.match(r"^\s*如果", unquoted) and not re.search(r"如果[^，。；]{0,30}(?:就|那么)", unquoted):
+        return True
+    # "如果是实习必须有转正机会" qualifies the search; "如果我说…你会怎么做" asks about the
+    # command itself. Only the second stays a veto.
+    if re.search(r"如果[^，。；]{0,30}(?:就|那么)[^，。；]{0,20}(?:怎么|如何|为什么|是什么|吗)", unquoted):
+        return True
+    if re.search(r"如果|要是|假设", unquoted) and not is_conditional_criterion(unquoted):
+        return True
+    if re.search(r"假如|举例|例如", unquoted):
+        return True
+    if re.search(r"[“”‘’\"`「」『』]", text) and _COMMAND.match(_POLITE.sub("", unquoted.strip())) is None:
+        return True
+    if _QUESTION_MARK.search(unquoted):
+        return True
+    match = _QUESTION_WORD.search(unquoted)
+    if match is None:
+        return False
+    # Question word inside a criterion is data only when a command precedes it.
+    head = unquoted[:match.start()]
+    return _COMMAND.match(_POLITE.sub("", head.strip())) is None
+
+
 def _parse_search_message(message: str) -> SearchLanguage:
     text = _text(message)
-    # Mentioning/quoting a command is not consent to run it.
-    if re.search(r"[“”‘’\"`]|如果|假如|举例|例如|当我说|我说过|上次说", text) or _QUESTION.search(text):
+    if _mention_or_question(text):
         return SearchLanguage(reason="question_or_mention")
     for action, pattern in _CONTROLS.items():
         if re.fullmatch(pattern, text):
@@ -147,6 +220,13 @@ def _parse_search_message(message: str) -> SearchLanguage:
     # not a veto on a positive search command. Do not strip these constraints.
     if _NEGATION.match(text) or _search_revoked(text):
         return SearchLanguage(reason="negated")
+    # A command retracted in the same breath is not consent to run it. This is the
+    # mirror image of a leading negation ("不要搜索") and belongs beside it: a benchmark
+    # family of "帮我找软件工程师，但先别搜索" was being authorised because only the
+    # leading form was checked.
+    if re.search(r"(?:但|不过|可是|然后)?\s*(?:先|暂时|先暂时)?\s*(?:别|不要|不用|不需要|无需|先别)\s*"
+                 r"(?:搜索|检索|找|搜|开始|执行)", text):
+        return SearchLanguage(reason="retracted")
     text = re.sub(r"(?i)^(?:dry[ -]run|试运行)\s*", "", text)
     text = re.sub(r"^按(?:照)?(?:现有|当前|之前|上次|刚才|这些|原有|原来)(?:的)?条件\s*[,，]?\s*", "", text)
     command = _COMMAND.match(text)

@@ -104,7 +104,18 @@ def command_grounded(tool: str, quote: str, sources: list[str]) -> bool:
             prefix = re.split(ACTION_BOUNDARY + r"|[？?]", prefix)[-1]
             suffix = re.split(ACTION_BOUNDARY, source[occurrence.end():])[0]
             guarded = prefix + quote + suffix
-            if re.search(r"如果|假如|假设|要是|建议|能否|能不能|可不可以|[“”‘’\"`『』]", guarded):
+            # Quoted text inside a command is a criterion value ("JD包含‘海外市场’"), not
+            # evidence that the whole command is being quoted. Testing the intact span
+            # for quotes made command_grounded false for every request whose criteria
+            # contain one, so a legitimate search was refused; search_language already
+            # distinguishes a quoted criterion from a quoted command.
+            from ..core.search_language import is_conditional_criterion, strip_quoted_spans
+            unquoted = strip_quoted_spans(guarded)
+            if re.search(r"建议|能否|能不能|可不可以|[“”‘’\"`『』]", unquoted):
+                continue
+            # 如果/假设 conditioning the *command* is a hypothetical; conditioning a
+            # criterion ("如果是实习必须有转正机会") qualifies the search and is honoured.
+            if re.search(r"如果|假如|假设|要是", unquoted) and not is_conditional_criterion(unquoted):
                 continue
             if tool in {"mock_delivery_cancel", "browser_task_stop"}:
                 if not re.search(r"怎么|如何|为什么|是否|不要(?:停止|取消|中断)|别(?:停止|取消)|不(?:停止|取消)|[？?]", guarded):

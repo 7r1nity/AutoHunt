@@ -31,8 +31,14 @@ def numeric_value(value: str) -> int:
             section, number, last_unit = 0, 0, 10000
         else:
             raise ValueError("数值格式无效")
-    # Spoken 一万五 / 一千五 are 15000 / 1500, not 10005 / 1005.
-    return total+section+number*(last_unit//10 if last_unit >= 100 and number and not re.search(r"[零〇]", text) else 1)
+    # Spoken 一万五 / 一千五 are 15000 / 1500, not 10005 / 1005: a quantity ending in a
+    # bare digit after a unit omits that unit. The shorthand requires the numeral to end
+    # in digit-after-unit; "十五千" states its unit, so it is 15000 and must not be scaled
+    # down (it used to parse as 5010). Note `number` is always 0 here because the unit
+    # consumed it, so the test reads the text instead.
+    trailing_omission = (last_unit >= 100 and len(text) >= 2 and text[-1] in digits
+                         and text[-2] in {"十", "百", "千", "万"} and not re.search(r"[零〇]", text))
+    return total + section + number * (last_unit // 10 if trailing_omission else 1)
 
 
 def employment_requirement(message: str) -> bool:
