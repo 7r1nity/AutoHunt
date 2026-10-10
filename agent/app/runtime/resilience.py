@@ -59,26 +59,42 @@ def classify_failure(exc: Exception, *, effect="read", started=False) -> Failure
     return Failure(code, transient and effect == "read" and not uncertain, started, uncertain)
 
 
+#: Retrying an idempotent read is cheap; retrying anything with an effect is not. The
+#: ceiling exists so a caller cannot raise the budget by accident.
+MAX_SAFE_ATTEMPTS = 3
+
+
 async def safe_retry(operation: Callable[[], Awaitable[T]], *, retry_safe=False,
-                     attempts=3, on_retry: Callable[[dict], None] | None = None) -> T:
+                     attempts=MAX_SAFE_ATTEMPTS, on_retry: Callable[[dict], None] | None = None) -> T:
     """Caller owns the overall timeout. Auth/budget are checked ONCE outside.
 
     Only explicit idempotent reads/inference opt in. Streaming after output and
     browser clicks/writes must never use this helper. Cancellation propagates.
+
+    ``attempts`` is honoured up to :data:`MAX_SAFE_ATTEMPTS`. Asking for more used to be
+    silently clamped, so a caller requesting 10 got 3 with no indication — a misleading
+    parameter, and the kind of quiet mismatch that makes a later "why did it stop after
+    three" impossible to answer. An out-of-range value now fails loudly instead.
     """
-    for attempt in range(1, min(3, max(1, attempts)) + 1):
+    if not 1 <= attempts <= MAX_SAFE_ATTEMPTS:
+        raise ValueError(f"重试次数必须在 1–{MAX_SAFE_ATTEMPTS} 之间，收到 {attempts}")
+    last_error: Exception | None = None
+    for attempt in range(1, attempts + 1):
         try:
             return await operation()
         except Exception as exc:
             failure = classify_failure(exc, started=True)
-            if not retry_safe or not failure.retryable or attempt >= min(3, max(1, attempts)):
+            if not retry_safe or not failure.retryable or attempt >= attempts:
                 raise
+            last_error = exc
             delay = min(2.0, 0.4 * 2 ** (attempt - 1)) + random.uniform(0, 0.2)
             if on_retry:
                 on_retry({**failure.metadata(), "attempt": attempt, "next_attempt": attempt + 1,
                           "delay_seconds": round(delay, 3)})
             await asyncio.sleep(delay)
-    raise AssertionError("unreachable")
+    # The loop either returns or raises, so reaching here means attempts < 1, which the
+    # guard above rejects. Kept as an explicit invariant rather than a bare assertion.
+    raise RuntimeError(f"重试循环未执行：attempts={attempts}")
 
 
 def _seconds(name: str, default: float) -> float:

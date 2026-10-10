@@ -286,7 +286,18 @@ class DeliveryAutomationService:
         proves the action never began. The attempt count is persisted, so a restart
         cannot reset the budget and loop forever.
         """
-        attempts = self.jobs.bump_delivery_attempts(self.state.id) if self.state.id else self.retry_limit
+        if not self.state.id:
+            # Without a persisted run there is nowhere to count attempts, so the budget
+            # cannot be trusted. Report that plainly: the previous fallback treated a
+            # missing id as "already retried retry_limit times" and failed with a message
+            # claiming retries that never happened.
+            self.jobs.mark_delivery_failed(
+                job_id, f"{detail[:300]}；没有可持久化的运行记录，无法安全重试，需人工核对")
+            self._update(DeliveryTaskStatus.FAILED,
+                         "没有可持久化的运行记录，未进行自动重试；本次点击未发生，职位未投递",
+                         checkpoint="failed_before_submit")
+            return
+        attempts = self.jobs.bump_delivery_attempts(self.state.id)
         if attempts <= self.retry_limit:
             self._update(DeliveryTaskStatus.WAITING_FOR_REPLY,
                          f"本次提交未能开始（{detail[:160]}）；第 {attempts}/{self.retry_limit} 次自动重试，无需重新授权",
