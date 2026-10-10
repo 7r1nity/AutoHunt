@@ -111,3 +111,6 @@ agent_runtime = AgentRuntime(run_store, agent, job_store, browser_service, learn
 agent_runtime.delivery = delivery_service
 mock_workflow.on_delivery_started = agent_runtime.track_delivery
 mock_workflow.delivery_owner = agent_runtime.delivery_owner
+# Lets a delivery-only turn bind the applicant account by launching the session's saved
+# search, instead of refusing and asking the user to search first.
+mock_workflow.search_state_reader = run_store.search_state

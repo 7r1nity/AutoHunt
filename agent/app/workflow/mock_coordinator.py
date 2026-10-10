@@ -116,6 +116,49 @@ class MockWorkflowCoordinator:
         facts["browser_idle"] = not (self.browser.worker and not self.browser.worker.done())
         return type(observation)(at=observation.at, facts=facts)
 
+    async def _ensure_applicant_bound(self, session_id: str) -> str:
+        """Ensure a mock-site applicant is bound, opening the browser if that is what it takes.
+
+        Binding is a side effect of running a search: the browser opens, the user logs in
+        if required, and the logged-in identity is read from the page. Delivery used to
+        refuse outright here, which is why no browser ever appeared for a delivery-only
+        turn — the pre-flight aborted before any browser work could begin. The refusal was
+        accurate but unhelpful: it asked the user to do something the agent can initiate.
+
+        Returns "bound" when an account is already known, or "searching" when a search was
+        launched (or is already running) and binding will follow from its login check.
+        """
+        if self.settings().get("applicant_id"):
+            return "bound"
+        running = self.browser.current().status in {
+            BrowserTaskStatus.STARTING, BrowserTaskStatus.RUNNING, BrowserTaskStatus.WAITING_FOR_USER}
+        if running:
+            return "searching"
+        if self.browser.can_start_search():
+            conditions = self._saved_search_request(session_id)
+            if conditions is not None:
+                await self.browser.start(conditions)
+                return "searching"
+        raise PreflightRefused("请先在模拟站登录求职者账号并完成一次搜索，以绑定账号")
+
+    def _saved_search_request(self, session_id: str):
+        """The session's saved search state as a browser request, when it is usable."""
+        state = getattr(self, "search_state_reader", None)
+        saved = state(session_id) if callable(state) else None
+        if not isinstance(saved, dict) or not saved.get("queries"):
+            return None
+        query = str(saved["queries"][0] or "").strip()
+        if not query:
+            return None
+        from ..core.models import BrowserSearchRequest
+        try:
+            return BrowserSearchRequest(
+                conversation_id="default", query=query,
+                result_limit=saved.get("result_limit"), salary_min=saved.get("salary_min"),
+                locations=saved.get("locations") or None, filters=saved.get("filters"))
+        except Exception:  # noqa: BLE001 - malformed saved state must not break delivery
+            return None
+
     async def queue_deliveries(self, *, min_score: int, session_id: str, task_id: str | None = None) -> dict:
         if session_id in self.stopping_sessions or "*" in self.stopping_sessions:
             raise PreflightRefused("当前正在停止任务，未加入投递队列")
@@ -126,8 +169,11 @@ class MockWorkflowCoordinator:
         profile = self.candidate.read().profile
         if not profile.resume_id:
             raise PreflightRefused("请先上传并启用主简历；没有简历不能投递")
-        if not self.settings()["applicant_id"]:
-            raise PreflightRefused("请先在模拟站登录求职者账号并完成一次搜索，以绑定账号")
+        if await self._ensure_applicant_bound(session_id) == "searching":
+            return {"queued": 0, "binding": "searching",
+                    "message": "尚未绑定求职者账号，已为你启动一次搜索以完成登录与绑定："
+                               "请在浏览器中完成登录（如需要），登录成功后账号会自动绑定，"
+                               "随后再发起本次投递即可。"}
         document = self.resume.read_document()
         evidence = self.jobs.jobs_for_resume_analysis(profile.resume_id, limit=200, min_score=min_score, task_id=task_id)
         eligible = [self.jobs.get_job(item["id"]) for item in evidence
