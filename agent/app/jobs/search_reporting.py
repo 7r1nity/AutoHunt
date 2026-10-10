@@ -100,7 +100,12 @@ def render_search_report(browser, report: dict) -> str:
         lines.append(f"薪资筛选：月薪区间下限 ≥ {conditions['salary_min']:,} 元；面议、未知及日薪不算满足。")
     if conditions.get("locations"):
         lines.append("城市：" + "、".join(conditions["locations"]))
-    lines += ["", "### 整体薪资与 JD 总结", "以下仅统计本轮已核对的职位，不把尚未读取的候选链接计入 JD 分析。"]
+    if conditions.get("filters"):
+        from ..core.job_filters import filter_summary
+        lines.append("本轮语义条件：" + filter_summary(conditions["filters"]))
+    if report.get("pending_verification"):
+        lines.append(f"另有 {report['pending_verification']} 个岗位条件证据不足，待核实；不计入目标数量，不自动投递。")
+    lines += ["", "### 整体薪资与 JD 总结", "以下统计本轮条件已核实通过的岗位；待核实条件及未读取的候选不计入分析。"]
     def distribution(key):
         values = report.get(key, {})
         return "、".join(f"{name} {count} 个" for name, count in sorted(values.items(), key=lambda pair: -pair[1])) or (
@@ -119,7 +124,8 @@ def render_search_report(browser, report: dict) -> str:
     else:
         lines += ["", f"### 本轮职位简表（全部 {report['covered_jobs']} 个）"]
         for number, item in enumerate(report.get("jobs", report.get("highlights", [])), 1):
-            lines.append(f"{number}. **{item['title']}** · {item['company']} · {item['location']} · {item['salary']} · {item['employment_type']}；{item['jd_summary']}")
+            pending = " · 条件待核实" if item.get("filter_status") == "unknown" else ""
+            lines.append(f"{number}. **{item['title']}** · {item['company']} · {item['location']} · {item['salary']} · {item['employment_type']}{pending}；{item['jd_summary']}")
         lines.append("可说“我想详细了解一下第8个”，查看对应岗位完整 JD 和原始链接。序号绑定本轮简表，不按看板重新排序。")
     lines.append("中断或失败前已记录的结果也会纳入当前简历统计；未读取的候选不计入职位画像。")
     return "\n\n".join(lines)

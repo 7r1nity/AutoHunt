@@ -40,6 +40,13 @@ class BossPageEvidence:
 
 class BossAdapter:
     selector_version = BOSS_SELECTOR_VERSION
+    origin = BOSS_ORIGIN
+    label = "BOSS直聘"
+
+    @staticmethod
+    def search_url(query: str) -> str:
+        from urllib.parse import quote_plus
+        return f"{BOSS_ORIGIN}/web/geek/jobs?query={quote_plus(query)}"
 
     @staticmethod
     def safe_job_url(value: str) -> str | None:

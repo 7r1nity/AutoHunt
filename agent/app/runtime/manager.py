@@ -266,6 +266,7 @@ class AgentRuntime:
                                     context.search_state = self.store.save_search_state(run["session_id"], snapshot)
                                     self.store.update(run_id, mutation_started=1)
                                     browser = await self.browser.start(BrowserSearchRequest(
+                                        source=snapshot.get("source", "mock"), filters=snapshot.get("filters"),
                                         query=response.action_query, queries=response.action_queries or [],
                                         locations=snapshot["locations"], dry_run=response.action_dry_run,
                                         result_limit=snapshot["result_limit"], salary_min=snapshot["salary_min"],

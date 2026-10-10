@@ -61,6 +61,7 @@ class DeliveryAutomationService:
         return self.adapter.normalize_job_url(source_url) is not None
 
     def _authorized_resume_payload(self) -> dict:
+        self.jobs.assert_delivery_facts(self.state.job_id, self.state.preview_id)
         if self.resume_workspace is None or not self.resume_workspace.candidate_state.read().profile.resume_id:
             raise ValueError("没有启用的主简历；不会发送演示简历或其他账号的简历")
         return mock_resume_payload(self.resume_workspace.read_document(), document_id=self.state.resume_document_id,

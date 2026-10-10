@@ -32,7 +32,7 @@ export async function POST(request: NextRequest) {
   const body = await request.json();
   if (body.action === "start") {
     const payload: Record<string, unknown> = {
-      source: "mock",
+      source: body.source ?? "mock",
       conversation_id: body.conversation_id ?? "default",
       query: body.query,
       max_jobs: body.max_jobs ?? 30,
@@ -46,6 +46,7 @@ export async function POST(request: NextRequest) {
     if (Array.isArray(body.queries) && body.queries.length) payload.queries = body.queries;
     if (body.result_limit !== undefined) payload.result_limit = body.result_limit;
     if (body.salary_min !== undefined) payload.salary_min = body.salary_min;
+    if (body.filters !== undefined) payload.filters = body.filters;
     return callBackend("/api/v1/browser/search", "POST", payload);
   }
   if (["pause", "resume", "stop"].includes(body.action)) {

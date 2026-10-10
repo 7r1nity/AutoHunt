@@ -19,6 +19,7 @@ from ..runtime.dialogue import bounded_data, compact_state, resolve_reference, A
 from ..runtime.search_state import merge_search_state, prepare_search_state
 from .search_contract import explicit_search_constraints, missing_search_message, safe_role_keyword
 from .search_language import parse_search_message
+from .job_filters import filter_schema
 from ..runtime.resilience import classify_failure, safe_retry
 
 
@@ -235,6 +236,8 @@ class AgentToolRegistry:
                               "salary_min": {"type": ["integer", "null"], "minimum": 0, "maximum": 10000000},
                               "max_jobs": {"type": ["integer", "null"], "minimum": 1, "maximum": 200},
                               "use_resume_profile": {"type": "boolean", "description": "明确要求使用当前简历方向时设为 true"},
+                              "source": {"type": "string", "enum": ["mock", "boss", "zhaopin"]},
+                              "filters": {**filter_schema(), "type": ["object", "null"], "description": "完整语义条件树；null 显式清除；省略保持"},
                           }), "session", self._search_state_update),
             AgentToolSpec(
                 "job_results_read",
@@ -256,7 +259,7 @@ class AgentToolRegistry:
             ),
             AgentToolSpec(
                 "job_search_start",
-                "启动新的模拟招聘网站浏览器职位搜索。仅当用户明确说开始搜索或重新搜索时调用；查询已有结果时禁止调用。",
+                "启动所选招聘平台的职位搜索。mock可授权模拟投递；boss/zhaopin只读取不沟通投递。查询已有结果时禁止调用。",
                 obj({
                     "query": {"type": "string", "maxLength": 120, "description": "岗位关键词，不包含城市；省略表示继承会话条件，再使用当前简历"},
                     "queries": {"type": "array", "items": {"type": "string", "maxLength": 120}, "maxItems": 5},
@@ -266,6 +269,8 @@ class AgentToolRegistry:
                     "salary_min": {"type": "integer", "minimum": 0, "maximum": 10000000, "description": "最低月薪，单位元；按薪资区间下限筛选，未知或日薪不算符合"},
                     "use_resume_profile": {"type": "boolean", "description": "明确要求按照当前简历重新搜索时使用，其他字段仍继承"},
                     "dry_run": {"type": "boolean", "default": False, "description": "仅在本地模拟招聘网站执行搜索后自动沟通和条件投递测试"},
+                    "source": {"type": "string", "enum": ["mock", "boss", "zhaopin"], "description": "省略继承会话平台"},
+                    "filters": {**filter_schema(), "type": ["object", "null"], "description": "通用条件树，不混入岗位词；省略继承，null清除"},
                 }),
                 "external",
                 self._job_search_start,
@@ -564,7 +569,7 @@ class AgentToolRegistry:
         if context and context.search_state is None:
             context.search_state = prepare_search_state(None, state, self.resume_workspace.read_document().version)
         if context and context.search_state is not None:
-            patch = {name: args[name] for name in ("queries", "locations", "result_limit", "salary_min", "max_jobs", "use_resume_profile") if name in args}
+            patch = {name: args[name] for name in ("queries", "locations", "result_limit", "salary_min", "max_jobs", "use_resume_profile", "source", "filters") if name in args}
             if not patch.get("queries") and args.get("query"):
                 patch["queries"] = [args["query"]]
             document = self.resume_workspace.read_document()
@@ -597,6 +602,8 @@ class AgentToolRegistry:
             max_jobs=int(args.get("max_jobs", min(200, max(30, int(args.get("result_limit", 0)) * 5)))),
             result_limit=args.get("result_limit"),
             salary_min=args.get("salary_min"),
+            source=args.get("source", "mock"),
+            filters=args.get("filters"),
             browser_mode=BrowserMode.AUTO,
             dry_run=bool(args.get("dry_run", False)),
             conversation_id=context.session_id if context else "default",
@@ -606,6 +613,7 @@ class AgentToolRegistry:
             updated = merge_search_state(conditions, {
                 "queries": request.queries or [request.query], "locations": request.locations or [],
                 "result_limit": request.result_limit, "salary_min": request.salary_min,
+                "source": request.source, "filters": request.filters,
             }, state, self.resume_workspace.read_document().version)
             updated["query_source"] = conditions["query_source"]
             persisted = save_search_state(updated, user_edit=True)
@@ -615,6 +623,7 @@ class AgentToolRegistry:
             "query": request.query, "queries": request.queries, "locations": request.locations,
             "result_limit": request.result_limit, "salary_min": request.salary_min, "max_jobs": request.max_jobs,
             "revision": request.search_state_revision, "conversation_id": request.conversation_id,
+            "source": request.source, "filters": request.filters,
         }}
 
     async def _search_state_read(self, _args: dict[str, Any]) -> Any:

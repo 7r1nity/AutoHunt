@@ -416,7 +416,7 @@ class AutoHuntAgent:
             salary_text = f"；最低月薪 {actual['salary_min']} 元" if actual.get("salary_min") else ""
             return ChatResponse(
                 message=(
-                    f"已启动模拟招聘网站职位搜索：**{' · '.join(queries)}**{location_text}{limit_text}{salary_text}。"
+                    f"已启动{ {'mock': '模拟招聘网站', 'boss': 'BOSS直聘', 'zhaopin': '智联招聘'}.get(actual.get('source', 'mock'), '招聘网站') }职位搜索：**{' · '.join(queries)}**{location_text}{limit_text}{salary_text}。"
                     "如遇登录、验证码或 MFA，任务会暂停等待你接管。"
                 ),
                 lane=AgentLane.APPLICATION,
@@ -1332,7 +1332,7 @@ class AutoHuntAgent:
                             condition_text += f"；月薪下限 ≥ {applied['salary_min']:,} 元"
                         return ChatResponse(
                             message=(
-                                f"已启动模拟招聘网站职位搜索：**{query}**{location_text}{condition_text}。"
+                                f"已启动{ {'mock': '模拟招聘网站', 'boss': 'BOSS直聘', 'zhaopin': '智联招聘'}.get(applied.get('source', 'mock'), '招聘网站') }职位搜索：**{query}**{location_text}{condition_text}。"
                                 "如遇登录、验证码或 MFA，任务会暂停等待你接管。"
                             ),
                             lane=AgentLane.APPLICATION,

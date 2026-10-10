@@ -8,7 +8,8 @@ async function proxy(request: NextRequest, context: { params: Promise<{ sessionI
   try {
     const backend = process.env.AUTOHUNT_BACKEND_URL ?? "http://127.0.0.1:8000";
     const response = await fetch(`${backend}/api/v1/conversations/${sessionId}/search-state${request.method === "POST" ? "/reset" : ""}`, {
-      method: request.method, headers: { "X-AutoHunt-Key": token },
+      method: request.method, headers: { "X-AutoHunt-Key": token, "Content-Type": "application/json" },
+      body: request.method === "PATCH" ? JSON.stringify(await request.json()) : undefined,
       signal: AbortSignal.timeout(10_000), cache: "no-store",
     });
     return NextResponse.json(await response.json(), { status: response.status });
@@ -18,3 +19,4 @@ async function proxy(request: NextRequest, context: { params: Promise<{ sessionI
 }
 export const GET = proxy;
 export const POST = proxy;
+export const PATCH = proxy;

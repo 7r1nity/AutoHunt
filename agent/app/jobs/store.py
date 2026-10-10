@@ -184,6 +184,8 @@ class JobStore:
             self._ensure_column(db, "browser_events", "reason_code", "TEXT")
             self._ensure_column(db, "browser_events", "sample_json", "TEXT")
             self._ensure_column(db, "jobs", "recruiter_reply", "TEXT")
+            self._ensure_column(db, "jobs", "filter_status", "TEXT NOT NULL DEFAULT 'pass'")
+            self._ensure_column(db, "jobs", "filter_evidence", "TEXT NOT NULL DEFAULT '{}'")
             self._ensure_column(db, "jobs", "recruiter_reply_at", "TEXT")
             self._ensure_column(db, "jobs", "reply_last_checked_at", "TEXT")
             self._ensure_column(db, "mock_workflow_settings", "last_reported_run_id", "TEXT")
@@ -401,10 +403,23 @@ class JobStore:
         reason_code: str | None = None, sample: dict[str, Any] | None = None,
     ) -> None:
         safe_sample = redact(sample or {})
+        # Hashes are internal references, not phone numbers. Keep valid JSON:
+        # slicing serialized text corrupts larger condition trees and evidence.
+        for key in ("filter_fingerprint", "content_hash"):
+            value = (sample or {}).get(key)
+            if isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value):
+                safe_sample[key] = value
+        digest = (sample or {}).get("digest") if event_type == "filter_evaluated" else None
+        if isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest):
+            safe_sample["digest"] = digest
+        filter_sample = (sample or {}).get("filter_evidence")
+        filter_digest = filter_sample.get("digest") if isinstance(filter_sample, dict) else None
+        if isinstance(filter_digest, str) and re.fullmatch(r"[0-9a-f]{64}", filter_digest):
+            safe_sample["filter_evidence"]["digest"] = filter_digest
         with self.lock, self._connect() as db:
             db.execute(
                 "INSERT INTO browser_events (task_id,event_type,detail,reason_code,sample_json,created_at) VALUES (?,?,?,?,?,?)",
-                (task_id, event_type, redact_text(detail)[:500], reason_code, json.dumps(safe_sample, ensure_ascii=False)[:2000], utc_now()),
+                (task_id, event_type, redact_text(detail)[:500], reason_code, json.dumps(safe_sample, ensure_ascii=False), utc_now()),
             )
 
     def add_conversation_message(
@@ -548,9 +563,10 @@ class JobStore:
                 resume_digest=resume_digest,
                 action=action,
             )
-            current_job = db.execute("SELECT source_url FROM jobs WHERE id=?", (row["job_id"],)).fetchone()
+            current_job = db.execute("SELECT * FROM jobs WHERE id=?", (row["job_id"],)).fetchone()
             if current_job is None or current_job["source_url"] != payload.get("source_url"):
                 raise ValueError("职位链接已变化，请重新生成投递预览")
+            self._check_delivery_filter(dict(current_job), payload)
             expires = datetime.fromisoformat(row["expires_at"])
             if expires <= now:
                 db.execute("UPDATE delivery_previews SET status='expired' WHERE id=?", (preview_id,))
@@ -668,6 +684,8 @@ class JobStore:
                     "UPDATE jobs SET source_url=?,salary=?,description=?,tags=?,score=?,decision=?,reasoning=?,stage=CASE WHEN stage='review' THEN ? ELSE stage END,content_hash=?,last_seen_at=? WHERE id=?",
                     (job["source_url"], job.get("salary", "未注明"), description, json.dumps(job.get("tags", []), ensure_ascii=False), job["score"], job["decision"], job["reasoning"], job.get("stage", "review"), content_hash, now, existing["id"]),
                 )
+                db.execute("UPDATE jobs SET source=?,filter_status=?,filter_evidence=? WHERE id=?",
+                    (job["source"], job.get("filter_status", "pass"), json.dumps(job.get("filter_evidence", {}), ensure_ascii=False), existing["id"]))
                 return int(existing["id"]), False
             cursor = db.execute(
                 """INSERT INTO jobs
@@ -675,6 +693,8 @@ class JobStore:
                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (dedupe, job["source"], job["source_url"], job.get("external_id"), job["title"], job["company"], job["location"], job.get("salary", "未注明"), description, json.dumps(job.get("tags", []), ensure_ascii=False), job["score"], job["decision"], job["reasoning"], job.get("stage", "review"), content_hash, now, now),
             )
+            db.execute("UPDATE jobs SET filter_status=?,filter_evidence=? WHERE id=?",
+                (job.get("filter_status", "pass"), json.dumps(job.get("filter_evidence", {}), ensure_ascii=False), cursor.lastrowid))
             return int(cursor.lastrowid), True
 
     def list_jobs(self, stage: str | None = None, limit: int = 100) -> list[StoredJobView]:
@@ -694,12 +714,18 @@ class JobStore:
             posted=row["last_seen_at"], recruiter_reply=row["recruiter_reply"],
             recruiter_reply_at=row["recruiter_reply_at"],
             review_approved=row["review_hash"] == self.review_fingerprint(dict(row)),
+            filter_status=row["filter_status"],
         ) for row in rows]
 
     def job_id_for_source_url(self, source_url: str) -> int | None:
         with self.lock, self._connect() as db:
             row = db.execute("SELECT id FROM jobs WHERE source_url=?", (source_url,)).fetchone()
         return int(row["id"]) if row is not None else None
+
+    def update_job_filter_result(self, job_id: int, result: dict) -> None:
+        with self.lock, self._connect() as db:
+            db.execute("UPDATE jobs SET filter_status=?,filter_evidence=? WHERE id=?",
+                (result["status"], json.dumps(result, ensure_ascii=False), job_id))
 
     def job_touched_by_task(self, task_id: str, job_id: int) -> bool:
         with self.lock, self._connect() as db:
@@ -718,17 +744,24 @@ class JobStore:
             constraint_row = db.execute("SELECT sample_json FROM browser_events WHERE task_id=? AND event_type='search_constraints' ORDER BY id DESC LIMIT 1", (task_id,)).fetchone()
             constraints = json.loads(constraint_row["sample_json"] or "{}") if constraint_row else {}
             job_ids: list[int] = []
+            outcomes: dict[int, dict] = {}
             for event in events:
                 try:
-                    job_id = int(json.loads(event["sample_json"] or "{}").get("job_id") or 0)
+                    sample = json.loads(event["sample_json"] or "{}")
+                    job_id = int(sample.get("job_id") or 0)
                 except (ValueError, TypeError, json.JSONDecodeError):
                     continue
                 if job_id > 0 and job_id not in job_ids:
                     job_ids.append(job_id)
+                outcomes[job_id] = sample
             rows = [] if not job_ids else db.execute(
                 f"SELECT * FROM jobs WHERE id IN ({','.join('?' for _ in job_ids)}) ORDER BY id",
                 job_ids,
             ).fetchall()
+
+        rows = [{**dict(row), "filter_status": outcomes.get(row["id"], {}).get("filter_status", row["filter_status"]),
+                 "filter_evidence": json.dumps(outcomes.get(row["id"], {}).get("filter_evidence",
+                    json.loads(row["filter_evidence"])), ensure_ascii=False)} for row in rows]
 
         salaries: dict[str, int] = {}
         employment: dict[str, int] = {}
@@ -748,34 +781,43 @@ class JobStore:
                     salary_bucket = "按时计薪"
                 elif "面议" in salary:
                     salary_bucket = "面议"
-            salaries[salary_bucket] = salaries.get(salary_bucket, 0) + 1
+            qualified = row["filter_status"] == "pass" and row["stage"] != "rejected"
+            if qualified:
+                salaries[salary_bucket] = salaries.get(salary_bucket, 0) + 1
             characteristics = job_characteristics(title, description)
             employment_type = characteristics["employment_type"]
-            employment[employment_type] = employment.get(employment_type, 0) + 1
+            if qualified:
+                employment[employment_type] = employment.get(employment_type, 0) + 1
             present_benefits = characteristics["benefits"]
-            for term in present_benefits:
+            for term in present_benefits if qualified else []:
                 benefits[term] = benefits.get(term, 0) + 1
             jd = jd_evidence(description)
-            evidence.append(jd)
+            if qualified:
+                evidence.append(jd)
             jd_excerpt = "" if "初筛阶段未打开详情页" in description else jd["brief"]
             summaries.append({
                 "id": int(row["id"]), "title": title, "company": str(row["company"] or ""),
                 "location": str(row["location"] or ""), "salary": salary,
                 "score": int(row["score"] or 0), "stage": str(row["stage"] or ""),
+                "filter_status": row["filter_status"], "filter_evidence": json.loads(row["filter_evidence"]),
                 "employment_type": employment_type, "benefits": present_benefits,
                 "jd_excerpt": jd_excerpt, "jd_summary": jd["brief"],
                 "source_url": str(row["source_url"] or ""), "content_hash": self.review_fingerprint(dict(row)),
             })
         summaries.sort(key=lambda item: (item["stage"] != "rejected", item["score"]), reverse=True)
+        # Pending rows stay visible and numbered, but never dilute qualified
+        # salary/JD statistics or downstream plan evidence.
+        qualified_rows = [row for row in rows if row["filter_status"] == "pass" and row["stage"] != "rejected"]
         report = {
             "covered_jobs": len(summaries),
-            "qualified_jobs": sum(item["stage"] != "rejected" for item in summaries),
+            "qualified_jobs": sum(item["stage"] != "rejected" and item["filter_status"] == "pass" for item in summaries),
+            "pending_verification": sum(item["filter_status"] == "unknown" for item in summaries),
             "constraints": constraints,
             "salary_distribution": salaries,
             "employment_distribution": employment,
             "benefit_distribution": benefits,
             "jd_overview": aggregate_jd(evidence),
-            "salary_overview": salary_overview([item["salary"] for item in summaries]),
+            "salary_overview": salary_overview([row["salary"] for row in qualified_rows]),
             "jobs": summaries,
             "highlights": summaries,  # Compatibility: no silent three-item truncation.
         }
@@ -865,7 +907,7 @@ class JobStore:
                         if job_id > 0:
                             job_ids.add(job_id)
                 job_rows = db.execute(
-                    "SELECT title,description,location,salary,tags,score,stage FROM jobs WHERE id IN ("
+                    "SELECT title,description,location,salary,tags,score,stage,filter_status FROM jobs WHERE id IN ("
                     + ",".join("?" for _ in job_ids) + ")",
                     sorted(job_ids),
                 ).fetchall() if job_ids else []
@@ -873,7 +915,7 @@ class JobStore:
                 task_rows = db.execute(
                     "SELECT discovered,stored,duplicates,status FROM browser_tasks WHERE status IN ('completed','stopped','failed')"
                 ).fetchall()
-                job_rows = db.execute("SELECT title,description,location,salary,tags,score,stage FROM jobs").fetchall()
+                job_rows = db.execute("SELECT title,description,location,salary,tags,score,stage,filter_status FROM jobs").fetchall()
 
         cities: dict[str, int] = {}
         salaries: dict[str, int] = {"≤10K": 0, "10-20K": 0, "20-30K": 0, "30-50K": 0, "50K+": 0, "未注明": 0}
@@ -885,6 +927,8 @@ class JobStore:
         jd_samples = []
         from .search_reporting import jd_evidence, aggregate_jd, job_characteristics, BENEFITS
         for row in job_rows:
+            if row["filter_status"] != "pass":
+                continue
             description = str(row["description"] or "")
             jd_samples.append(jd_evidence(description))
             characteristics = job_characteristics(str(row["title"] or ""), description)
@@ -917,7 +961,8 @@ class JobStore:
             "tasks_total": len(task_rows),
             "discovered_total": sum(int(row["discovered"] or 0) for row in task_rows),
             "duplicates_total": sum(int(row["duplicates"] or 0) for row in task_rows),
-            "stored_total": len(job_rows),
+            "stored_total": sum(row["filter_status"] == "pass" for row in job_rows),
+            "pending_verification": sum(row["filter_status"] == "unknown" for row in job_rows),
             "rejected": rejected,
             "partial_tasks": sum(row["status"] != "completed" for row in task_rows),
             "employment_distribution": employment,
@@ -963,15 +1008,19 @@ class JobStore:
                 task_ids,
             ).fetchall()
             ids: list[int] = []
+            outcomes: dict[int, dict] = {}
+            seen_ids: set[int] = set()
             for event in events:
                 try:
-                    job_id = int(json.loads(event["sample_json"] or "{}").get("job_id") or 0)
+                    sample = json.loads(event["sample_json"] or "{}")
+                    job_id = int(sample.get("job_id") or 0)
                 except (ValueError, TypeError, json.JSONDecodeError):
                     continue
-                if job_id > 0 and job_id not in ids:
-                    ids.append(job_id)
-                if len(ids) >= limit and min_score is None and max_score is None and salary_min is None:
-                    break
+                if job_id > 0 and job_id not in seen_ids:
+                    seen_ids.add(job_id)
+                    outcomes[job_id] = sample
+                    if sample.get("filter_status", "pass") == "pass":
+                        ids.append(job_id)
             if not ids:
                 return []
             rows = db.execute(
@@ -981,6 +1030,10 @@ class JobStore:
         by_id = {int(row["id"]): dict(row) for row in rows}
         from ..core.search_contract import monthly_salary_lower_bound
         return [by_id[job_id] for job_id in ids if job_id in by_id
+                and by_id[job_id].get("filter_status", "pass") == "pass"
+                and outcomes[job_id].get("filter_status", "pass") == "pass"
+                and (not outcomes[job_id].get("filter_fingerprint") or
+                     outcomes[job_id]["filter_fingerprint"] == self.review_fingerprint(by_id[job_id]))
                 and (min_score is None or by_id[job_id]["score"] >= min_score)
                 and (max_score is None or by_id[job_id]["score"] <= max_score)
                 and (salary_min is None or (monthly_salary_lower_bound(by_id[job_id]["salary"]) is not None
@@ -1001,6 +1054,8 @@ class JobStore:
         inserted = []
         with self.lock, self._connect() as db:
             for item in items:
+                if item.get("filter_status", "pass") != "pass":
+                    continue
                 cursor = db.execute(
                     "INSERT OR IGNORE INTO mock_delivery_queue "
                     "(job_id,session_id,resume_stamp,binding_json,job_hash,min_score,status,updated_at) "
@@ -1158,7 +1213,7 @@ class JobStore:
 
     @staticmethod
     def review_fingerprint(job: dict) -> str:
-        facts = {key: job.get(key) for key in ("id", "title", "company", "location", "salary", "source_url", "content_hash")}
+        facts = {key: job.get(key) for key in ("id", "title", "company", "location", "salary", "source_url", "content_hash", "filter_status", "filter_evidence")}
         return hashlib.sha256(json.dumps(facts, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
 
     def get_job(self, job_id: int) -> dict[str, Any]:
@@ -1185,9 +1240,11 @@ class JobStore:
             raise ValueError("不支持的投递动作")
         job = self.get_job(job_id)
         now = datetime.now(UTC)
+        self._check_delivery_filter(job)
         expires = now + timedelta(minutes=30)
         payload = {
             "job_id": job_id,
+            "filter_fingerprint": self.review_fingerprint(job),
             "title": job["title"],
             "company": job["company"],
             "source_url": job["source_url"],
@@ -1269,9 +1326,10 @@ class JobStore:
                 action=action,
             )
             payload = json.loads(row["payload_json"])
-            current_job = db.execute("SELECT source_url FROM jobs WHERE id=?", (row["job_id"],)).fetchone()
+            current_job = db.execute("SELECT * FROM jobs WHERE id=?", (row["job_id"],)).fetchone()
             if current_job is None or current_job["source_url"] != payload.get("source_url"):
                 raise ValueError("职位链接已变化，请重新生成投递预览")
+            self._check_delivery_filter(dict(current_job), payload)
             expires = datetime.fromisoformat(row["expires_at"])
             if expires <= now:
                 db.execute("UPDATE delivery_previews SET status='expired' WHERE id=?", (preview_id,))
@@ -1308,6 +1366,8 @@ class JobStore:
                 raise ValueError("投递授权已过期")
             if not secrets.compare_digest(str(row["authorization_hash"]), token_hash):
                 raise ValueError("投递授权凭证无效")
+            job = db.execute("SELECT * FROM jobs WHERE id=?", (row["job_id"],)).fetchone()
+            self._check_delivery_filter(dict(job) if job else {}, json.loads(row["payload_json"]))
             db.execute(
                 "UPDATE delivery_previews SET status='consumed',authorization_hash=NULL,consumed_at=? WHERE id=?",
                 (now.isoformat(), row["id"]),
@@ -1322,6 +1382,20 @@ class JobStore:
             )
             if cursor.rowcount == 0:
                 raise KeyError(job_id)
+
+    def _check_delivery_filter(self, job: dict, payload: dict | None = None) -> None:
+        if not job or job.get("filter_status", "pass") != "pass":
+            raise ValueError("职位筛选条件未核实通过，不能沟通或投递；请先核对条件并重新搜索")
+        if payload and payload.get("filter_fingerprint") != self.review_fingerprint(job):
+            raise ValueError("筛选条件或职位证据已变化，请重新生成预览并授权")
+
+    def assert_delivery_facts(self, job_id: int, preview_id: str | None) -> None:
+        with self.lock, self._connect() as db:
+            job = db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+            preview = db.execute("SELECT * FROM delivery_previews WHERE id=? AND job_id=?", (preview_id, job_id)).fetchone()
+        if preview is None:
+            raise ValueError("缺少与职位绑定的投递预览，需重新授权")
+        self._check_delivery_filter(dict(job) if job else {}, json.loads(preview["payload_json"]))
 
     def mark_recruiter_reply(self, job_id: int, reply: str) -> str:
         now = utc_now()

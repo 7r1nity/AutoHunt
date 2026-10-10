@@ -11,7 +11,8 @@ from urllib.request import Request, urlopen
 
 from playwright.async_api import Error as PlaywrightError, Page
 
-from .boss_adapter import BOSS_ORIGIN, BossAdapter
+from .boss_adapter import BossAdapter
+from .zhaopin_adapter import ZhaopinAdapter
 from .lock import BrowserExecutionLock, BrowserLockBusy
 from .mock_site_adapter import MOCK_SITE_ORIGIN, MockJobSiteSearchAdapter
 from .screening import (
@@ -25,6 +26,7 @@ from .screening import (
 from .session import BrowserSession
 from ..core.models import BrowserMode, BrowserSearchRequest, BrowserTaskStatus, BrowserTaskView, JobAnalysis, JobAnalysisRequest
 from ..core.search_contract import monthly_salary_lower_bound
+from ..core.job_filters import evaluate_filter
 from ..delivery.mock_site_adapter import MockJobSiteAdapter as MockDeliveryAdapter
 from ..jobs.analysis import KNOWN_SKILLS, analyze_job
 from ..jobs.store import JobStore
@@ -97,15 +99,17 @@ class BrowserAutomationService:
                 request.query,
                 request.browser_mode.value,
                 dry_run=request.dry_run,
-                adapter_version=(self.mock_adapter.selector_version if request.source == "mock" else self.adapter.selector_version),
+                adapter_version=(self.mock_adapter.selector_version if request.source == "mock" else
+                    (ZhaopinAdapter.selector_version if request.source == "zhaopin" else BossAdapter.selector_version)),
                 resume_id=self.candidate_state.read().profile.resume_id,
             )
-            source_label = "模拟招聘网站" if request.source == "mock" else "BOSS"
+            source_label = {"mock": "模拟招聘网站", "boss": "BOSS直聘", "zhaopin": "智联招聘"}[request.source]
             self.store.event(task_id, "task_started", f"{source_label} 搜索：{request.query}")
             self.store.event(task_id, "search_constraints", "本次搜索条件（不修改持久化偏好）", sample={
                 "queries": request.queries or [request.query], "locations": request.locations or [],
                 "result_limit": request.result_limit, "salary_min": request.salary_min, "max_jobs": request.max_jobs,
                 "conversation_id": request.conversation_id, "revision": request.search_state_revision,
+                "source": request.source, "filters": request.filters,
             })
             self.worker = asyncio.create_task(self._run_guarded(task_id, request), name=f"browser-search-{task_id[:8]}")
             return state
@@ -154,7 +158,7 @@ class BrowserAutomationService:
             raise ValueError("浏览器任务已没有存活执行器，请重新搜索；未恢复旧任务")
         self.resume_access_check = True
         self.gate.set()
-        source_label = "模拟招聘网站" if state.source == "mock" else "BOSS"
+        source_label = {"mock": "模拟招聘网站", "boss": "BOSS直聘", "zhaopin": "智联招聘"}.get(state.source, state.source)
         self.store.event(state.id or "unknown", "task_resumed", f"用户确认继续；将重新绑定{source_label}页面")
         return self.store.update_task(state.id, status=BrowserTaskStatus.RUNNING, detail=f"正在重新检查登录状态和{source_label}页面", takeover_reason=None)
 
@@ -195,11 +199,13 @@ class BrowserAutomationService:
 
     async def _run(self, task_id: str, request: BrowserSearchRequest) -> None:
         execution_lock = BrowserExecutionLock(self.data_root / "private" / "browser-session.lock", task_id)
+        pending = []
         try:
             execution_lock.acquire()
             if request.source == "mock":
                 await self._run_mock_site(task_id, request)
                 return
+            self.adapter = ZhaopinAdapter() if request.source == "zhaopin" else BossAdapter()
             self.store.update_task(task_id, status=BrowserTaskStatus.STARTING, detail="正在连接浏览器")
             # BOSS currently serves a persistent loading shell (and may later clear
             # the tab to about:blank) to a Playwright-launched managed profile.
@@ -220,9 +226,9 @@ class BrowserAutomationService:
                 # it is not running yet; ensure_cdp_window then briefly attaches
                 # only to open/focus a visible BOSS tab and detaches again, so
                 # the login phase itself never runs with a live CDP client.
-                await self.session.ensure_cdp_browser(BOSS_HOME_URL)
+                await self.session.ensure_cdp_browser(self.adapter.origin)
                 self.store.event(task_id, "cdp_browser_ready", self.cdp_url)
-                await self.session.ensure_cdp_window(BOSS_ORIGIN)
+                await self.session.ensure_cdp_window(self.adapter.origin)
                 self.store.event(task_id, "cdp_window_ready", "HTTP-only tab activation completed")
                 self.gate.clear()
                 self.store.event(task_id, "user_takeover_required", "Chrome 已自动拉起；登录阶段尚未连接 Playwright")
@@ -230,10 +236,10 @@ class BrowserAutomationService:
                     task_id,
                     status=BrowserTaskStatus.WAITING_FOR_USER,
                     browser_mode=BrowserMode.CDP.value,
-                    detail="已自动拉起 AutoHunt Chrome 并打开 BOSS 首页；请在该窗口中完成登录，然后点击继续",
+                    detail=f"已打开{self.adapter.label}；请在该窗口中完成登录，然后点击继续",
                     takeover_reason="等待用户独立完成登录、验证码或 MFA",
                     checkpoint="waiting_for_login_before_attach",
-                    current_url=BOSS_ORIGIN,
+                    current_url=self.adapter.origin,
                 )
                 await self.gate.wait()
                 self.store.event(task_id, "user_resume_received", "准备连接 Playwright CDP")
@@ -246,7 +252,7 @@ class BrowserAutomationService:
                 )
 
             if session_reused:
-                await self.session.ensure_cdp_window(BOSS_ORIGIN)
+                await self.session.ensure_cdp_window(self.adapter.origin)
                 self.store.event(task_id, "browser_session_reused", f"{actual_mode}; pages={len(self.session.pages())}")
             else:
                 self.store.event(task_id, "browser_attach_started", requested_mode.value)
@@ -262,9 +268,9 @@ class BrowserAutomationService:
             # and home pages. Keep the browser stable on the homepage and wait for
             # the user before issuing search navigations.
             self.store.event(task_id, "login_preflight_started", f"pages={len(self.session.pages())}")
-            page = await self.session.recover_page(BOSS_ORIGIN)
-            page = await self._wait_for_page_readiness(page, BOSS_ORIGIN)
-            page = await self._ensure_access(task_id, BOSS_ORIGIN, "login_preflight", screenshot=True)
+            page = await self.session.recover_page(self.adapter.origin)
+            page = await self._wait_for_page_readiness(page, self.adapter.origin)
+            page = await self._ensure_access(task_id, self.adapter.origin, "login_preflight", screenshot=True)
             self.store.event(task_id, "login_preflight_ready", page.url)
             await self._respect_pause()
 
@@ -377,9 +383,9 @@ class BrowserAutomationService:
             semaphore = asyncio.Semaphore(MATCH_CONCURRENCY)
             pending: list[tuple[dict, str, JobAnalysisRequest, asyncio.Task]] = []
 
-            async def guarded_match(match_request: JobAnalysisRequest) -> JobAnalysis:
+            async def guarded_match(match_request: JobAnalysisRequest, detail: dict) -> JobAnalysis:
                 async with semaphore:
-                    return await match_job(self.llm.generate, match_request)
+                    return await self._match_and_filter(task_id, detail, match_request, request)
 
             try:
                 for position, index in enumerate(detail_indices, start=1):
@@ -425,7 +431,7 @@ class BrowserAutomationService:
                         excluded_keywords=excluded_keywords,
                         search_queries=queries,
                     )
-                    pending.append((detail, url, match_request, asyncio.create_task(guarded_match(match_request))))
+                    pending.append((detail, url, match_request, asyncio.create_task(guarded_match(match_request, detail))))
             except asyncio.CancelledError:
                 for _, _, _, task in pending:
                     task.cancel()
@@ -433,6 +439,7 @@ class BrowserAutomationService:
                 raise
 
             for detail, url, match_request, task in pending:
+                await self._respect_pause()
                 try:
                     analysis = await task
                 except Exception:
@@ -453,6 +460,10 @@ class BrowserAutomationService:
             self.store.event(task_id, "task_failed", f"{type(exc).__name__}: {str(exc)[:300]}; {snapshot}")
             self.store.update_task(task_id, status=BrowserTaskStatus.FAILED, detail=f"浏览器任务失败：{str(exc)[:180]}")
         finally:
+            for _, _, _, work in pending:
+                if not work.done():
+                    work.cancel()
+            await asyncio.gather(*(work for _, _, _, work in pending), return_exceptions=True)
             # Preserve the single CDP Chrome and its BOSS tab across tasks.
             # Browser shutdown is an application-lifecycle operation, never a
             # search-task cleanup operation.
@@ -592,7 +603,7 @@ class BrowserAutomationService:
                     search_queries=queries,
                 )
                 try:
-                    analysis = await match_job(self.llm.generate, match_request)
+                    analysis = await self._match_and_filter(task_id, detail, match_request, request)
                 except Exception:
                     analysis = analyze_job(match_request)
             except asyncio.CancelledError:
@@ -620,6 +631,8 @@ class BrowserAutomationService:
                     missing_skills=[],
                     reasoning=verdict["reasoning"],
                 )
+            if "filter_status" not in detail:
+                await self._check_filters(task_id, detail, request)
             delta = self._persist_analysis(task_id, detail, analysis, url, source="MockJobSite", request=request)
             stored += delta[0]
             duplicates += delta[1]
@@ -627,7 +640,7 @@ class BrowserAutomationService:
             job_id = self.store.job_id_for_source_url(url)
             if job_id is not None and analysis.score >= request.dry_run_min_score:
                 stored_job = self.store.get_job(job_id)
-                if stored_job.get("stage") == "review" and analysis.decision in {"APPLY", "REVIEW"}:
+                if delta[2] and stored_job.get("filter_status", "pass") == "pass" and stored_job.get("stage") == "review" and analysis.decision in {"APPLY", "REVIEW"}:
                     dry_run_candidates.append((analysis.score, job_id))
             self.store.update_task(task_id, stored=stored, duplicates=duplicates, matched=matched)
 
@@ -892,7 +905,7 @@ class BrowserAutomationService:
         retry; a second loss degrades to the human-takeover path instead of
         failing the task on a dead page.
         """
-        page = await self.session.recover_page(BOSS_ORIGIN)
+        page = await self.session.recover_page(self.adapter.origin)
         self.store.event(task_id, "search_iteration_page_ready", f"{page.url}; {self.session.lifecycle_snapshot()}")
         if city:
             selected = await self.adapter.select_city(page, city)
@@ -901,13 +914,13 @@ class BrowserAutomationService:
                 # fold the city into the keywords so intent is still honored.
                 self.store.event(
                     task_id, "city_filter_unavailable",
-                    f"BOSS 城市筛选器不可用，已将「{city}」并入搜索关键词",
+                    f"{self.adapter.label}城市筛选器不可用，将「{city}」加入检索，并在读取后核对实际工作地点",
                 )
                 query = f"{query} {city}"
             else:
                 self.store.event(task_id, "city_filter_selected", city)
 
-        desired_search_url = f"{BOSS_ORIGIN}/web/geek/jobs?query={quote_plus(query)}"
+        desired_search_url = self.adapter.search_url(query)
         # Give the page a moment of human rhythm before the first interaction.
         await self._paced_wait(2.5, 6.0)
         await self._respect_pause()
@@ -920,20 +933,20 @@ class BrowserAutomationService:
                 if not self._is_target_closed(exc):
                     raise
                 if attempt == 1:
-                    self.store.event(task_id, "search_tab_lost_final", "BOSS 反复关闭搜索标签页；转入人工接管")
+                    self.store.event(task_id, "search_tab_lost_final", f"{self.adapter.label}搜索标签页反复关闭；转入人工接管")
                     page = await self._wait_for_search_results(task_id, desired_search_url)
                     return await self.adapter.extract_search_cards(page)
-                self.store.event(task_id, "search_tab_lost", "BOSS 关闭了搜索标签页；等待风控冷却后重新绑定重试一次")
+                self.store.event(task_id, "search_tab_lost", f"{self.adapter.label}搜索标签页关闭；等待后重新绑定重试一次")
                 await self._paced_wait(10.0, 20.0)
                 await self._respect_pause()
-                page = await self.session.recover_page(BOSS_ORIGIN)
+                page = await self.session.recover_page(self.adapter.origin)
                 if city:
                     await self.adapter.select_city(page, city)
 
         # Safety pass: readiness + access check, then the human takeover for
         # an empty results page.
         page = await self._wait_for_page_readiness(page, desired_search_url)
-        search_url = page.url if page.url.startswith(BOSS_ORIGIN) else desired_search_url
+        search_url = page.url if page.url.startswith(self.adapter.origin) else desired_search_url
         page = await self._ensure_access(task_id, search_url, "search_access_checked", screenshot=(position == 1))
         await self._respect_pause()
         if not page_cards:
@@ -952,13 +965,13 @@ class BrowserAutomationService:
         page = await self.session.navigate(desired_search_url, page=page)
         await self.adapter.wait_for_search_cards(page, timeout_ms=8_000)
         cards = await self.adapter.extract_search_cards(page)
-        if cards or "/web/geek/job" in page.url:
+        if cards:
             return cards, page
         # Deep link bounced (home/city page) — inspect for walls, then use the form.
         page = await self._ensure_access(task_id, page.url, "deep_link_bounced")
         await self._respect_pause()
         if not await self.adapter.submit_search(page, query):
-            raise RuntimeError("已登录，但未找到可用的 BOSS 搜索框")
+            raise RuntimeError(f"已登录，但未找到可用的{self.adapter.label}搜索框")
         await self.adapter.wait_for_search_cards(page)
         return await self.adapter.extract_search_cards(page), page
 
@@ -972,7 +985,7 @@ class BrowserAutomationService:
             if state.source == "mock":
                 await self._ensure_mock_access(state.id, state.current_url or MOCK_SITE_ORIGIN, "mock_resume_access")
             else:
-                await self._ensure_access(state.id, state.current_url or BOSS_ORIGIN, "resume_access", require_auth=True)
+                await self._ensure_access(state.id, state.current_url or self.adapter.origin, "resume_access", require_auth=True)
 
     async def _ensure_mock_access(self, task_id: str, target_url: str, checkpoint: str) -> Page:
         while True:
@@ -1224,8 +1237,39 @@ class BrowserAutomationService:
                          sample={"title": detail.get("title", ""), "salary": detail.get("salary", ""), "salary_min": request.salary_min})
         return False
 
+    async def _match_and_filter(self, task_id, detail, match_request, request):
+        # A failed/cancelled sibling must not leave inference workers detached.
+        async with asyncio.TaskGroup() as group:
+            matching = group.create_task(match_job(self.llm.generate, match_request))
+            group.create_task(self._check_filters(task_id, detail, request))
+        return matching.result()
+
+    async def _check_filters(self, task_id: str, detail: dict, request: BrowserSearchRequest):
+        detail["description"] = re.sub(r"\s+", " ", str(detail.get("description") or "")).strip()
+        if request.locations and not any(city in str(detail.get("location", "")) for city in request.locations):
+            verdict = {"status": "unknown" if detail.get("location") in {None, "", "未注明", "未知"} else "fail", "conditions": [], "reason": "工作地点无法满足本轮城市条件"}
+        else:
+            verdict = await evaluate_filter(self.llm.generate, request.filters, detail)
+        detail["filter_status"], detail["filter_evidence"] = verdict["status"], verdict
+        if request.filters or verdict["status"] != "pass":
+            self.store.event(task_id, "filter_evaluated", f"{detail.get('title', '')}：{verdict['status']}",
+                reason_code="semantic_filter_" + verdict["status"], sample=verdict)
+
     def _persist_analysis(self, task_id: str, detail: dict, analysis: JobAnalysis, url: str, *, source: str = "BOSS直聘", request: BrowserSearchRequest | None = None) -> tuple[int, int, int]:
-        """Upsert one analyzed job and emit its event; returns (stored, duplicates, matched)."""
+        """Upsert one analyzed job; return (stored, duplicates, qualified)."""
+        if request and request.source == "zhaopin":
+            source = "智联招聘"
+        if detail.get("filter_status") == "fail":
+            existing = self.store.job_id_for_source_url(url)
+            if existing is not None:
+                self.store.update_job_filter_result(existing, detail.get("filter_evidence", {"status": "fail"}))
+            self.store.increment_funnel(task_id, filtered=1)
+            return (0, 0, 0)
+        if request and request.filters and "filter_status" not in detail:
+            # An unread card is never proof of a semantic hard condition.
+            detail["filter_status"] = "unknown"
+        if detail.get("filter_status") == "unknown":
+            analysis = analysis.model_copy(update={"decision": "REVIEW", "reasoning": "筛选条件待核实，禁止自动投递。" + analysis.reasoning})
         if request is not None:
             if request.result_limit and self.store.get_task(task_id).matched >= request.result_limit:
                 self.store.increment_funnel(task_id, limited=1)
@@ -1255,6 +1299,9 @@ class BrowserAutomationService:
             "job_stored" if inserted else "job_duplicate",
             f"{detail['company']} / {detail['title']}",
             reason_code="stored" if inserted else "duplicate",
-            sample={"job_id": job_id, "title": detail["title"], "company": detail["company"]},
+            sample={"job_id": job_id, "title": detail["title"], "company": detail["company"],
+                "filter_status": detail.get("filter_status", "pass"),
+                "filter_evidence": detail.get("filter_evidence", {}),
+                "filter_fingerprint": self.store.review_fingerprint(self.store.get_job(job_id))},
         )
-        return (1 if inserted else 0, 0 if inserted else 1, 1 if analysis.decision in {"APPLY", "REVIEW"} else 0)
+        return (1 if inserted else 0, 0 if inserted else 1, 1 if analysis.decision in {"APPLY", "REVIEW"} and detail.get("filter_status", "pass") == "pass" else 0)

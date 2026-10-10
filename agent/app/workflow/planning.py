@@ -264,6 +264,14 @@ async def plan_request(llm, registry, message: str, *, dialogue: dict, condition
             "新搜索直接将条件放在job_search_start中即可，不需要额外先调用search_state_update。"
             "搜索/再次搜索/再次检索是同一种动作；不要求固定口令，复杂参数拆分到arguments。"
             "搜索异步：查询本次结果、统计、投递、成长计划依赖job_search_start成功完成，而不是启动后立即执行。"
+            "平台source支持mock、boss、zhaopin，省略继承会话。真实平台不投递。"
+            "公司、用工、福利、行业、岗位职责及其他任意语义限制统一进入搜索filters表达式，不能混入queries或忽略。"
+            "filters用condition(text表达子条件，quote逐字连续引用用户原文)、all(全部)、any(任一)、not(否定一个正向条件)组合，最多四层。"
+            "quote可以引用含共享主语的完整句，text可以补齐省略，例如学校必须提供住宿或者交通补贴可用any包含学校提供住宿和学校提供交通补贴，两个quote都引用完整句；不能新增偏好。"
+            "叶节点含否定时直接判断完整句子，不再包not造成双重否定。条件句保持完整叶节点。"
+            "完整保留任意组合逻辑，不用行业白名单。华为项目并不等于华为雇主，未提及不等于没有。"
+            "新条件在原会话filters上增补或改动，仅明确取消才能清除；修改后提交完整树。"
+            "filters是硬条件，不能把尽量/优先自动升级为必须；当前不支持通用软偏好排序，需要澄清该偏好是否可不排序或改为硬条件。"
             "先查看简历再提出修改、读结果再查看某职位、条件更新后重新搜索，也要写真实depends_on。"
             "投递仅本地模拟站有限队列，必须有明确分数下限；高/低匹配无数字则追问，不能默认90。"
             "成长/学习/提升计划同义；更新也是显式请求。scope_quote分别引用各动作的匹配分范围，"
@@ -422,13 +430,14 @@ def _validate_draft(draft: RequestDraft, registry, message: str, *, dialogue: di
     from .requests import employment_dropped
     dropped_employment = continued and employment_dropped(previous, answers)
     if employment_requirement(original) and not dropped_employment and any(step["tool"] == "job_search_start" for step in steps):
-        questions.append("当前搜索执行器尚不支持实习/校招等招聘类型的筛选或优先排序。是否去掉此条件，只执行其余搜索要求？")
+        if not all(step["arguments"].get("filters") for step in planned_searches):
+            questions.append("规划尚未保留招聘类型条件，请明确是否作为必须满足的条件；不会忽略条件执行。")
     if any(goal.disposition == "unsupported" for goal in draft.goals):
         questions.append("请求含暂不支持的目标；请明确是否只执行支持的部分。" + draft.reply)
     explicit = {}
     explicit.update(source_search_constraints(original))
     overrides = {key: value for key, value in (previous.get("condition_overrides", {}) if continued else {}).items()
-        if key in {"queries", "locations", "result_limit", "salary_min", "max_jobs"}}
+        if key in {"queries", "locations", "result_limit", "salary_min", "max_jobs", "source", "filters"}}
     historical_answers = answers[:-1] if continued else []
     for source in historical_answers:
         explicit.update(source_search_constraints(source, amendment=True))
@@ -534,6 +543,22 @@ def _validate_draft(draft: RequestDraft, registry, message: str, *, dialogue: di
         except ValueError as exc:
             raise PlanValidationError("invalid_argument_schema", str(exc), tool=name) from exc
         if name in {"job_search_start", "search_state_update"}:
+            from ..core.job_filters import validate_filter
+            if args.get("filters"):
+                saved_filter = conditions.get("filters")
+                citations = sources + ([leaf.quote or leaf.text for leaf in validate_filter(saved_filter).leaves()] if saved_filter else [])
+                try:
+                    args["filters"] = validate_filter(args["filters"], citations).model_dump(mode="json")
+                except ValueError as exc:
+                    raise PlanValidationError("invalid_filter_evidence", str(exc), tool=name, field="filters") from exc
+            elif "filters" in args and conditions.get("filters") and not any(
+                    re.search(r"(?:取消|去掉|清除|不再|不限).{0,20}(?:条件|限制|筛选)|(?:条件|限制|筛选).{0,12}(?:取消|清除|不限)", source)
+                    for source in sources):
+                raise PlanValidationError("unrequested_filter_clear", "没有取消筛选条件的用户依据", tool=name, field="filters")
+            if "source" in args and args["source"] != conditions.get("source", "mock"):
+                aliases = {"mock": r"模拟|mock", "boss": r"boss|直聘", "zhaopin": r"智联|zhaopin"}
+                if not any(re.search(aliases[args["source"]], source, re.I) for source in sources):
+                    raise PlanValidationError("ungrounded_platform", "平台选择没有用户依据", tool=name, field="source")
             local_explicit = source_search_constraints(quote)
             for answer in historical_answers:
                 local_explicit.update(source_search_constraints(answer, amendment=True))
@@ -542,6 +567,10 @@ def _validate_draft(draft: RequestDraft, registry, message: str, *, dialogue: di
             if len(searches) == 1:
                 local_explicit = {**explicit, **local_explicit}
             for key, citation in step.get("slot_evidence", {}).items():
+                if key in {"source", "filters"}:
+                    # Non-numeric semantic slots are checked above, not by the
+                    # deterministic numeric-slot verifier.
+                    continue
                 if key == "salary_min" and not any(citation in search_constraint_text(source) for source in sources):
                     # The citation is real, but it belongs to another action.
                     # Do not let a correct number become a wrong search filter.

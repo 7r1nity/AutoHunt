@@ -132,6 +132,7 @@ class MockWorkflowCoordinator:
         evidence = self.jobs.jobs_for_resume_analysis(profile.resume_id, limit=200, min_score=min_score, task_id=task_id)
         eligible = [self.jobs.get_job(item["id"]) for item in evidence
                     if item["stage"] in {"review", "applying"}
+                    and item.get("filter_status", "pass") == "pass"
                     and self.delivery.supports(item["source_url"])
                     and self.jobs.latest_delivery_status_for_job(item["id"]) is None]
         binding = {"resume_document_id": document.id, "resume_version": document.version,
@@ -303,6 +304,7 @@ class MockWorkflowCoordinator:
             for item in self.jobs.mock_delivery_queue():
                 job = self.jobs.get_job(item["job_id"])
                 if (item["resume_stamp"] != stamp or job["score"] < item["min_score"]
+                        or job.get("filter_status", "pass") != "pass"
                         or self.jobs.review_fingerprint(job) != item["job_hash"]
                         or not self.delivery.supports(job["source_url"])):
                     self._finish_queue_item(item, "stale", "简历、职位或分数已变化，旧授权失效，请重新核对")

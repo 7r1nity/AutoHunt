@@ -1914,7 +1914,7 @@ export default function Home() {
                           <div className="job-top"><span className={scoreClass(job.score)}>{job.score}</span><span className={job.mode === "自动投递" ? "mode auto" : "mode"}>{job.review_approved && job.stage === "review" ? "审核通过 · 待授权" : job.mode}</span></div>
                           <h4>{job.role}</h4><p className="company">{job.company} · {job.location}</p><strong className="salary">{job.salary}</strong>
                           <div className="tags">{job.tags.slice(0, 2).map((tag) => <span key={tag}>{tag}</span>)}</div>
-                          <p className="reason">{job.reason}</p>
+                          <p className="reason">{job.filter_status === "unknown" && <span>条件待核实 · 不自动投递<br /></span>}{job.filter_status === "fail" && <span>本轮筛选不符 · 不自动投递<br /></span>}{job.reason}</p>
                           {job.recruiter_reply && <p className="confirm-result ok">HR 回复：{job.recruiter_reply}</p>}
                           <footer><small>{job.source} · <time dateTime={job.posted} title={job.posted}>{shortJobDate(job.posted)}</time></small>{(stage === "review" || stage === "waiting") && <button onClick={(event) => { event.stopPropagation(); advanceJob(job.id); }}>{stage === "review" ? "审阅投递" : "记录面试"} →</button>}</footer>
                           {stage === "review" && <button className="reject" onClick={(event) => { event.stopPropagation(); rejectJob(job.id); }}>跳过这个职位</button>}

@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from ..resume_layout import ResumeLayoutReport
 
 
@@ -211,7 +211,8 @@ class BrowserSearchRequest(BaseModel):
     max_jobs: int = Field(default=30, ge=1, le=200)
     result_limit: int | None = Field(default=None, ge=1, le=100)
     salary_min: int | None = Field(default=None, ge=0, le=10_000_000)
-    source: Literal["mock", "boss"] = "mock"
+    source: Literal["mock", "boss", "zhaopin"] = "mock"
+    filters: dict | None = None
     browser_mode: BrowserMode = BrowserMode.AUTO
     queries: list[str] | None = Field(default=None, max_length=6)
     locations: list[str] | None = Field(default=None, max_length=5)
@@ -219,6 +220,18 @@ class BrowserSearchRequest(BaseModel):
     dry_run_min_score: int = Field(default=75, ge=0, le=100)
     dry_run_max_contacts: int = Field(default=3, ge=1, le=5)
     dry_run_simulate_reply: bool = True
+
+    @field_validator("filters")
+    @classmethod
+    def clean_filters(cls, value):
+        from .job_filters import validate_filter
+        return validate_filter(value).model_dump(mode="json") if value is not None else None
+
+    @model_validator(mode="after")
+    def mock_actions_only(self):
+        if self.source != "mock" and self.dry_run:
+            raise ValueError("真实网站仅支持读取，不支持沟通或投递试运行")
+        return self
 
     @field_validator("query")
     @classmethod
@@ -430,6 +443,7 @@ class BrowserTaskView(BaseModel):
 
 
 class StoredJobView(BaseModel):
+    filter_status: Literal["pass", "fail", "unknown"] = "pass"
     id: int
     role: str
     company: str

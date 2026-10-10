@@ -12,6 +12,14 @@ const labels: Record<string, string> = { queued: "排队中", running: "执行�
   skipped: "前置失败，未执行", blocked: "条件或授权不足",
   interrupted: "已中断", timed_out: "超时", failed: "失败", outcome_indeterminate: "待核验" };
 
+function filterText(value: unknown): string {
+  if (!value || typeof value !== "object") return "";
+  const node = value as { op: string; text?: string; children?: unknown[] };
+  if (node.op === "condition") return node.text ?? "";
+  const children = (node.children ?? []).map(filterText);
+  return node.op === "not" ? `不满足（${children[0]}）` : `（${children.join(node.op === "all" ? " 且 " : " 或 ")}）`;
+}
+
 function stepDescription(event: RunEvent): string {
   const data = event.data;
   if (event.kind === "tool_retry" || event.kind === "model_retry")
@@ -76,10 +84,21 @@ export function RuntimePanel({ runtime, notice, showSession = true }: { runtime:
       </select>
       <button className="button secondary compact" onClick={() => void runtime.newSession().catch((error) => notice(error.message))}>新会话</button>
     </div>}
+    {runtime.searchState && <div className="runtime-session">
+      <label htmlFor="search-platform">搜索平台</label>
+      <select id="search-platform" value={runtime.searchState.source ?? "mock"} disabled={Boolean(runtime.busyRun)}
+        onChange={(event) => void runtime.updateSearchSource(event.target.value as "mock" | "boss" | "zhaopin").catch((error) => notice(error.message))}>
+        <option value="mock">模拟招聘 · 可测试投递</option>
+        <option value="boss">BOSS直聘 · 只读搜索</option>
+        <option value="zhaopin">智联招聘 · 只读搜索</option>
+      </select>
+      <small>平台切换只影响下一次搜索；登录和验证需人工完成。</small>
+    </div>}
     {runtime.searchState && <details className="runtime-history">
       <summary>本会话搜索条件 · {runtime.searchState.query_source === "session" ? "会话指定" : runtime.searchState.query_source === "preference" ? "已保存偏好" : "当前简历"}</summary>
       <p>{runtime.searchState.queries.join(" · ") || "尚未指定岗位"}</p>
       <p>{runtime.searchState.locations.join("、") || "不限城市"} · 数量 {runtime.searchState.result_limit ?? "默认"} · 最低月薪 {runtime.searchState.salary_min ? `${runtime.searchState.salary_min.toLocaleString()} 元` : "不限"}</p>
+      {runtime.searchState.filters && <p>语义条件：{filterText(runtime.searchState.filters)}</p>}
       <small>只影响后续搜索，不改变正在运行的任务或长期偏好。</small>
       <button className="button secondary compact" disabled={Boolean(runtime.busyRun)} onClick={() => void runtime.resetSearchState().catch((error) => notice(error.message))}>重置本会话条件</button>
     </details>}

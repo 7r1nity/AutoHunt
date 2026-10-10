@@ -89,9 +89,11 @@ def tool_reply(tool: str, status: str, result) -> str:
     if tool == "job_search_start":
         args = data.get("search_conditions") or {}
         return ("已启动搜索：" + " · ".join(args.get("queries") or [data.get("query") or "当前岗位方向"])
+            + "；平台：" + {"mock": "模拟招聘", "boss": "BOSS直聘（只读）", "zhaopin": "智联招聘（只读）"}.get(args.get("source", "mock"), "招聘网站")
             + ("；城市：" + "、".join(args["locations"]) if args.get("locations") else "")
             + (f"；目标 {args['result_limit']} 个" if args.get("result_limit") else "")
             + (f"；最低月薪 {args['salary_min']:,} 元" if args.get("salary_min") is not None else "")
+            + ("；已启用语义条件，证据不足的岗位待核实" if args.get("filters") else "")
             + "。登录或验证码需人工接管；搜索尚未完成。")
     if tool == "job_results_read":
         if isinstance(data.get("search_report"), dict) and isinstance(data.get("search_task"), dict):

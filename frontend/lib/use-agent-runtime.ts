@@ -4,7 +4,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { AgentRun, RunEvent, createRun, followRun, terminalRun } from "./agent-runtime";
 
 export type SessionSearchState = { queries: string[]; locations: string[]; result_limit: number | null;
-  salary_min: number | null; query_source: string; revision: number };
+  salary_min: number | null; query_source: string; revision: number;
+  source?: "mock" | "boss" | "zhaopin"; filters?: { op: string; text?: string; children?: unknown[] } | null };
 export type DialogueView = { active_intent: string; revision: number; idle_expired: boolean;
   frames: Record<string, { missing_slots: string[]; last_question: string }>;
   pending: Array<{ id: string; description: string; status: string }>;
@@ -244,6 +245,16 @@ export function useAgentRuntime() {
     if (currentSession.current === session) setSearchState(value);
   }
 
+  async function updateSearchSource(source: "mock" | "boss" | "zhaopin") {
+    const session = sessionId;
+    const response = await fetch(`/api/agent/conversations/${session}/search-state`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ source }),
+    });
+    const value = await response.json();
+    if (!response.ok) throw new Error(value.detail ?? "平台修改失败");
+    if (currentSession.current === session) setSearchState(value);
+  }
+
   async function resetContext() {
     const session = sessionId;
     const response = await fetch(`/api/agent/conversations/${session}/context`, { method: "POST" });
@@ -254,5 +265,5 @@ export function useAgentRuntime() {
 
   // Queued deliveries can outlive their completed chat run; stop must remain available.
   const canInterrupt = true;
-  return { sessionId, setSessionId, sessions, searchState, resetSearchState, dialogue, resetContext, runs, progress, busyRun, stopping, canInterrupt, interrupt, notifications, currentSession, newSession, execute, control, observe };
+  return { sessionId, setSessionId, sessions, searchState, resetSearchState, updateSearchSource, dialogue, resetContext, runs, progress, busyRun, stopping, canInterrupt, interrupt, notifications, currentSession, newSession, execute, control, observe };
 }

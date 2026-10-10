@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import hashlib
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+from typing import Literal
+from ..core.job_filters import validate_filter
 
 
 class SearchState(BaseModel):
@@ -12,9 +14,16 @@ class SearchState(BaseModel):
     result_limit: int | None = Field(default=None, ge=1, le=100)
     salary_min: int | None = Field(default=None, ge=0, le=10_000_000)
     max_jobs: int | None = Field(default=None, ge=1, le=200)
+    source: Literal["mock", "boss", "zhaopin"] = "mock"
+    filters: dict | None = None
     query_source: str = "resume"
     resume_stamp: str = ""
     revision: int = Field(default=0, ge=0)
+
+    @field_validator("filters")
+    @classmethod
+    def clean_filters(cls, value):
+        return validate_filter(value).model_dump(mode="json") if value is not None else None
 
     @field_validator("queries", "locations")
     @classmethod
@@ -32,6 +41,8 @@ class SearchPatch(BaseModel):
     salary_min: int | None = Field(default=None, ge=0, le=10_000_000)
     max_jobs: int | None = Field(default=None, ge=1, le=200)
     use_resume_profile: bool = False
+    source: Literal["mock", "boss", "zhaopin"] | None = None
+    filters: dict | None = None
 
 
 def prepare_search_state(saved: dict | None, candidate=None, resume_version=None) -> dict:

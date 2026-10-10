@@ -18,6 +18,7 @@ export type MockWorkflowSettings = {
 export type JobStage = "review" | "applying" | "waiting" | "interview" | "outcome_indeterminate";
 
 export type Job = {
+  filter_status?: "pass" | "fail" | "unknown";
   id: number;
   role: string;
   company: string;

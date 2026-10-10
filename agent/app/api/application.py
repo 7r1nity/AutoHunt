@@ -214,6 +214,28 @@ async def conversation_search_state(session_id: str) -> dict:
         raise HTTPException(status_code=404, detail="会话不存在") from exc
 
 
+@app.patch("/api/v1/conversations/{session_id}/search-state")
+async def update_conversation_search_state(session_id: str, payload: dict) -> dict:
+    from ..runtime.search_state import merge_search_state
+    try:
+        lock = agent_runtime.sessions.setdefault(session_id, asyncio.Lock())
+        if lock.locked():
+            raise HTTPException(status_code=409, detail="会话正在处理请求，请稍后修改条件")
+        async with lock:
+            saved = agent_runtime.search_state(session_id)
+            candidate = getattr(agent_runtime.agent, "candidate_state", None)
+            workspace = getattr(agent_runtime.agent, "resume_workspace", None)
+            updated = merge_search_state(saved, payload, candidate.read() if candidate else None,
+                workspace.read_document().version if workspace else None)
+            result = run_store.save_search_state(session_id, updated)
+            run_store.mutate_dialogue(session_id, {"op": "slots", "source": "ui", "conditions": result})
+            return result
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="会话不存在") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
 @app.get("/api/v1/conversations/{session_id}/context")
 async def conversation_context(session_id: str) -> dict:
     from ..runtime.dialogue import compact_state

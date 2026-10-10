@@ -96,7 +96,7 @@ def amended_request(saved: dict, conditions: dict, message: str, source: str, fi
     if not root or not parse_search_message(root.get("original", "")).authorized:
         return None
     changed = {key: value for key, value in conditions.items()
-        if key in {"queries", "locations", "result_limit", "salary_min", "max_jobs", "query_source", "resume_stamp"}
+        if key in {"queries", "locations", "result_limit", "salary_min", "max_jobs", "query_source", "resume_stamp", "source", "filters"}
         and (fields is None or key in fields)
         and root.get("conditions", {}).get(key) != value}
     if not changed:
