@@ -51,6 +51,9 @@ SITE_ROLE_PREFIXES = (
     "AI", "LLM", "NLP", "CV", "AIGC", "RAG", "Agent", "MLOps", "SRE",
     "大模型", "机器学习", "深度学习", "强化学习", "多模态", "视觉", "语音",
     "推荐", "搜索", "广告", "风控", "量化", "数据挖掘", "自然语言",
+    # Seniority words the site never puts in a title; dropping them lets
+    # "高级 LLM 算法工程师" reach the titles that do exist.
+    "高级", "资深", "初级", "中级", "专家",
 )
 
 
@@ -66,7 +69,18 @@ def browser_search_keyword(value: str) -> str:
     if not text:
         return ""
     pattern = "|".join(sorted((re.escape(item) for item in SITE_ROLE_PREFIXES), key=len, reverse=True))
-    stripped = re.sub(rf"^(?:(?:{pattern})\s*/\s*)*(?:{pattern})\s+", "", text, flags=re.I).strip()
+    # Peel every leading prefix, not just the first: "高级 LLM 算法工程师" carries a
+    # seniority word and a direction, and "AI/LLM 算法工程师" carries a slash-joined
+    # pair. Both must reduce all the way to the role word, and a prefix is only dropped
+    # when something follows it.
+    #: one prefix, or several joined by slashes: "AI", "LLM", "AI/LLM/NLP"
+    run = rf"(?:{pattern})(?:\s*/\s*(?:{pattern}))*"
+    stripped = text
+    while True:
+        reduced = re.sub(rf"^{run}\s+", "", stripped, count=1, flags=re.I).strip()
+        if reduced == stripped or not reduced:
+            break
+        stripped = reduced
     if stripped and re.search(r"[\u4e00-\u9fff]", stripped) and len(stripped) >= 2:
         return stripped
     # A slash inside the role word itself ("数据分析/建模"): keep the first part.

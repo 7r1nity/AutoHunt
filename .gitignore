@@ -37,3 +37,6 @@ tmp/
 /docs/*preview*.png
 /docs/*preview*.jpg
 /91 - AutoHunt AI Job Application Assistant (ConnectOnion-example).pdf
+
+# 场景测试集的临时数据根（建临时库用，不得提交）
+/agent/tests/.tmp-data-root/

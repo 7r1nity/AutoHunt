@@ -22,7 +22,17 @@ _COMMAND = re.compile(COMMAND_PATTERN)
 _QUESTION = re.compile(r"怎么|如何|为什么|是什么|什么意思|是否|能不能|可不可以|可以吗|建议|含义|[?？]|吗[。！!]*$")
 _NEGATION = re.compile(r"不要|先别|暂不|暂时不|不想|不用|不需要|无需|别再|别搜|别检索|不再")
 _POLITE = re.compile(r"^(?:你好|您好|麻烦(?:你)?|请(?:你)?|帮我|帮忙|我(?:还)?(?:想|要|希望)(?:你)?|给我)\s*[,，]?\s*")
-_FIELD = re.compile(r"(?:工作地点|目标数量|结果数量|岗位数量|职位数量|最低月薪|岗位方向|目标方向|求职方向|地点|城市|数量|月薪|薪资|工资)(?=\s*[:：改为成到设换0-9\u4e00-\u9fff])")
+# A field label must not be the head of a job title. "城市规划师" contains the location
+# label 城市, and splitting there detached the role from its count ("10份" | "城市规划师"),
+# so the role word was dropped and the request was left with no keyword at all — for every
+# title that begins with a label word.
+_TITLE_TAIL = r"(?:规划|管理|建设|设计|运营|发展|研究|交通|更新|服务|经理|专员|工程|分析|开发)"
+_TITLE_ROLE = r"(?:师|员|经理|专员|工程师|顾问|主管|总监)"
+_FIELD = re.compile(
+    r"(?:工作地点|目标数量|结果数量|岗位数量|职位数量|最低月薪|岗位方向|目标方向|求职方向|"
+    r"地点|城市|数量|月薪|薪资|工资)"
+    rf"(?!(?:{_TITLE_TAIL})(?:{_TITLE_ROLE})?)"
+    r"(?=\s*[:：改为成到设换0-9\u4e00-\u9fff])")
 _RESULT = re.compile(r"搜索结果|检索结果|职位结果|岗位结果|找到的(?:职位|岗位)|有哪些(?:职位|岗位)")
 RESULT_EXACT = re.compile(r"^(?:看看职位|查看职位|列出职位|最近找到的职位|职位列表|看看找到的职位|推荐职位|职位搜索结果|岗位搜索结果|查看搜索结果|查看检索结果|查看职位结果|找到的职位|找到的岗位)$")
 _CONTROLS = {
