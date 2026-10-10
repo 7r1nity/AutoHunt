@@ -118,7 +118,7 @@ def recover_plan(run: dict, *, session_id: str, stamp: str,
         return RecoveryDecision("verify" if verify else "completed",
             "存在结果不确定或条件未修复的步骤，请先核验；没有重放操作。" if verify else
             "原任务没有可继续的未完成步骤；已完成结果保留，没有重复执行。")
-    plan.update(status="ready", expires_at=(time.time() if now is None else now) + 1800,
+    plan.update(status="ready", paused=False, expires_at=(time.time() if now is None else now) + 1800,
                 recovery_count=int(plan.get("recovery_count", 0)) + 1,
                 revoked_tools=sorted(revoked), recovery_pending=sorted(runnable))
     for step in plan["steps"]:

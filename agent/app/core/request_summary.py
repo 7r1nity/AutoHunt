@@ -79,9 +79,9 @@ def search_summary(conditions: dict) -> str:
         "- 岗位方向" + origin + "：" + (" / ".join(queries) or "尚未确定，请上传简历或指定岗位"),
         "- 城市：" + ("、".join(locations) or "未限定"),
         "- 目标数量：" + (f"{count} 个符合条件的去重职位" if count is not None else "尚未设置"),
-        "- 最低月薪：" + (f"{salary:,} 元（按区间下限筛选）" if salary else "未限定"),
+        "- 薪资/岗位条件：" + (filter_summary(conditions["filters"]) if conditions.get("filters") else
+                              f"月薪区间下限≥{salary:,}元" if salary else "未限定"),
         "- 搜索平台：" + {"mock": "模拟招聘", "boss": "BOSS直聘", "zhaopin": "智联招聘"}.get(conditions.get("source", "mock"), "招聘网站"),
-        "- 语义条件：" + filter_summary(conditions.get("filters")),
     ])
 
 

@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ..llm.base import LLMRequest
 from .task_semantics import condition_mode
+from .salary_conditions import SalaryPredicate, judge_salary
 
 
 class FilterExpression(BaseModel):
@@ -23,6 +24,7 @@ class FilterExpression(BaseModel):
     text: str = Field(default="", max_length=400)
     quote: str = Field(default="", max_length=1000)
     mode: Literal["require", "prefer", "allow"] = "require"
+    salary: SalaryPredicate | None = None
     children: list[FilterExpression] = Field(default_factory=list, max_length=16)
 
     @model_validator(mode="after")
@@ -30,7 +32,7 @@ class FilterExpression(BaseModel):
         if self.op == "condition":
             if not self.text.strip() or self.children:
                 raise ValueError("筛选叶节点需要用户条件原文，不能包含子节点")
-        elif self.mode != "require" or self.text or not self.children or self.op == "not" and len(self.children) != 1:
+        elif self.salary is not None or self.mode != "require" or self.text or not self.children or self.op == "not" and len(self.children) != 1:
             raise ValueError("组合节点仅包含子节点；not 必须有且只有一个子节点")
         def count(node, depth=1):
             if depth > 4:
@@ -50,6 +52,15 @@ def filter_schema(depth=4):
                   "quote": {"type": "string", "maxLength": 1000, "description": "用户的连续原文；text可补齐此原文中的语义省略，不得增添要求"}}
     properties["mode"] = {"type": "string", "enum": ["require", "prefer", "allow"],
         "description": "叶节点强度：必须=require，尽量/优先=prefer，可以有/也可以=allow；组合节点仅require"}
+    properties["salary"] = {"type": ["object", "null"], "description": "薪资叶节点的确定性结构，金额单位元；月薪或面议必须用any组合，不是软allow。",
+        "properties": {"unit": {"type": "string", "enum": ["monthly", "daily", "negotiable"]},
+            "minimum": {"type": ["integer", "null"], "minimum": 0, "maximum": 10000000},
+            "maximum": {"type": ["integer", "null"], "minimum": 0, "maximum": 10000000},
+            "range_mode": {"type": "string", "enum": ["contained", "overlap"]},
+            "applies_to": {"type": "string", "enum": ["all", "internship"]}},
+        "required": ["unit"], "additionalProperties": False}
+    properties["salary"]["properties"]["origin"] = {"type": "string", "enum": ["model", "legacy"],
+        "description": "模型输出model；legacy仅供应用兼容旧salary_min字段"}
     if depth > 1:
         properties["children"] = {"type": "array", "maxItems": 16, "items": filter_schema(depth - 1)}
     else:
@@ -95,7 +106,21 @@ def filter_summary(value):
     node = validate_filter(value)
     def render(node):
         if node.op == "condition":
-            return {"require": "", "prefer": "优先（不排除其他）：", "allow": "允许包含："}[node.mode] + node.text
+            text = node.text
+            if node.salary:
+                salary = node.salary
+                if salary.unit == "negotiable":
+                    text = "薪资面议"
+                else:
+                    bounds = "、".join(part for part in (
+                        f"下限≥{salary.minimum:,}元" if salary.minimum is not None else "",
+                        f"上限≤{salary.maximum:,}元" if salary.maximum is not None else "") if part)
+                    text = ("日薪" if salary.unit == "daily" else "月薪") + "区间" + bounds
+                    if salary.range_mode == "overlap":
+                        text = ("日薪" if salary.unit == "daily" else "月薪") + "区间与要求有交集（" + bounds + "）"
+                    if salary.applies_to == "internship":
+                        text = "仅限制按日计薪的实习岗位：" + text
+            return {"require": "", "prefer": "优先（不排除其他）：", "allow": "允许包含："}[node.mode] + text
         parts = [render(child) for child in node.children]
         return "非（" + parts[0] + "）" if node.op == "not" else "（" + (" 且 " if node.op == "all" else " 或 ").join(parts) + "）"
     return render(node)
@@ -113,7 +138,13 @@ async def evaluate_filter(generate, expression, facts):
     documents["tags"] = "、".join(str(tag) for tag in facts.get("tags", []))[:4000]
     judgments = [{"index": index, "status": "unknown", "reason": "条件证据不足或模型不可用", "evidence": []}
                  for index in range(len(leaves))]
+    semantic = [index for index, leaf in enumerate(leaves) if leaf.salary is None]
+    for index, leaf in enumerate(leaves):
+        if leaf.salary:
+            judgments[index].update(judge_salary(leaf.salary, facts))
     try:
+        if not semantic:
+            return _filter_result(result, expression, leaves, judgments)
         response = await asyncio.wait_for(generate(LLMRequest(
             instructions=("你是跨行业岗位筛选器，只输出JSON对象{\"conditions\":[{\"index\":0,"
                 "\"status\":\"pass|fail|unknown\",\"reason\":\"简短判断\","
@@ -128,7 +159,7 @@ async def evaluate_filter(generate, expression, facts):
                 "只判断当前岗位，不要求该公司所有岗位都满足同一条件。严格区分机会与保证、必要条件与充分条件。"
                 "原文要求有机会时，有条件的机会也算机会；不能擅自升级为必然成功或无条件保证。"
                 "实习有转正机会不等于保证转正。pass和fail都必须有直接证据，不得推测。"),
-            user_message=json.dumps({"conditions": [{"index": index, "text": leaf.text, "quote": leaf.quote or leaf.text} for index, leaf in enumerate(leaves)],
+            user_message=json.dumps({"conditions": [{"index": index, "text": leaves[index].text, "quote": leaves[index].quote or leaves[index].text} for index in semantic],
                 "output_contract": "每个输入index只返回一条，必须完整判断该text。不得拆分条件、增添index或改变index；复合要求需要综合判断。引用必须连续原文，不能改写、合并句子或用省略号。",
                 "facts": documents}, ensure_ascii=False),
             context="仅进行证据分类，不评分、不调用工具、不执行动作。", fast=True, json_output=True,
@@ -140,7 +171,7 @@ async def evaluate_filter(generate, expression, facts):
         seen = set()
         for item in payload["conditions"]:
             index = item["index"]
-            if type(index) is not int or not 0 <= index < len(leaves) or index in seen:
+            if type(index) is not int or index not in semantic or index in seen:
                 raise ValueError("duplicate or invalid criterion index")
             seen.add(index)
             status = item["status"]
@@ -155,7 +186,21 @@ async def evaluate_filter(generate, expression, facts):
                 "evidence": evidence if valid else []}
     except Exception:
         # asyncio cancellation is BaseException: user stop must propagate.
-        judgments = [{**item, "status": "unknown", "reason": "筛选服务不可用或输出不完整，需核实", "evidence": []} for item in judgments]
+        for index in semantic:
+            judgments[index].update(status="unknown", reason="筛选服务不可用或输出不完整，需核实", evidence=[])
+    return _filter_result(result, expression, leaves, judgments)
+
+
+def partial_filter_status(expression, facts):
+    """Unknown semantic leaves cannot cause an early rejection of an OR branch."""
+    if expression is None:
+        return "pass"
+    expression = validate_filter(expression)
+    return combine(expression, iter(judge_salary(leaf.salary, facts)["status"] if leaf.salary else "unknown"
+                                    for leaf in expression.leaves()))
+
+
+def _filter_result(result, expression, leaves, judgments):
     result["status"] = combine(expression, iter(item["status"] for item in judgments))
     result["conditions"] = [{"text": leaf.text, "quote": leaf.quote or leaf.text, "mode": leaf.mode, **item} for leaf, item in zip(leaves, judgments)]
     result["preferences"] = [item for item in result["conditions"] if item["mode"] == "prefer"]

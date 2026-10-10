@@ -25,7 +25,6 @@ from .screening import (
 )
 from .session import BrowserSession
 from ..core.models import BrowserMode, BrowserSearchRequest, BrowserTaskStatus, BrowserTaskView, JobAnalysis, JobAnalysisRequest
-from ..core.search_contract import monthly_salary_lower_bound
 from ..core.job_filters import evaluate_filter
 from ..delivery.mock_site_adapter import MockJobSiteAdapter as MockDeliveryAdapter
 from ..jobs.analysis import KNOWN_SKILLS, analyze_job
@@ -1249,26 +1248,14 @@ class BrowserAutomationService:
         }
 
     def _filter_salary_cards(self, task_id: str, cards: list[dict], request: BrowserSearchRequest) -> list[dict]:
-        if request.salary_min is None:
-            return cards
-        kept = []
-        for card in cards:
-            lower = monthly_salary_lower_bound(str(card.get("salary") or ""))
-            # Unknown card wages get one chance to be verified on the detail page.
-            if lower is None or lower >= request.salary_min:
-                kept.append(card)
-            else:
-                self._salary_allowed(task_id, card, request)
-        return kept
+        return [card for card in cards if self._salary_allowed(task_id, card, request)]
 
     def _salary_allowed(self, task_id: str, detail: dict, request: BrowserSearchRequest) -> bool:
-        if request.salary_min is None:
-            return True
-        lower = monthly_salary_lower_bound(str(detail.get("salary") or ""))
-        if lower is not None and lower >= request.salary_min:
+        from ..core.job_filters import partial_filter_status
+        if partial_filter_status(request.filters, detail) != "fail":
             return True
         self.store.increment_funnel(task_id, filtered=1)
-        self.store.event(task_id, "job_skipped", "月薪下限不满足或无法核实", reason_code="salary_unknown" if lower is None else "salary_below_min",
+        self.store.event(task_id, "job_skipped", "薪资条件不符合（按完整条件树判断）", reason_code="salary_condition_failed",
                          sample={"title": detail.get("title", ""), "salary": detail.get("salary", ""), "salary_min": request.salary_min})
         return False
 

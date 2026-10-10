@@ -16,8 +16,10 @@ DONE = {"completed", "failed", "skipped", "blocked", "outcome_indeterminate"}
 
 
 def persist(plan: dict) -> None:
-    emit("plan_state", plan=plan)
     previous = (active_run().dialogue or {}).get("instruction_request") or {}
+    if previous.get("id") == plan["id"] and previous.get("revision", 0) > plan.get("revision", 0):
+        return  # A stale watcher may not overwrite a foreground edit.
+    emit("plan_state", plan=plan)
     if previous.get("id") != plan["id"] and previous.get("status") == "clarifying" and plan["status"] != "clarifying":
         return  # A background completion must not erase a newer foreground question.
     if previous.get("id") == plan["id"]:
@@ -25,6 +27,7 @@ def persist(plan: dict) -> None:
     dialogue_change("instruction", request={"revoked_tools": plan.get("revoked_tools", []), "condition_overrides": plan.get("condition_overrides", {}), **{key: plan[key] for key in
         ("id", "original", "answers", "questions", "resume_stamp", "turn", "expires_at", "status", "goals")},
         "understanding": plan.get("understanding"),
+        "revision": plan.get("revision", 0), "paused": plan.get("paused", False),
         "steps": [{key: step.get(key) for key in ("id", "tool", "arguments", "depends_on", "missing_slots", "status", "authority_binding")}
                   for step in plan["steps"]]})
 
@@ -70,6 +73,8 @@ async def advance(plan: dict, registry) -> list[dict]:
     claim is indeterminate, never an instruction to repeat a tool call.
     """
     context = active_run()
+    if plan.get("paused"):
+        return []
     observed = []
     steps = {step["id"]: step for step in plan["steps"]}
     for step in plan["steps"]:

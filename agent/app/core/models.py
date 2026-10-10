@@ -229,6 +229,8 @@ class BrowserSearchRequest(BaseModel):
 
     @model_validator(mode="after")
     def mock_actions_only(self):
+        from .salary_conditions import normalized_search_filters
+        self.filters = normalized_search_filters(self.filters, self.salary_min)
         if self.source != "mock" and self.dry_run:
             raise ValueError("真实网站仅支持读取，不支持沟通或投递试运行")
         return self

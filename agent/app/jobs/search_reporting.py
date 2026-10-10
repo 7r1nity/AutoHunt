@@ -96,13 +96,13 @@ def render_search_report(browser, report: dict) -> str:
         lines.append(f"目标 {target} 个，已核实符合条件 {qualified} 个（包含已有看板职位）。")
         if qualified < target:
             lines.append(f"尚差 {target - qualified} 个：{'任务被中断' if str(browser.status) == 'stopped' else '本轮范围或候选预算不足'}；不补入不符合条件的岗位。")
-    if conditions.get("salary_min") is not None:
+    if conditions.get("salary_min") is not None and not conditions.get("filters"):
         lines.append(f"薪资筛选：月薪区间下限 ≥ {conditions['salary_min']:,} 元；面议、未知及日薪不算满足。")
     if conditions.get("locations"):
         lines.append("城市：" + "、".join(conditions["locations"]))
     if conditions.get("filters"):
         from ..core.job_filters import filter_summary
-        lines.append("本轮语义条件：" + filter_summary(conditions["filters"]))
+        lines.append("本轮筛选条件：" + filter_summary(conditions["filters"]))
     if report.get("pending_verification"):
         lines.append(f"另有 {report['pending_verification']} 个岗位条件证据不足，待核实；不计入目标数量，不自动投递。")
     lines += ["", "### 整体薪资与 JD 总结", "以下统计本轮条件已核实通过的岗位；待核实条件及未读取的候选不计入分析。"]

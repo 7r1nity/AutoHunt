@@ -152,6 +152,10 @@ class AgentRuntime:
                 self.store.update(run_id, checkpoint={**(self.store.get(run_id)["checkpoint"] or {}), "browser_id": browser_id})
         if kind == "plan_state":
             saved = self.store.get(run_id)["checkpoint"] or {}
+            previous_plan = saved.get("plan") or {}
+            if previous_plan.get("id") == data["plan"]["id"] and previous_plan.get("revision", 0) > data["plan"].get("revision", 0):
+                self.store.event(run_id, "stale_plan_write_ignored", {"revision": data["plan"].get("revision", 0)})
+                return
             self.store.update(run_id, checkpoint={**saved, "phase": "action_plan", "plan": data["plan"]})
         if kind == "plan_response_selection":
             saved = self.store.get(run_id)["checkpoint"] or {}
@@ -226,6 +230,8 @@ class AgentRuntime:
                                          retrieve_history=lambda query, limit: self.jobs.search_conversation_history(run["session_id"], query, limit=limit),
                                          request_records=lambda: self.store.request_records(run["session_id"]),
                                          resume_task=lambda message: self.continue_task(run_id, message),
+                                         plan_reader=lambda: self.active_plan(run["session_id"]),
+                                         revise_task=lambda revision, message: self.revise_plan(run_id, revision, message),
                                          enforce_task_scope=True)
                     token = current_run.set(context)
                     started = time.monotonic()
@@ -415,6 +421,13 @@ class AgentRuntime:
             run = self.store.get(run_id)
             if run["cancel_requested"]:
                 return
+            saved_plan = (run["checkpoint"] or {}).get("plan") or {}
+            if saved_plan.get("revision", 0) > plan.get("revision", 0):
+                plan = copy.deepcopy(saved_plan)
+            if plan.get("paused"):
+                self.store.update(run_id, status="waiting_user")
+                await asyncio.sleep(1)
+                continue
             changed = any(step["status"] == "claimed" for step in plan["steps"])
             waiting = False
             for step in plan["steps"]:
@@ -458,6 +471,11 @@ class AgentRuntime:
             if changed or not waiting:
                 lock = self.sessions.setdefault(run["session_id"], asyncio.Lock())
                 async with lock:
+                    latest = (self.store.get(run_id)["checkpoint"] or {}).get("plan") or {}
+                    if latest.get("revision", 0) > plan.get("revision", 0):
+                        plan = copy.deepcopy(latest)
+                    if plan.get("paused"):
+                        continue
                     async with self.slots:
                         context = RunContext(run_id, asyncio.current_task(),
                             lambda kind, data: self.emit(run_id, kind, data), lambda value: self.save(run_id, value),
@@ -809,6 +827,65 @@ class AgentRuntime:
         self.finish(run_id, "outcome_indeterminate" if uncertain else "cancelled",
             "任务已停止；中断时正在执行的写入需核对，未自动重试" if uncertain else "任务已停止，已完成的步骤保留")
 
+    def active_plan(self, session_id: str) -> dict | None:
+        """Full durable plan, not a truncated chat or an old failed edit run."""
+        candidates = [(run, (run.get("checkpoint") or {}).get("plan"))
+                      for run in self.store.list(session_id, active=True, limit=None)]
+        candidates = [(run, plan) for run, plan in candidates if plan and not run["cancel_requested"]
+                      and plan.get("status") not in {"finished", "completed", "cancelled", "outcome_indeterminate"}]
+        logical = {plan["id"] for _, plan in candidates}
+        if len(logical) != 1:
+            return None
+        return copy.deepcopy(candidates[0][1])
+
+    async def revise_plan(self, run_id: str, revision: dict, message: str):
+        """Called under the session execution lock; no new action plan is launched."""
+        from .context import active_run, dialogue_change
+        from ..core.models import ChatResponse, AgentLane
+        from ..growth.requests import resume_stamp
+        from ..workflow.revision import RevisionDraft, edited_plan
+        from ..workflow.requests import TaskRequest
+        session_id = self.store.get(run_id)["session_id"]
+        target = self.active_plan(session_id)
+        if target is None:
+            raise ValueError("没有唯一可修改的原任务")
+        edit = RevisionDraft.model_validate(revision)
+        stamp = resume_stamp(self.resume_workspace.read_document(), self.agent.candidate_state)
+        updated = edited_plan(target, edit, self.agent.tool_registry, stamp=stamp, session_id=session_id, message=message)
+        owner = next(run for run in self.store.list(session_id, active=True, limit=None)
+                     if ((run.get("checkpoint") or {}).get("plan") or {}).get("id") == target["id"])
+        self.store.update(owner["id"], checkpoint={**(owner["checkpoint"] or {}), "plan": updated},
+                          status="waiting_user" if edit.pause else "running")
+        # A compact instruction is memory; the complete plan above remains the checkpoint.
+        dialogue_change("instruction", request=updated)
+        dialogue_change("task", kind="plan_id", id=updated["id"], status=updated["status"], bind=True)
+        root = (active_run().dialogue or {}).get("task_request") or {}
+        anchor = TaskRequest(original=updated["original"], run_id=owner["id"],
+            origin_run_id=root.get("origin_run_id") or owner["id"], interpretation="model", status=updated["status"],
+            resume_stamp=stamp, conditions=updated.get("verified_conditions", {}), execution_started=True,
+            amendments=[{"message": item, "source": run_id, "fields": {}} for item in updated.get("answers", [])][-12:])
+        dialogue_change("request_state", request=anchor.model_dump())
+        self.store.event(owner["id"], "plan_revision", {"revision": updated["revision"], "source_run_id": run_id,
+                         "updated_steps": [item.step_id for item in edit.updates], "paused": edit.pause})
+        browser_id = (owner["checkpoint"] or {}).get("browser_id")
+        if edit.pause and browser_id and self.browser.current().id == browser_id and self.browser.current().status in {"starting", "running"}:
+            await self.browser.pause()
+        details = []
+        for item in edit.updates:
+            step = next(step for step in updated["steps"] if step["id"] == item.step_id)
+            args = step["arguments"]
+            if step["tool"] == "learning_plan_generate":
+                details.append("不足分析/成长计划范围：" + "、".join(text for text in (
+                    f"匹配分数≤{args['max_score']}" if 'max_score' in args else '',
+                    f"匹配分数≥{args['min_score']}" if 'min_score' in args else '',
+                    f"月薪下限≥{args['salary_min']:,}元" if 'salary_min' in args else '') if text))
+            else:
+                from ..core.replies import tool_label
+                details.append(tool_label(step["tool"]) + "的未执行参数已更新")
+        return ChatResponse(message=("已暂停原任务的新动作；已有进度保留。" if edit.pause else "原任务条件已更新。") +
+            ("\n\n" + "\n".join(details) if details else "") +
+            "\n\n其他要求及依赖保留，本次没有生成计划或投递。" + ("可说「继续任务」。" if edit.pause else ""), lane=AgentLane.APPLICATION)
+
     async def continue_task(self, run_id: str, message: str):
         """Resolve a user continuation against durable plans before model routing."""
         from .context import active_run, dialogue_change
@@ -852,6 +929,17 @@ class AgentRuntime:
         self.store.event(run_id, "recovery_resolution", {"source_run_id": source["id"], "plan_id": logical})
         worker = self.tasks.get(source["id"])
         if source["status"] not in TERMINAL and worker and not worker.done():
+            saved = source["checkpoint"] or {}
+            active_plan = saved.get("plan") or {}
+            if active_plan.get("paused"):
+                stamp = resume_stamp(self.resume_workspace.read_document(), self.agent.candidate_state)
+                if active_plan.get("resume_stamp") != stamp:
+                    return ChatResponse(message="简历已变化，请确认新的执行范围；原任务仍暂停。", lane=AgentLane.APPLICATION)
+                active_plan.update(paused=False, status="running", revision=active_plan.get("revision", 0) + 1,
+                                   expires_at=time.time() + 1800)
+                self.store.update(source["id"], checkpoint={**saved, "plan": active_plan}, status="running")
+                dialogue_change("instruction", request=active_plan)
+                dialogue_change("task", kind="plan_id", id=active_plan["id"], status="running", bind=True)
             browser_id = (source["checkpoint"] or {}).get("browser_id")
             if browser_id and self.browser.current().id == browser_id and self.browser.current().status in {"paused", "waiting_for_user"}:
                 await self.browser.resume()

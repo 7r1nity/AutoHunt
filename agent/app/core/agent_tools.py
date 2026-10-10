@@ -532,6 +532,9 @@ class AgentToolRegistry:
                 if key in canonical and key not in {"browser_mode", "search_state_revision"}:
                     if key == "locations" and not value and not canonical[key]:
                         continue
+                    if key == "filters":
+                        from .salary_conditions import normalized_search_filters
+                        value = normalized_search_filters(value, request.salary_min)
                     if value != canonical[key]:
                         raise PreflightRefused("原步骤参数与搜索检查点不一致，请核对执行记录")
             task = await self.browser.continue_search(recovery_id, request)

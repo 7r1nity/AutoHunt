@@ -711,6 +711,17 @@ class AutoHuntAgent:
                 dialogue_change("request_state", request=task_request.model_dump())
             emit("plan_failed", code="planning_unavailable", detail=detail)
             return ChatResponse(message=detail, lane=AgentLane.APPLICATION)
+        if plan.get("operation") == "revise":
+            if prior_root:
+                dialogue_change("request_state", request=prior_root)
+            if plan.get("questions"):
+                return ChatResponse(message="尚未修改任务：" + "；".join(plan["questions"]), lane=AgentLane.APPLICATION)
+            if not context.revise_task:
+                return ChatResponse(message="任务修订入口不可用，未执行新动作。", lane=AgentLane.APPLICATION)
+            try:
+                return await context.revise_task(plan["revision"], message)
+            except ValueError as exc:
+                return ChatResponse(message=f"任务条件未更新：{exc}。原任务进度保留。", lane=AgentLane.APPLICATION)
         emit("request_plan", plan_id=plan["id"], goals=plan["goals"], steps=[
             {key: step[key] for key in ("id", "tool", "depends_on", "effect")} for step in plan["steps"]], questions=plan["questions"])
         if self.router:
@@ -1036,6 +1047,11 @@ class AutoHuntAgent:
         if browser is None:
             raise _DirectHandlerUnavailable(intent)
         scoped_browser(browser)
+        context = active_run()
+        target = context.plan_reader() if context and context.plan_reader else None
+        if intent == "pause_search" and target and context.revise_task:
+            return await context.revise_task({"plan_id": target["id"], "expected_revision": target.get("revision", 0),
+                                              "pause": True, "updates": []}, context.user_message)
         tool = {"pause_search": "browser_task_pause", "resume_search": "browser_task_resume", "stop_search": "browser_task_stop"}[intent]
         outcome = await self.tool_registry.execute(tool, {}, user_message=active_run().user_message, state=ToolLoopState())
         return ChatResponse(
