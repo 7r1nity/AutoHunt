@@ -64,8 +64,13 @@ def citation_found(quote: str, sources: list[str]) -> bool:
     return any(collapsed in re.sub(r"\s+", " ", source) for source in sources)
 
 
-def preflight(steps: list[dict], goals: list[dict], sources: list[str], tools: set[str]) -> None:
-    """Report all structural defects together, instead of repairing one ID at a time."""
+def preflight(steps: list[dict], goals: list[dict], sources: list[str], tools: set[str], *,
+              check_goal_coverage: bool = True) -> None:
+    """Validate shape first; goal coverage belongs to the normalized DAG.
+
+    A goal names its terminal steps, not every implementation prerequisite.
+    Dependency ancestors are covered too, but unrelated extra actions are not.
+    """
     _warnings.set([])       # isolated per concurrent planning context
     issues: list[ValidationIssue] = []
     ids = {step["id"] for step in steps}
@@ -76,8 +81,6 @@ def preflight(steps: list[dict], goals: list[dict], sources: list[str], tools: s
         if not set(goal["step_ids"]) <= ids or goal["disposition"] == "steps" and not goal["step_ids"]:
             issues.append(ValidationIssue("goal_binding", "repair", "目标没有绑定到有效步骤"))
         covered.update(goal["step_ids"])
-    if not ids <= covered:
-        issues.append(ValidationIssue("uncovered_step", "repair", "规划包含未绑定用户目标的步骤"))
     citations = [(f"goals[{index}].quote", "", goal["quote"]) for index, goal in enumerate(goals)]
     citations.extend((f"steps[{step['id']}].{field}", step["tool"], step[field])
                      for step in steps for field in ("command_quote", "scope_quote") if step[field])
@@ -99,6 +102,13 @@ def preflight(steps: list[dict], goals: list[dict], sources: list[str], tools: s
                 issues.append(ValidationIssue("dependency_cycle", "repair", "规划依赖成环"))
                 break
             resolved.update(available)
+    if check_goal_coverage and not any(issue.blocking for issue in issues):
+        for root in tuple(covered):
+            covered.update(dependency_ancestors(root, steps))
+        missing = sorted(ids - covered)
+        if missing:
+            issues.append(ValidationIssue("uncovered_step", "repair", "规划包含未绑定用户目标的步骤",
+                                          field=",".join(f"steps.{key}" for key in missing)))
     if issues:
         issues = list(dict.fromkeys(issues))
         _record_warnings([issue for issue in issues if not issue.blocking])
@@ -110,7 +120,8 @@ def preflight(steps: list[dict], goals: list[dict], sources: list[str], tools: s
             _record_warnings(issues)
             return
         first = blocking[0]
-        raise PlanValidationError(first.code, first.detail, issues=issues)
+        raise PlanValidationError(first.code, first.detail, category=first.category,
+                                  tool=first.tool, field=first.field, issues=issues)
 
 
 #: Warnings from the most recent preflight, so a caller can surface what would

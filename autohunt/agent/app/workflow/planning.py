@@ -166,6 +166,8 @@ async def plan_request(llm, registry, message: str, *, dialogue: dict, condition
     schemas = [item for item in registry.schemas() if item["function"]["name"] not in INTERNAL_TOOLS]
     context = active_run()
     live_plan = context.plan_reader() if context and context.plan_reader else None
+    if live_plan and live_plan.get("status") in {"finished", "completed", "cancelled", "outcome_indeterminate"}:
+        live_plan = None  # Historical plans are not editable active work.
     if live_plan:
         live_plan = {key: live_plan.get(key) for key in ("id", "revision", "original", "status", "paused")} | {
             "steps": [{key: step.get(key) for key in ("id", "tool", "arguments", "status", "depends_on")}
@@ -177,6 +179,8 @@ async def plan_request(llm, registry, message: str, *, dialogue: dict, condition
             "active_plan是正在执行的原计划。用户暂停并添加/修改条件时，operation=revise，steps=[]，revision按revision_schema输出。"
             "修改只给updates中的step_id和arguments增量，必须定位原未执行步骤；不要新建learning_plan_generate，不要把暂停完成当作分析前置。"
             "先暂停添加条件、先改一下等修订设置pause=true，等待用户继续；纯暂停也可revision updates=[]。独立新任务仍operation=execute。"
+            "仅澄清或更正条件、没有要求执行或继续任务时，只用search_state_update保存条件并简短答复，不启动搜索或投递。"
+            "条件澄清不等于新增投递授权；进行中的任务条件修改用revise，已结束计划不是active_plan。"
             "完整理解当前用户请求及有效pending_request，逐目标生成参数和依赖。"
             "关键词的语义提取完全由你负责：queries只含简短通用岗位名/行业方向，绝不能把整句命令、城市、数量、薪资或筛选条件作为关键词。"
             "用户未指定岗位时继承conditions.queries（来自当前简历或本会话）；没有方向就问岗位或简历，不编造默认职业。"
@@ -281,7 +285,9 @@ def _validate_draft(draft: RequestDraft, registry, message: str, *, dialogue: di
     steps = [item.model_dump() for item in draft.steps]
     goals = [item.model_dump() for item in draft.goals]
     tools = {spec.name: spec for spec in registry._tools.values() if spec.name not in INTERNAL_TOOLS}
-    preflight(steps, goals, sources, set(tools))
+    # Reject invalid IDs/tools/cycles immediately, but normalize data dependencies
+    # before deciding whether every step contributes to a requested goal.
+    preflight(steps, goals, sources, set(tools), check_goal_coverage=False)
     questions = list(draft.questions)
     revoked_tools = list(previous.get("revoked_tools", [])) if continued else []
     searches = [step for step in steps if step["tool"] == "job_search_start"]
@@ -493,6 +499,9 @@ async def _draft_with_repair(llm, request: LLMRequest, *, validator=None):
                     user_message=request.user_message, context=request.context, fast=True,
                     json_output=True, max_output_tokens=4096)
                 continue
+            emit("plan_candidate_graph", attempt=attempt, operation=candidate.operation,
+                 goals=[{"disposition": goal.disposition, "step_ids": goal.step_ids} for goal in candidate.goals],
+                 steps=[{"id": step.id, "tool": step.tool, "depends_on": step.depends_on} for step in candidate.steps])
             if validator is None:
                 return candidate
             try:
