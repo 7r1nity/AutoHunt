@@ -1,9 +1,9 @@
 """The automation rules: what the agent notices, and what it does about it.
 
 Each rule is a condition over an :class:`~app.workflow.rules.Observation` plus the
-action to take when it holds. Priorities decide the order, and the reason a rule
-exists is written down next to it, so behaviour is changed by editing rules rather
-than by adding another branch to the loop.
+action to take when it holds. Normal work rotates fairly; priorities break ties.
+Each rule states its reason, so behaviour is changed by editing rules rather than
+adding another branch to the loop.
 
 Safety rules keep the model agreed with the user: an action whose outcome is unknown
 is never retried, and a one-use authorisation is never invented — a rule may only use
@@ -23,8 +23,9 @@ def build_rules(coordinator) -> list[Rule]:
 
     # ---------------------------------------------------------------- delivery
     async def submit_authorised(observation: Observation) -> str:
-        await coordinator.check_reply_queue()
-        return "已处理一个等待招聘方回复的投递：检查回复后按需发送已授权简历"
+        result = await coordinator.check_reply_queue()
+        return (f"本轮检查 {result.get('checked', 0)} 个已授权会话；"
+                f"已核实投递 {result.get('submitted', 0)} 个，未回复的继续等待")
 
     def has_authorised_waiting(observation: Observation) -> bool:
         return bool(observation.get("reply_candidates")) and bool(observation.get("browser_idle", True))
@@ -84,7 +85,7 @@ def build_rules(coordinator) -> list[Rule]:
         # Budget exhausted outranks everything: retrying again would repeat the same
         # failure, so the job must be handed to a human before any retry rule sees it.
         Rule("escalate_exhausted_start", 95, has_exhausted_start, escalate_exhausted,
-             reason="重试预算已用尽且点击从未发生，移交人工核验而不是无限重试", cooldown=60),
+             reason="重试预算已用尽且点击从未发生，移交人工核验而不是无限重试", cooldown=60, preemptive=True),
         # A stalled job outranks routine work: it has already failed once, and leaving
         # it parked is exactly the complaint this framework was built to fix.
         Rule("recover_stalled_start", 90, has_stalled_replied_start, recover_stalled_start,

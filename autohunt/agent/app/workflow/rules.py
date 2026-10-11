@@ -6,7 +6,7 @@ them could explain why it did or did not fire. This module replaces that shape w
 one loop:
 
     observe  -> a frozen fact set describing the agent, the board and the site
-    decide   -> every rule whose condition holds, highest priority first
+    decide   -> urgent work first, otherwise least recently served ready work
     act      -> the single action the rules selected, if the worker is free
     record   -> both the facts and the decision, so "why did nothing happen" has an
                 answer that does not require re-running anything
@@ -58,6 +58,9 @@ class Rule:
     #: starve the lower-priority rules behind it. The highest-priority rule used to
     #: consume every cycle while its action had nothing to change.
     cooldown: float = 20.0
+    #: Safety escalation may preempt the normal fair rotation. Routine reply
+    #: polling/recovery/dispatch must not opt in merely because it has priority.
+    preemptive: bool = False
 
     def __str__(self) -> str:  # pragma: no cover - debugging aid
         return f"{self.name}(p{self.priority})"
@@ -77,15 +80,18 @@ class Decision:
 
 
 class RuleEngine:
-    """Match declarative rules against observations; act on the first that applies."""
+    """One action per turn; priority breaks ties, service age prevents starvation."""
 
-    def __init__(self, rules: Sequence[Rule] = ()) -> None:
+    def __init__(self, rules: Sequence[Rule] = (), *, clock: Callable[[], float] | None = None) -> None:
         self.rules: list[Rule] = sorted(rules, key=lambda rule: -rule.priority)
         #: Bounded history so a stall can be diagnosed from the last few decisions.
         self.history: list[dict[str, Any]] = []
         self.last_observation: dict[str, Any] = {}
         #: rule name -> monotonic time until which it stands down after firing.
         self.cooldowns: dict[str, float] = {}
+        self.last_served: dict[str, int] = {}
+        self.turn = 0
+        self.clock = clock
 
     def register(self, rule: Rule) -> None:
         self.rules.append(rule)
@@ -93,7 +99,7 @@ class RuleEngine:
 
     def matching(self, observation: Observation) -> list[Rule]:
         matched = []
-        now = time.monotonic()
+        now = self.clock() if self.clock else time.monotonic()
         for rule in self.rules:
             if self.cooldowns.get(rule.name, 0.0) > now:
                 continue
@@ -120,7 +126,9 @@ class RuleEngine:
             decision = Decision(None, "无规则匹配：没有需要处理的变化", ())
             self.record(observation, decision)
             return decision
-        rule = matched[0]
+        urgent = [rule for rule in matched if rule.preemptive]
+        rule = urgent[0] if urgent else min(
+            matched, key=lambda item: (self.last_served.get(item.name, 0), -item.priority))
         try:
             result = await rule.action(observation)
         except Exception as exc:  # noqa: BLE001 - the loop must survive any action
@@ -128,7 +136,11 @@ class RuleEngine:
         # Stand the rule down so the rules behind it get a turn. A rule whose condition
         # still holds comes back after the cooldown; one that made progress has usually
         # cleared its own condition by then.
-        self.cooldowns[rule.name] = time.monotonic() + rule.cooldown
+        self.cooldowns[rule.name] = (self.clock() if self.clock else time.monotonic()) + rule.cooldown
+        # A failed/no-progress attempt also yields its turn. Cooldown alone cannot
+        # ensure fairness when the poll interval exceeds every cooldown.
+        self.turn += 1
+        self.last_served[rule.name] = self.turn
         decision = Decision(rule.name, result, names)
         self.record(observation, decision)
         return decision

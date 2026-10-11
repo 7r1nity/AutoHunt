@@ -336,13 +336,15 @@ class MockWorkflowCoordinator:
         Dispatch releases the worker as soon as the conversation is open, so the
         rest of the batch proceeds while each opened job is checked here on a
         timer. A job only consumes the worker again when there is something to do:
-        a verified reply whose send button is unlocked.
+        a verified reply whose send button is unlocked. At most one browser check
+        is attempted per turn, in least-recently-checked order; dispatch gets the
+        browser back before another waiting conversation is visited.
         """
         from ..delivery.automation import wait_expired
-        checked = submitted = 0
+        checked = submitted = attempted = 0
         for run in self.jobs.delivery_runs_waiting_reply(limit=None):
-            if checked >= 50:
-                break  # A cycle is bounded, but invalid/young rows cannot starve others.
+            if attempted >= 1:
+                break  # One browser action per turn, not a batch of 50 polls.
             if ((self.delivery.worker and not self.delivery.worker.done())
                     or (self.browser.worker and not self.browser.worker.done())):
                 break  # a dispatch or another reply check holds the slot
@@ -361,23 +363,29 @@ class MockWorkflowCoordinator:
                 continue
             if run.get("last_checked_at") and not wait_expired(run["last_checked_at"], self.poll_seconds):
                 continue
+            attempted += 1
             try:
+                # Record the attempt even if the browser check fails before its
+                # own checkpoint, so one broken waiter cannot monopolize polls.
+                self.jobs.update_delivery_run(run["id"], last_checked_at=datetime.now(timezone.utc))
                 view = await self._operation(owner,
                     lambda: self.delivery.resume_authorized_run(run["id"], **binding),
                     job_id=run["job_id"], queued=item is not None)
                 if view is None:
                     continue
                 checked += 1
+                # Join the one-shot check before reading its receipt or yielding
+                # the browser; the view returned at launch is not its outcome.
+                worker = self.delivery.worker
+                if worker is not None:
+                    await asyncio.gather(worker, return_exceptions=True)
+                    view = self.jobs.get_delivery_run(run["id"])
                 if view.submitted:
                     submitted += 1
                     if item:
                         self._finish_queue_item(item, "completed", "已核实简历投递完成")
             except Exception as exc:  # noqa: BLE001 - one job must not stop the rest
                 self.jobs.record_mock_workflow_error(f"check_reply job={run['job_id']}: {type(exc).__name__}：{exc}")
-            # Wait for the one-shot check to finish before touching the next job.
-            worker = self.delivery.worker
-            if worker is not None:
-                await asyncio.gather(worker, return_exceptions=True)
         return {"checked": checked, "submitted": submitted}
 
     async def process_delivery_queue(self) -> None:

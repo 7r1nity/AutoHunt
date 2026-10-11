@@ -448,6 +448,8 @@ class MonitoringContracts(unittest.IsolatedAsyncioTestCase):
             calls.append((ident, binding)); saved["last_checked_at"] = datetime.now(UTC).isoformat()
             return NS(submitted=False)
         jobs = NS(delivery_runs_waiting_reply=lambda **kw: [saved], mock_delivery_queue=lambda **kw: [],
+                  update_delivery_run=lambda ident, **changes: saved.update({key: value.isoformat() if isinstance(value, datetime) else value
+                                                                           for key, value in changes.items()}),
                   record_mock_workflow_error=lambda text: self.fail(text))
         delivery = NS(worker=None, resume_authorized_run=resume)
         async def operation(owner, fn, **kwargs): return await fn()
