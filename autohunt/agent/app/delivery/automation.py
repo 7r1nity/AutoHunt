@@ -312,12 +312,19 @@ class DeliveryAutomationService:
                 raise ValueError("职位来源不是受支持的本地模拟招聘网站")
             if self.session is None:
                 self.session = BrowserSession(self.profile_dir, headless=self.headless, cdp_url=self.cdp_url)
-            mode = await self.session.reuse(BrowserMode.CDP)
+            mode = await self.session.attach_existing_cdp()
             if mode is None:
-                await self.session.ensure_cdp_browser()
+                if self.state.mock_applicant_id:
+                    self._update(DeliveryTaskStatus.WAITING_FOR_USER,
+                        "浏览器已关闭；后台回复同步继续，请打开 AutoHunt Chrome 后确认继续投递",
+                        reason="browser_unavailable", checkpoint="waiting_for_user")
+                    return
+                # First interactive startup may open a window for login. Routine
+                # checks and reconnects never activate a tab or relaunch Chrome.
+                await self.session.ensure_cdp_browser(job_url)
                 await self.session.ensure_cdp_window(job_url)
                 await self.session.open(BrowserMode.CDP)
-            else:
+            elif not self.state.mock_applicant_id and self.session.page_for_url(job_url) is None:
                 await self.session.ensure_cdp_window(job_url)
             page = self.session.page_for_url(job_url)
             if page is None:
@@ -327,7 +334,10 @@ class DeliveryAutomationService:
                     if page is not None:
                         break
             if page is None:
-                raise RuntimeError("无法绑定模拟招聘网站标签页")
+                self._update(DeliveryTaskStatus.WAITING_FOR_USER,
+                    "招聘网站标签页已关闭；请打开模拟站页面后确认继续，任务没有重新发消息或投递",
+                    reason="page_unavailable", checkpoint="waiting_for_user")
+                return
             self._update(DeliveryTaskStatus.RUNNING, "正在检查投递页面", url=page.url)
 
             while True:
@@ -346,6 +356,7 @@ class DeliveryAutomationService:
                 self.state.last_checked_at = datetime.now(UTC)
                 self._update(DeliveryTaskStatus.RUNNING, "已读取投递页面", url=page.url)
                 if observation.intervention_reason:
+                    await self.session.ensure_cdp_window(job_url)
                     self.gate.clear()
                     self._update(
                         DeliveryTaskStatus.WAITING_FOR_USER,

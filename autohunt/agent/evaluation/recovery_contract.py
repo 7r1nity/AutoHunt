@@ -410,7 +410,7 @@ class MonitoringContracts(unittest.IsolatedAsyncioTestCase):
                     saved.append({"status": str(status), "checkpoint": service.state.checkpoint})
                 service._update = update
                 page = NS(url=url, evaluate=AsyncMock(return_value={"id": 99 if scenario == "account_changed" else 31, "role": "applicant"}))
-                service.session = NS(reuse=AsyncMock(return_value=BrowserMode.CDP), ensure_cdp_window=AsyncMock(),
+                service.session = NS(attach_existing_cdp=AsyncMock(return_value=BrowserMode.CDP), ensure_cdp_window=AsyncMock(),
                     page_for_url=lambda _: None if scenario == "page_closed" else page)
                 observation = MockApplyObservation(True, None, scenario != "no_reply", scenario == "no_reply", "发送简历",
                     hr_reply_text=None if scenario == "no_reply" else "合成招聘方回复")
@@ -428,7 +428,7 @@ class MonitoringContracts(unittest.IsolatedAsyncioTestCase):
                 with patch("app.delivery.automation.asyncio.sleep", new=AsyncMock()):
                     await service._run_once(1, require_reply=True)
                 expected = {"no_reply": "waiting_for_reply", "reply": "completed", "communication_lost": "outcome_indeterminate",
-                            "submission_lost": "outcome_indeterminate", "account_changed": "failed", "page_closed": "failed"}[scenario]
+                            "submission_lost": "outcome_indeterminate", "account_changed": "failed", "page_closed": "waiting_for_user"}[scenario]
                 TRACES.append({"scenario": scenario, "expected": expected, "actual": str(service.state.status), "actions": actions, "checkpoints": saved})
                 self.assertEqual(str(service.state.status), expected)
                 self.assertEqual(actions.count("submit"), int(scenario in {"reply", "submission_lost"}))
@@ -447,7 +447,8 @@ class MonitoringContracts(unittest.IsolatedAsyncioTestCase):
         async def resume(ident, **binding):
             calls.append((ident, binding)); saved["last_checked_at"] = datetime.now(UTC).isoformat()
             return NS(submitted=False)
-        jobs = NS(delivery_runs_waiting_reply=lambda **kw: [saved], mock_delivery_queue=lambda **kw: [],
+        jobs = NS(get_job=lambda _: {"recruiter_reply": "synthetic reply"},
+                  delivery_runs_waiting_reply=lambda **kw: [saved], mock_delivery_queue=lambda **kw: [],
                   update_delivery_run=lambda ident, **changes: saved.update({key: value.isoformat() if isinstance(value, datetime) else value
                                                                            for key, value in changes.items()}),
                   record_mock_workflow_error=lambda text: self.fail(text))

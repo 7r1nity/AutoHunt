@@ -334,9 +334,10 @@ class MockWorkflowCoordinator:
         """Reply monitoring that does not hold the delivery worker.
 
         Dispatch releases the worker as soon as the conversation is open, so the
-        rest of the batch proceeds while each opened job is checked here on a
-        timer. A job only consumes the worker again when there is something to do:
-        a verified reply whose send button is unlocked. At most one browser check
+        rest of the batch proceeds while sync_once polls replies through read-only
+        HTTP (no browser and no unread-state mutation). A stored reply is only a
+        wake-up hint, not authorization or submission evidence; the browser still
+        verifies the account, live reply and unlocked button. At most one browser check
         is attempted per turn, in least-recently-checked order; dispatch gets the
         browser back before another waiting conversation is visited.
         """
@@ -363,6 +364,8 @@ class MockWorkflowCoordinator:
                 continue
             if run.get("last_checked_at") and not wait_expired(run["last_checked_at"], self.poll_seconds):
                 continue
+            if not str(self.jobs.get_job(run["job_id"]).get("recruiter_reply") or "").strip():
+                continue  # Waiting is an HTTP read, not a browser navigation.
             attempted += 1
             try:
                 # Record the attempt even if the browser check fails before its

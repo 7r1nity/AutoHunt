@@ -114,7 +114,8 @@ class ReplyTurns(unittest.IsolatedAsyncioTestCase):
             calls.append(ident)
             next(row for row in rows if row["id"] == ident)["last_checked_at"] = datetime.now(UTC).isoformat()
             return NS(submitted=False)
-        jobs = NS(delivery_runs_waiting_reply=lambda **kw: sorted(rows, key=lambda r: r["last_checked_at"]),
+        jobs = NS(get_job=lambda _: {"recruiter_reply": "synthetic reply"},
+                  delivery_runs_waiting_reply=lambda **kw: sorted(rows, key=lambda r: r["last_checked_at"]),
                   mock_delivery_queue=lambda **kw: [], record_mock_workflow_error=lambda text: self.fail(text))
         def update(ident, **changes):
             next(row for row in rows if row["id"] == ident).update({key: value.isoformat() if isinstance(value, datetime) else value
@@ -224,7 +225,7 @@ class Batch(unittest.IsolatedAsyncioTestCase):
                 if delivery.worker: await delivery.worker
                 clock.value += 30
         self.assertEqual(contacts, list(range(5)))
-        self.assertTrue(checks)
+        self.assertEqual(checks, [])  # No HR reply: HTTP sync only, no browser checks.
         self.assertTrue(all(r["status"] == "waiting_for_reply" and not r["submitted"] for r in runs.values()))
         TRACES.append({"batch":5,"contacts":contacts,"checks":checks,"submitted":0})
 

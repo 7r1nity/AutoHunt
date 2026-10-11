@@ -62,14 +62,17 @@ class BrowserSession:
         self.lifecycle.watch_context(self.context)
         return self.mode
 
-    async def _connect_cdp_with_retry(self):
-        """Attach to CDP Chrome, re-resolving (and relaunching Chrome when the
-        window was closed) between attempts so a mid-flight browser shutdown does
-        not permanently fail the task."""
+    async def _connect_cdp_with_retry(self, *, allow_launch: bool = True):
+        """Bounded CDP attachment; silent callers must disable browser launch.
+
+        Initial interactive startup may relaunch Chrome; monitoring and mid-task
+        page recovery only reconnect to an existing endpoint.
+        """
         last_error: Exception | None = None
         for _ in range(2):
             try:
-                websocket_url = await self._ensure_cdp_websocket()
+                websocket_url = (await self._ensure_cdp_websocket() if allow_launch
+                                 else await asyncio.to_thread(self._resolve_cdp_websocket))
                 browser = await self.playwright.chromium.connect_over_cdp(websocket_url, timeout=12_000)
                 contexts = browser.contexts
                 if not contexts:
@@ -86,6 +89,28 @@ class BrowserSession:
                 self.browser = None
                 await asyncio.sleep(0.9)
         raise RuntimeError(f"{type(last_error).__name__}: {last_error}") from last_error
+
+    async def attach_existing_cdp(self) -> str | None:
+        """Attach silently; never launch Chrome, create a tab or activate one.
+
+        A missing/closed browser is a takeover condition, not permission for a
+        background worker to keep opening windows. Initial interactive startup
+        can still use open()/ensure_cdp_window() explicitly.
+        """
+        if self.mode == BrowserMode.CDP.value and self.browser and self.browser.is_connected() and self.context:
+            self.disconnected.clear()
+            return self.mode
+        try:
+            await asyncio.to_thread(self._resolve_cdp_websocket)
+        except Exception:
+            return None
+        if self.playwright is None:
+            self.playwright = await async_playwright().start()
+        self.context = await self._connect_cdp_with_retry(allow_launch=False)
+        self.mode = BrowserMode.CDP.value
+        self.owns_context = False
+        self.disconnected.clear()
+        return self.mode
 
     async def ensure_cdp_browser(self, initial_url: str | None = None) -> None:
         """Start/wait for local Chrome without attaching Playwright to it."""
@@ -358,9 +383,9 @@ class BrowserSession:
         last_error: Exception | None = None
         for attempt in range(2):
             try:
-                await self._ensure_cdp_websocket()
+                await asyncio.to_thread(self._resolve_cdp_websocket)
                 if self.context is None or self.browser is None or not self.browser.is_connected():
-                    self.context = await self._connect_cdp_with_retry()
+                    self.context = await self._connect_cdp_with_retry(allow_launch=False)
                     self.disconnected.clear()
                 for _ in range(15):
                     page = self.page_for_url(target_url)
