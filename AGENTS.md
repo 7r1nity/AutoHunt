@@ -15,7 +15,7 @@ The account's repositories page is not a Git remote URL.
 - Automated test sources, fixtures and runners were removed at the user's request
   on 2026-10-08. On 2026-10-10 the user explicitly requested a larger persistent
   evaluation corpus, runners, results and failure diagnosis, authorizing their
-  recreation. Use `agent/evaluation` for the new isolated benchmark. Historical
+  recreation. Use `autohunt/agent/evaluation` for the new isolated benchmark. Historical
   test documentation remains archival; distinguish component tests, synthetic
   model evaluations and full browser end-to-end coverage. External model runs
   require consent for the destination/data and an explicit request budget.
@@ -26,7 +26,9 @@ The account's repositories page is not a Git remote URL.
   branch protection or conflicts block delivery, report the blocker and preserve
   local changes. Do not claim a push succeeded without checking it.
 - Do not start recruitment searches or submit applications just to verify Git delivery.
-- This agreement covers AutoHunt's workspace, not the separate mock site's checkout.
+- This agreement covers `autohunt/` and `mock-site/` source in this workspace.
+  The legacy `C:\job_agent` directory is a local backup; preserve it and do not
+  publish its runtime data.
 - Per the user's updated request, use `Codex <noreply@openai.com>` as both
   author and committer for future Codex-created commits in this repository.
   GitHub has verified this email maps to the `codex` account and its avatar.

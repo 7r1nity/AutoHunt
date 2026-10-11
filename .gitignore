@@ -5,15 +5,19 @@ out/
 .env*
 !.env.example
 agent/.venv/
+.venv/
+autohunt/agent/.venv/
 *.egg-info/
 agent/data/private/
 agent/data/audit/
 agent/data/*.db*
 # Runtime data can contain resumes, chat histories, credentials and screenshots.
 /agent/data/
+/autohunt/agent/data/
 .runlogs/
 .logs/
 /agent/.pytest*/
+/autohunt/agent/.pytest*/
 *.db
 *.db-shm
 *.db-wal
@@ -27,6 +31,8 @@ __pycache__/
 .pytest-tmp*/
 .test-tmp*/
 agent/test-results/
+autohunt/agent/test-results/
+/autohunt/test-results/
 /test-results/
 *.log
 *.tsbuildinfo
@@ -35,9 +41,14 @@ Thumbs.db
 tmp/
 /.runtime/
 /_diag/
+/autohunt/_diag/
 /docs/*preview*.png
 /docs/*preview*.jpg
+/autohunt/docs/*preview*.png
+/autohunt/docs/*preview*.jpg
 /91 - AutoHunt AI Job Application Assistant (ConnectOnion-example).pdf
+/autohunt/91 - AutoHunt AI Job Application Assistant (ConnectOnion-example).pdf
 
 # 场景测试集的临时数据根（建临时库用，不得提交）
 /agent/tests/.tmp-data-root/
+/autohunt/agent/tests/.tmp-data-root/

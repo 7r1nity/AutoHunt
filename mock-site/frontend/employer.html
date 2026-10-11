@@ -1,0 +1,446 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>招聘方中心 - 模拟招聘网</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+  <nav class="nav">
+    <div class="brand">🧑‍💼 模拟招聘网</div>
+    <a href="/">职位列表</a>
+    <a href="/applicant.html">应聘方中心</a>
+    <a href="/messages.html">求职者消息页</a>
+    <a href="/employer-messages.html">招聘方消息页</a>
+    <a href="/employer.html" class="active">招聘方中心</a>
+  </nav>
+
+  <div class="container">
+    <div class="card" id="login-card">
+      <h3 style="margin-bottom:12px;">招聘方登录 / 注册</h3>
+      <div class="row">
+        <div class="col"><input id="email" placeholder="邮箱，如 demo-company1.example.com" /></div>
+        <div class="col"><input id="name" placeholder="HR 姓名/昵称" /></div>
+        <div class="col"><input id="company" placeholder="公司名称" /></div>
+        <div class="col" id="mfa-box" style="display:none"><input id="mfa-code" maxlength="6" placeholder="MFA 验证码" /><small id="mfa-hint" class="demo-code"></small></div>
+        <button id="login-action" onclick="login()">获取验证码</button>
+      </div>
+      <p class="muted" style="margin-top:8px;">种子账号：demo-company1.example.com ~ demo-company30.example.com</p>
+    </div>
+
+    <div class="card" id="me-card" style="display:none;">
+      <div class="row">
+        <div><strong id="me-info"></strong></div>
+        <div class="spacer"></div>
+        <button class="secondary" onclick="logout()">退出</button>
+      </div>
+    </div>
+
+    <div id="main" style="display:none;">
+      <div class="tabs">
+        <button class="active" data-tab="tab-jobs">我的职位</button>
+        <button data-tab="tab-post">发布职位</button>
+        <button data-tab="tab-apps">收到的投递</button>
+        <button data-tab="tab-chat">聊天</button>
+        <button data-tab="tab-forms">表单</button>
+      </div>
+
+      <div id="tab-jobs" class="tab-page active">
+        <div id="my-job-list"></div>
+      </div>
+
+      <div id="tab-post" class="tab-page">
+        <div class="card">
+          <h3>发布新职位</h3>
+          <div class="row">
+            <div class="col"><input id="j-title" placeholder="职位名称" /></div>
+            <div class="col"><input id="j-department" placeholder="部门" /></div>
+            <div class="col">
+              <select id="j-category"></select>
+            </div>
+            <div class="col"><input id="j-city" placeholder="城市，如 北京" /></div>
+          </div>
+          <div class="row" style="margin-top:8px;">
+            <div class="col"><input id="j-salary-min" type="number" placeholder="最低月薪 K" /></div>
+            <div class="col"><input id="j-salary-max" type="number" placeholder="最高月薪 K" /></div>
+            <div class="col"><input id="j-exp" placeholder="经验要求，如 1-3年" /></div>
+            <div class="col">
+              <select id="j-education">
+                <option>不限</option>
+                <option>大专</option>
+                <option>本科</option>
+                <option>硕士</option>
+                <option>博士</option>
+              </select>
+            </div>
+          </div>
+          <div style="margin-top:8px;"><input id="j-skills" placeholder="技能标签，逗号分隔" style="width:100%;" /></div>
+          <div style="margin-top:8px;"><textarea id="j-description" placeholder="职位描述"></textarea></div>
+          <div style="margin-top:8px;"><textarea id="j-requirements" placeholder="任职要求，每行一条"></textarea></div>
+          <button style="margin-top:8px;" onclick="postJob()">发布职位</button>
+        </div>
+      </div>
+
+      <div id="tab-apps" class="tab-page">
+        <div class="card">
+          <div class="row">
+            <div class="col">
+              <select id="app-job-select">
+                <option value="">全部职位</option>
+              </select>
+            </div>
+            <button onclick="loadApplications()">刷新投递</button>
+          </div>
+        </div>
+        <div id="application-list"></div>
+      </div>
+
+      <div id="tab-chat" class="tab-page">
+        <div class="card">
+          <div class="row">
+            <div><strong>新版招聘方消息工作台</strong><p class="muted">双栏会话、未读筛选、简历预览和招聘状态处理集中在一个页面。</p></div>
+            <div class="spacer"></div>
+            <button onclick="location.href='/employer-messages.html'">打开招聘方消息页</button>
+          </div>
+        </div>
+        <div class="card">
+          <h3>会话列表</h3>
+          <div id="conversation-list" class="muted"></div>
+        </div>
+        <div class="card">
+          <h3>与应聘方聊天</h3>
+          <div class="row">
+            <div class="col"><input id="chat-user-id" type="number" placeholder="对方用户 ID" /></div>
+            <button onclick="loadMessages()">加载消息</button>
+          </div>
+          <div id="chat-list" class="msg-list" style="margin-top:12px;"></div>
+          <div class="row">
+            <div class="col"><input id="chat-input" placeholder="输入消息..." /></div>
+            <button onclick="handleSendMessage()">发送</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="tab-forms" class="tab-page">
+        <div class="card">
+          <h3>创建表单</h3>
+          <div class="row">
+            <div class="col"><input id="f-title" placeholder="表单标题，如 面试登记表" /></div>
+            <div class="col"><input id="f-job-id" type="number" placeholder="关联职位 ID（可选）" /></div>
+          </div>
+          <div style="margin-top:8px;"><input id="f-description" placeholder="表单说明" style="width:100%;" /></div>
+          <div style="margin-top:8px;">
+            <textarea id="f-fields" placeholder='字段 JSON，例如：[{"name":"salary","label":"期望薪资","type":"text","required":true,"options":[]}]'></textarea>
+          </div>
+          <button style="margin-top:8px;" onclick="handleCreateForm()">创建表单</button>
+        </div>
+        <div id="form-list"></div>
+        <div id="form-response-box"></div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/js/api.js"></script>
+  <script>
+    let myJobs = [];
+    let currentChatUser = null;
+    let currentChatJob = null;
+    let myForms = [];
+    let loginChallenge = '';
+    let employerPollTimer = null;
+
+    async function init() {
+      bindTabs();
+      const id = getIdentity();
+      if (id.userId && id.userRole === 'employer') {
+        showMain();
+      } else if (id.userId && id.userRole === 'applicant') {
+        document.getElementById('login-card').innerHTML = '<p class="muted">当前是应聘方账号，请到 <a href="/applicant.html">应聘方中心</a> 操作。</p>';
+      } else {
+        document.getElementById('email').value = TEST_MANAGER_EMAIL;
+        document.getElementById('name').value = 'AutoHunt 统一测试招聘方';
+        document.getElementById('company').value = 'AutoHunt 测试招聘中心';
+      }
+    }
+
+    function bindTabs() {
+      document.querySelectorAll('.tabs button').forEach(btn => {
+        btn.onclick = () => {
+          document.querySelectorAll('.tabs button').forEach(b => b.classList.remove('active'));
+          document.querySelectorAll('.tab-page').forEach(t => t.classList.remove('active'));
+          btn.classList.add('active');
+          document.getElementById(btn.dataset.tab).classList.add('active');
+        };
+      });
+    }
+
+    async function login() {
+      const email = document.getElementById('email').value.trim();
+      const name = document.getElementById('name').value.trim() || 'HR';
+      const company = document.getElementById('company').value.trim() || null;
+      if (!email) { toast('请填写邮箱'); return; }
+      try {
+        if (!loginChallenge) {
+          const challenge = await requestMfa(email);
+          loginChallenge = challenge.challenge_id;
+          document.getElementById('mfa-box').style.display = 'block';
+          document.getElementById('mfa-hint').textContent = `模拟验证码：${challenge.demo_code}`;
+          document.getElementById('login-action').textContent = '验证并登录';
+          return;
+        }
+        await verifyMfa(loginChallenge, document.getElementById('mfa-code').value.trim());
+        const user = await registerUser('employer', name, email, null, company);
+        setIdentity(user.id, 'employer', user.email);
+        toast('MFA 验证成功，用户 ID ' + user.id);
+        showMain();
+      } catch (e) { toast('登录失败：' + e.message); }
+    }
+
+    function logout() {
+      clearIdentity();
+      location.reload();
+    }
+
+    async function showMain() {
+      const id = getIdentity();
+      document.getElementById('login-card').style.display = 'none';
+      document.getElementById('me-card').style.display = 'block';
+      document.getElementById('me-info').textContent = id.isTestManager ? `统一测试招聘方 · 可查看全部申请和会话 · 用户 ID：${id.userId}` : `招聘方用户 ID：${id.userId}`;
+      document.getElementById('main').style.display = 'block';
+      await Promise.all([loadMyJobs(), loadForms(), loadConversations()]);
+      await loadApplications();
+      if (employerPollTimer) clearInterval(employerPollTimer);
+      employerPollTimer = setInterval(() => {
+        if (document.hidden) return;
+        void Promise.all([loadConversations(), loadApplications()]);
+      }, 3000);
+    }
+
+    async function loadMyJobs() {
+      try {
+        const id = getIdentity();
+        const data = await getJobs({ employer_id: id.userId, page: 1, page_size: 200 });
+        myJobs = data.items || [];
+        renderMyJobs();
+        renderAppJobSelect();
+      } catch (e) { toast('加载职位失败：' + e.message); }
+    }
+
+    function renderMyJobs() {
+      const box = document.getElementById('my-job-list');
+      if (!myJobs.length) { box.innerHTML = '<div class="card muted">暂无职位，请发布。</div>'; return; }
+      box.innerHTML = myJobs.map(j => `
+        <div class="card">
+          <div class="row">
+            <strong>${escapeHtml(j.title)}</strong>
+            <span class="badge ${j.status === 'open' ? 'green' : 'red'}">${j.status === 'open' ? '招聘中' : '已关闭'}</span>
+            <span class="muted">ID ${j.id}</span>
+          </div>
+          <div class="muted">${escapeHtml(j.city)} · ${escapeHtml(j.category)} · ${escapeHtml(formatSalary(j))} · ${escapeHtml(j.experience_required)}</div>
+        </div>
+      `).join('');
+    }
+
+    function renderAppJobSelect() {
+      const sel = document.getElementById('app-job-select');
+      sel.innerHTML = '<option value="">全部职位</option>' + myJobs.map(j => `<option value="${j.id}">#${j.id} ${escapeHtml(j.title)}</option>`).join('');
+    }
+
+    async function postJob() {
+      const body = {
+        title: document.getElementById('j-title').value.trim(),
+        department: document.getElementById('j-department').value.trim() || '业务部',
+        category: document.getElementById('j-category').value,
+        city: document.getElementById('j-city').value.trim() || '北京',
+        salary_min: parseInt(document.getElementById('j-salary-min').value, 10) || 0,
+        salary_max: parseInt(document.getElementById('j-salary-max').value, 10) || 0,
+        experience_required: document.getElementById('j-exp').value.trim() || '不限',
+        education: document.getElementById('j-education').value,
+        description: document.getElementById('j-description').value.trim(),
+        requirements: document.getElementById('j-requirements').value.split('\n').map(s => s.trim()).filter(Boolean),
+        skills: document.getElementById('j-skills').value.split(',').map(s => s.trim()).filter(Boolean),
+        headcount: 1
+      };
+      if (!body.title || !body.category) { toast('请至少填写职位名称和类别'); return; }
+      try {
+        await createJob(body);
+        toast('职位发布成功');
+        document.querySelectorAll('#tab-post input, #tab-post textarea').forEach(el => el.value = '');
+        loadMyJobs();
+      } catch (e) { toast('发布失败：' + e.message); }
+    }
+
+    async function loadApplications() {
+      const jobId = document.getElementById('app-job-select').value;
+      const params = jobId ? { job_id: jobId, page_size: 200 } : { page_size: 200 };
+      try {
+        const apps = await getEmployerApplications(params);
+        const box = document.getElementById('application-list');
+        if (!apps.length) { box.innerHTML = '<div class="card muted">暂无投递。</div>'; return; }
+        // 显示投递，同时展示职位信息
+        box.innerHTML = '<div class="card"><table><tr><th>投递ID</th><th>职位</th><th>求职者</th><th>简历</th><th>状态</th><th>匹配度</th><th>操作</th></tr>' +
+          (await Promise.all(apps.map(async a => {
+            let job = null;
+            try { job = await getJob(a.job_id); } catch (e) { /* ignore */ }
+            return `<tr>
+              <td>${a.id}</td>
+              <td>${job ? `<a href="/job.html?id=${job.id}" target="_blank">${escapeHtml(job.title)}</a>` : `职位 ${a.job_id}`}</td>
+              <td>${escapeHtml(a.applicant_name || `求职者 #${a.applicant_id}`)}</td>
+              <td>${renderResume(a.resume, a.cover_letter)}</td>
+              <td><span class="badge">${escapeHtml(a.status)}</span></td>
+              <td>${a.match_score ?? '-'}</td>
+              <td>
+                <button class="success" onclick="setAppStatus(${a.id}, 'screening')">筛选</button>
+                <button class="secondary" onclick="setAppStatus(${a.id}, 'interview')">面试</button>
+                <button class="secondary" onclick="setAppStatus(${a.id}, 'offer')">Offer</button>
+                <button class="danger" onclick="setAppStatus(${a.id}, 'rejected')">拒绝</button>
+              </td>
+            </tr>`;
+          }))).join('') + '</table></div>';
+      } catch (e) { toast('加载投递失败：' + e.message); }
+    }
+
+    function renderResume(resume, coverLetter = '') {
+      if (!resume) return '<span class="muted">未附简历</span>';
+      const skills = (resume.skills || []).map(skill => `<span class="badge">${escapeHtml(skill)}</span>`).join(' ');
+      const history = escapeHtml(JSON.stringify(resume.work_history || [], null, 2));
+      return `<details><summary>查看 ${escapeHtml(resume.name)}</summary>
+        <div style="min-width:280px;max-width:440px;padding:10px 0;line-height:1.65">
+          <strong>${escapeHtml(resume.name)} · ${escapeHtml(resume.education)}</strong>
+          <p>${escapeHtml(resume.summary || '暂无摘要')}</p>
+          <div>${skills || '<span class="muted">暂无技能</span>'}</div>
+          <small>工作年限：${escapeHtml(resumeExperienceLabel(resume))}</small>
+          ${coverLetter ? `<p><strong>求职信：</strong>${escapeHtml(coverLetter)}</p>` : ''}
+          ${history !== '[]' ? `<pre style="white-space:pre-wrap;max-height:180px;overflow:auto">${history}</pre>` : ''}
+        </div>
+      </details>`;
+    }
+
+    async function setAppStatus(id, status) {
+      try {
+        await updateApplicationStatus(id, status);
+        toast('已更新投递状态');
+        loadApplications();
+      } catch (e) { toast('更新失败：' + e.message); }
+    }
+
+    async function loadConversations() {
+      try {
+        const convs = await getConversations();
+        const box = document.getElementById('conversation-list');
+        if (!convs.length) { box.textContent = '暂无会话'; return; }
+        box.innerHTML = convs.map(c => `
+          <div class="row" style="margin-bottom:6px;">
+            <button class="secondary" onclick="selectChat(${c.user_id}, '${escapeHtml(c.user_name)}', ${c.job_id || 'null'})">${escapeHtml(c.user_name)}（ID ${c.user_id}）${c.job_title ? ` · ${escapeHtml(c.job_title)}` : ''}</button>
+            <span class="muted">${escapeHtml(c.last_message)} · 未读 ${c.unread_count}</span>
+          </div>
+        `).join('');
+      } catch (e) { toast('加载会话失败：' + e.message); }
+    }
+
+    function selectChat(userId, name, jobId = null) {
+      currentChatUser = userId;
+      currentChatJob = jobId;
+      document.getElementById('chat-user-id').value = userId;
+      document.getElementById('chat-input').placeholder = `发给 ${name}...`;
+      loadMessages();
+    }
+
+    async function loadMessages() {
+      const userId = parseInt(document.getElementById('chat-user-id').value, 10);
+      if (!userId) { toast('请填写对方用户 ID'); return; }
+      currentChatUser = userId;
+      try {
+        const msgs = await getMessages(userId, currentChatJob);
+        const box = document.getElementById('chat-list');
+        if (!msgs.length) { box.innerHTML = '<div class="muted">暂无消息</div>'; return; }
+        const me = getIdentity();
+        box.innerHTML = msgs.map(m => `
+          <div class="msg-item ${(me.isTestManager ? m.sender_role === 'employer' : m.sender_id == me.userId) ? 'mine' : ''}">
+            <div class="meta">${m.sender_role} #${m.sender_id} · ${new Date(m.created_at).toLocaleString()}</div>
+            <div class="content">${escapeHtml(m.content)}</div>
+          </div>
+        `).join('');
+        box.scrollTop = box.scrollHeight;
+      } catch (e) { toast('加载消息失败：' + e.message); }
+    }
+
+    async function handleSendMessage() {
+      if (!currentChatUser) { toast('请先选择或输入对方用户 ID'); return; }
+      const content = document.getElementById('chat-input').value.trim();
+      if (!content) { toast('请输入消息内容'); return; }
+      try {
+        await sendMessage({ recipient_id: currentChatUser, job_id: currentChatJob, content });
+        document.getElementById('chat-input').value = '';
+        await Promise.all([loadMessages(), loadConversations(), loadApplications()]);
+      } catch (e) { toast('发送失败：' + e.message); }
+    }
+
+    async function handleCreateForm() {
+      const title = document.getElementById('f-title').value.trim();
+      if (!title) { toast('请填写表单标题'); return; }
+      let fields = [];
+      try {
+        fields = JSON.parse(document.getElementById('f-fields').value || '[]');
+      } catch (e) { toast('字段 JSON 格式错误'); return; }
+      const body = {
+        title,
+        description: document.getElementById('f-description').value.trim(),
+        job_id: parseInt(document.getElementById('f-job-id').value, 10) || null,
+        fields
+      };
+      try {
+        await createForm(body);
+        toast('表单创建成功');
+        document.getElementById('f-title').value = '';
+        document.getElementById('f-description').value = '';
+        document.getElementById('f-fields').value = '';
+        loadForms();
+      } catch (e) { toast('创建表单失败：' + e.message); }
+    }
+
+    async function loadForms() {
+      try {
+        myForms = await getForms();
+        const box = document.getElementById('form-list');
+        if (!myForms.length) { box.innerHTML = '<div class="card muted">暂无表单。</div>'; return; }
+        box.innerHTML = myForms.map(f => `
+          <div class="card">
+            <div class="row">
+              <strong>#${f.id} ${escapeHtml(f.title)}</strong>
+              <span class="muted">${escapeHtml(f.description)}</span>
+              <button class="secondary" onclick="loadFormResponses(${f.id})">查看回复</button>
+            </div>
+          </div>
+        `).join('');
+      } catch (e) { toast('加载表单失败：' + e.message); }
+    }
+
+    async function loadFormResponses(formId) {
+      try {
+        const responses = await getFormResponses(formId);
+        const box = document.getElementById('form-response-box');
+        if (!responses.length) {
+          box.innerHTML = '<div class="card muted">该表单暂无回复。</div>';
+          return;
+        }
+        box.innerHTML = '<div class="card"><h4>表单回复</h4><table><tr><th>回复ID</th><th>应聘方ID</th><th>内容</th><th>时间</th></tr>' +
+          responses.map(r => `<tr><td>${r.id}</td><td>${r.applicant_id}</td><td><pre style="white-space:pre-wrap;">${escapeHtml(JSON.stringify(r.answers, null, 2))}</pre></td><td>${new Date(r.created_at).toLocaleString()}</td></tr>`).join('') +
+          '</table></div>';
+      } catch (e) { toast('加载回复失败：' + e.message); }
+    }
+
+    // 初始化类别下拉
+    (async () => {
+      try {
+        const stats = await getStats();
+        const sel = document.getElementById('j-category');
+        sel.innerHTML = stats.by_category.map(item => `<option value="${escapeHtml(item.category)}">${escapeHtml(item.category)}</option>`).join('');
+      } catch (e) { /* ignore */ }
+    })();
+
+    init();
+  </script>
+</body>
+</html>
