@@ -19,7 +19,7 @@ from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest.mock import patch
 
-from app.core.agent_tools import AgentToolPolicy, AgentToolRegistry, AgentToolSpec, ToolLoopState
+from app.core.agent_tools import AgentToolRegistry, AgentToolSpec, ToolLoopState
 from app.core.main_agent import AutoHuntAgent, _fast_search_hint
 from app.core.job_filters import validate_filter
 from app.core.search_contract import browser_search_keyword
@@ -30,8 +30,7 @@ from app.intent.store import RouterStore
 from app.llm.base import LLMResult
 from app.memory.resume_store import analyze_resume_text
 from app.runtime.context import RunContext, current_run
-from app.security.action_grants import binding_matches
-from app.workflow.execution import advance, persist
+from app.workflow.execution import advance, begin, persist
 from app.workflow.planning import RequestDraft, plan_request, shortcut_safe, validate_draft
 from app.workflow.validation import PlanValidationError, preflight, preflight_warnings
 from app.workflow.requests import canonical_request, amended_request
@@ -100,7 +99,7 @@ class Contracts(unittest.IsolatedAsyncioTestCase):
         self.context.action_authority = {"tool": step["tool"], "arguments": copy.deepcopy(step["arguments"]),
             "plan_id": plan["id"], "step_id": step["id"], "binding": step["authority_binding"],
             "resume_stamp": self.stamp, "resumes": self.resumes, "candidate": self.candidate,
-            "expires_at": plan["expires_at"]}
+            "expires_at": plan["expires_at"], "requested": step.get("user_requested", False)}
 
     async def test_cross_industry_paraphrases_not_vetoed(self):
         roles = ["金融风控", "国际销售", "医学检验", "建筑设计", "机械研发", "物流规划",
@@ -175,8 +174,7 @@ class Contracts(unittest.IsolatedAsyncioTestCase):
         step = plan["steps"][1]
         self.bind(plan, step)
         with patch("app.core.agent_tools.command_grounded", create=True, side_effect=AssertionError("language veto")):
-            ok, _ = self.registry.policy.authorize(self.registry._tools[step["tool"]], step["arguments"],
-                "行，那就按你说的做", ToolLoopState())
+            ok, _ = self.registry.call_guard.check(self.registry._tools[step["tool"]], step["arguments"], ToolLoopState())
         self.assertTrue(ok)
 
     async def test_unknown_consent_asks_then_context_confirmation(self):
@@ -189,36 +187,56 @@ class Contracts(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(confirmed["original"], plan["original"])
         self.assertEqual(confirmed["id"], plan["id"])
 
-    async def test_tamper_session_resume_expiry_revoke_claim_are_rejected(self):
-        for changed in ["arguments", "session", "resume", "expiry", "revoked", "claimed", "plan"]:
-            with self.subTest(changed=changed):
-                self.context.session_id = "synthetic-session"
-                self.document.version = 1
-                plan = self.validate()
-                step = plan["steps"][1]
-                self.bind(plan, step)
-                args = copy.deepcopy(step["arguments"])
-                if changed == "arguments": args["min_score"] = 1
-                elif changed == "session": self.context.session_id = "other-session"
-                elif changed == "resume": self.document.version = 2
-                elif changed == "expiry": self.context.action_authority["expires_at"] = 0
-                elif changed == "revoked": self.context.dialogue["instruction_request"]["revoked_tools"] = [step["tool"]]
-                elif changed == "claimed": self.context.dialogue["instruction_request"]["steps"][1]["status"] = "completed"
-                else: self.context.dialogue["tasks"]["plan_id"] = "replacement"
-                allowed, _ = self.registry.policy.authorize(self.registry._tools[step["tool"]], args, "投递", ToolLoopState())
-                self.assertFalse(allowed)
-        self.document.version = 1
-
-    async def test_unbound_submission_and_legacy_binding_not_allowed(self):
-        spec = self.registry._tools["mock_delivery_start"]
-        ok, _ = self.registry.policy.authorize(spec, {"min_score": 85}, "明确投递85分以上", ToolLoopState())
-        self.assertFalse(ok)
+    async def test_audit_binding_is_not_a_tool_authorization_gate(self):
         plan = self.validate()
-        step = plan["steps"][1]
+        step = plan["steps"][0]
         self.bind(plan, step)
         self.context.action_authority["binding"] = {"source": "old-quote"}
-        ok, _ = self.registry.policy.authorize(spec, step["arguments"], "投递", ToolLoopState())
-        self.assertFalse(ok)
+        self.context.dialogue["instruction_request"]["id"] = "old-clarification"
+        spec = self.registry._tools[step["tool"]]
+        async def search(args):
+            self.calls.append(args)
+            return {"id": "synthetic-browser"}
+        self.registry._tools[spec.name] = AgentToolSpec(spec.name, spec.description, spec.parameters, spec.effect, search)
+        outcome = await self.registry.execute(spec.name, step["arguments"], user_message="合成搜索", state=ToolLoopState())
+        self.assertEqual(outcome.status, "ok")
+        self.assertEqual(len(self.calls), 1)
+
+    async def test_submission_scope_is_enforced_by_submission_executor(self):
+        from app.runtime.resilience import PreflightRefused
+        for metadata in (None, {"requested": False}):
+            self.context.action_authority = metadata
+            with self.assertRaises(PreflightRefused):
+                await self.registry._mock_delivery_start({"min_score": 85})
+        self.context.action_authority = {"requested": True, "evidence_task_id": "original-search"}
+        async def queue(**args):
+            self.calls.append(args)
+            return {"queued": 1}
+        self.registry.mock_workflow = NS(remember_authorization_scope=lambda *a, **k: None, queue_deliveries=queue)
+        outcome = await self.registry.execute("mock_delivery_start", {"min_score": 85}, user_message="合成投递", state=ToolLoopState())
+        self.assertEqual(outcome.status, "ok")
+        self.assertEqual(self.calls[0]["task_id"], "original-search")
+
+    async def test_loop_budget_and_duplicate_protection_remain(self):
+        spec = self.registry._tools["job_stats_read"]
+        state = ToolLoopState()
+        self.assertTrue(self.registry.call_guard.check(spec, {}, state)[0])
+        self.assertFalse(self.registry.call_guard.check(spec, {}, state)[0])
+        self.assertEqual(state.denial_code, "duplicate_tool_call")
+        state = ToolLoopState()
+        for number in range(8):
+            self.assertTrue(self.registry.call_guard.check(spec, {"number": number}, state)[0])
+        self.assertFalse(self.registry.call_guard.check(spec, {"number": 8}, state)[0])
+        self.assertEqual(state.denial_code, "tool_budget_exhausted")
+
+    async def test_old_background_plan_does_not_overwrite_foreground_question(self):
+        old = self.validate(candidate(delivery=False))
+        current = self.validate(candidate(delivery=False))
+        current.update(status="clarifying", questions=["合成缺失参数"])
+        persist(current, activate=True)
+        persist(old)
+        self.assertEqual(self.context.dialogue["instruction_request"]["id"], current["id"])
+        self.assertEqual(self.context.dialogue["tasks"]["plan_id"], current["id"])
 
     async def test_missing_roles_clarify_real_site_delivery_stays_disabled(self):
         self.context.search_state = {}
@@ -287,6 +305,73 @@ class Contracts(unittest.IsolatedAsyncioTestCase):
         response = await agent._dispatch_contextual_message("我的需求是什么", None)
         self.assertIn(message, response.message)
         self.assertEqual(len(agent.llm.requests), 1)
+        self.assertEqual(len(self.calls), 1)
+
+    async def test_upload_followup_activates_new_plan_over_old_clarification(self):
+        # The old request has no resume; upload changes its stamp, so the model
+        # produces a new execution plan. Exercise begin -> persist -> registry.
+        self.context.dialogue["instruction_request"] = {
+            "id": "before-upload", "status": "clarifying", "resume_stamp": "None:master:1"}
+        plan = self.validate(candidate(delivery=False))
+        spec = self.registry._tools["job_search_start"]
+        async def search(args):
+            self.calls.append(args)
+            return {"id": "synthetic-browser", "status": "waiting_for_user"}
+        self.registry._tools[spec.name] = AgentToolSpec(spec.name, spec.description, spec.parameters, spec.effect, search)
+        await begin(plan, self.registry)
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(self.context.dialogue["instruction_request"]["id"], plan["id"])
+        self.assertEqual(self.context.dialogue["tasks"]["plan_id"], plan["id"])
+
+    async def test_upload_followup_persists_one_owner_before_dispatch_and_reopen(self):
+        from app.runtime.store import RunStore
+        with tempfile.TemporaryDirectory() as temp:
+            store = RunStore(Path(temp) / "runtime.db")
+            self.context.mutate_dialogue = lambda operation: store.mutate_dialogue("default", operation)
+            before = self.validate(candidate(delivery=False))
+            before.update(status="clarifying", questions=["请上传合成简历"], resume_stamp="None:master:1")
+            await begin(before, self.registry)
+            self.assertEqual(self.calls, [])
+            self.document.version = 2
+            self.stamp = "synthetic-resume:synthetic-document:2"
+            data = candidate()
+            data["steps"][0]["arguments"]["result_limit"] = 15
+            after = self.validate(data)
+            for name in ("job_search_start", "job_results_read", "mock_delivery_start", "learning_plan_generate"):
+                spec = self.registry._tools[name]
+                async def executor(args, tool=name):
+                    saved = store.dialogue_state("default")
+                    self.assertEqual(saved["instruction_request"]["id"], saved["tasks"]["plan_id"])
+                    self.assertEqual(saved["tasks"]["plan_id"], after["id"])
+                    claimed = next(s for s in saved["instruction_request"]["steps"] if s["tool"] == tool)
+                    self.assertEqual(claimed["status"], "claimed")
+                    self.calls.append({"tool": tool, "args": args})
+                    return {"id": "synthetic-search", "message": "ok"}
+                self.registry._tools[name] = AgentToolSpec(name, spec.description, spec.parameters, spec.effect, executor)
+            await begin(after, self.registry)
+            self.assertEqual(len(self.calls), 1)
+            self.assertEqual(self.calls[0]["args"]["result_limit"], 15)
+            after["steps"][0]["status"] = "completed"
+            await advance(after, self.registry)
+            self.assertEqual(len(self.calls), 4)
+            await advance(after, self.registry)
+            self.assertEqual(len(self.calls), 4)
+            reopened = RunStore(store.path).dialogue_state("default")
+            self.assertEqual(reopened["instruction_request"]["id"], reopened["tasks"]["plan_id"])
+            self.assertEqual(reopened["instruction_request"]["status"], "finished")
+            self.context.mutate_dialogue = None
+            del store
+            gc.collect()
+
+    async def test_waiting_does_not_expire_ordinary_plan_execution(self):
+        plan = self.validate(candidate(delivery=False))
+        plan["expires_at"] = 0
+        spec = self.registry._tools["job_search_start"]
+        async def search(args):
+            self.calls.append(args)
+            return {"id": "synthetic-browser", "status": "waiting_for_user"}
+        self.registry._tools[spec.name] = AgentToolSpec(spec.name, spec.description, spec.parameters, spec.effect, search)
+        await begin(plan, self.registry)
         self.assertEqual(len(self.calls), 1)
 
     async def test_citation_warnings_never_skip_cycles_and_are_task_local(self):

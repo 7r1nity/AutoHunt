@@ -1,8 +1,7 @@
-"""Application-issued action bindings; language interpretation belongs to models.
+"""Legacy plan audit fingerprints, retained for stored-plan compatibility.
 
-Bindings are persisted with a validated plan. They are not credentials and cannot
-be supplied through tool arguments. Execution compares the saved action, session,
-resume and lifetime, without re-parsing a quote from the user's message.
+These are NOT execution credentials. The generic tool authorization gate has been
+removed; delivery uses its own job preview and one-use token, not these hashes.
 """
 from __future__ import annotations
 

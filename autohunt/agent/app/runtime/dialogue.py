@@ -142,6 +142,9 @@ def apply_operation(saved: dict | None, operation: dict, *, clock: float | None 
         return state.model_dump(mode="json")
     if op == "instruction":
         state.instruction_request = copy.deepcopy(operation.get("request"))
+        if operation.get("activate") and state.instruction_request:
+            # One persisted state operation installs both halves of ownership.
+            state.tasks["plan_id"] = state.instruction_request["id"]
         state.revision += 1
         return state.model_dump(mode="json")
     for item in state.pending:

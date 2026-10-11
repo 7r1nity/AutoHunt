@@ -13,7 +13,7 @@ from pathlib import Path
 from types import SimpleNamespace as NS
 
 from .corpus import ROLES
-from app.core.agent_tools import AgentToolPolicy, ToolLoopState
+from app.core.agent_tools import ToolCallGuard, ToolLoopState
 from app.core.job_filters import validate_filter, combine, evaluate_filter
 from app.core.search_contract import numeric_value
 from app.core.search_language import parse_search_message
@@ -116,8 +116,8 @@ async def evaluate(case, registry):
         message = p["message"]
         values = {"parser": parse_search_message(message).authorized,
                   "grounded": command_grounded("job_search_start", message, [message]),
-                  "policy": AgentToolPolicy().authorize(registry._tools["job_search_start"], {}, message, ToolLoopState())[0]}
-        assert all(value == p["allowed"] for value in values.values()), values
+                  "call_guard": ToolCallGuard().check(registry._tools["job_search_start"], {}, ToolLoopState())[0]}
+        assert values["parser"] == values["grounded"] == p["allowed"] and values["call_guard"], values
         return values
     if family in {"partial_revocation", "data_not_authority"}:
         meaning = understand(p["message"])
@@ -177,7 +177,7 @@ async def dispatch_start(message, routed, registry):
     calls, plans, routes = [], [], []
     account = {"account_bound": False}
     async def execute(name, arguments, *, user_message, state):
-        allowed, reason = AgentToolPolicy().authorize(registry._tools[name], arguments, user_message, state)
+        allowed, reason = ToolCallGuard().check(registry._tools[name], arguments, state)
         assert allowed, reason
         calls.append(name)
         if name == "job_search_start":
@@ -390,13 +390,13 @@ async def pipeline(scenario, registry):
         if scenario == "tampered_binding":
             authority["binding"]["source_digest"] = "tampered"
         context.action_authority = authority
-        old = agent_tools.command_grounded
+        old = getattr(agent_tools, "command_grounded", None)
         def forbidden(*args):
             raise AssertionError("runtime reinterpreted natural language")
         agent_tools.command_grounded = forbidden
         try:
-            allowed, reason = AgentToolPolicy().authorize(registry._tools[action["tool"]], action["arguments"], action["command_quote"], ToolLoopState())
-            assert allowed == (scenario == "runtime_no_reparse"), reason
+            allowed, reason = ToolCallGuard().check(registry._tools[action["tool"]], action["arguments"], ToolLoopState())
+            assert allowed, reason  # Audit binding is no longer an execution gate.
         finally:
             agent_tools.command_grounded = old
             context.action_authority = None

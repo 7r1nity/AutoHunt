@@ -25,7 +25,7 @@ from pathlib import Path
 from types import SimpleNamespace as NS
 
 from .corpus import VERSION, corpus, partition_key
-from app.core.agent_tools import AgentToolOutcome, AgentToolPolicy, AgentToolRegistry, ToolLoopState
+from app.core.agent_tools import AgentToolOutcome, ToolCallGuard, AgentToolRegistry, ToolLoopState
 from app.core.job_filters import FilterExpression, combine, evaluate_filter
 from app.core.search_contract import explicit_search_constraints, monthly_salary_lower_bound
 from app.core.search_language import parse_search_message
@@ -83,10 +83,10 @@ async def evaluate(case, scratch):
         message = p["message"]
         parsed = parse_search_message(message)
         grounded = command_grounded("job_search_start", message, [message])
-        allowed, reason = AgentToolPolicy().authorize(REGISTRY._tools["job_search_start"], {}, message, ToolLoopState())
+        allowed, reason = ToolCallGuard().check(REGISTRY._tools["job_search_start"], {}, ToolLoopState())
         actual = {"parser": parsed.authorized, "grounding": grounded, "policy": allowed,
                   "complete": parsed.complete, "fields": parsed.fields, "reason": parsed.reason, "policy_reason": reason}
-        check(all(actual[x] == e["authorized"] for x in ("parser", "grounding", "policy")), actual,
+        check(all(actual[x] == e["authorized"] for x in ("parser", "grounding")) and allowed, actual,
               "legal command blocked" if e["authorized"] else "non-command authorized")
         if not parsed.complete:
             check(not any(key in parsed.fields for key in ("query", "queries", "direction")), actual, "incomplete prose leaked into keywords")
@@ -345,9 +345,15 @@ async def delivery_contract(case, scratch):
     from app.jobs.store import JobStore
     p, e = case["payload"], case["expected"]
     if case["family"] == "real_site_disabled":
-        allowed, reason = AgentToolPolicy().authorize(REGISTRY._tools["mock_delivery_start"], {"min_score": 90},
-            f"在{p['source']}匹配90分以上自动投递", ToolLoopState())
-        return check(allowed == e["allowed"], {"allowed": allowed, "reason": reason})
+        from app.delivery.automation import DeliveryAutomationService
+        from app.delivery.mock_site_adapter import MockJobSiteAdapter
+        delivery = object.__new__(DeliveryAutomationService)
+        delivery.adapter = MockJobSiteAdapter()
+        urls = {"BOSS直聘": "https://www.zhipin.com/job_detail/example.html",
+                "智联招聘": "https://jobs.zhaopin.com/example.htm", "真实网站": "https://example.com/jobs/1",
+                "模拟网站": "http://127.0.0.1:8080/job.html?id=1"}
+        allowed = delivery.supports(urls[p["source"]])
+        return check(allowed == e["allowed"], {"allowed": allowed, "checked_by": "delivery.supports"})
     scenario = p["scenario"]
     if case["family"] == "resume_binding":
         doc = ResumeDocumentView(summary="合成候选人的真实报告证据" if scenario != "empty" else "")
@@ -436,7 +442,7 @@ async def adversarial(case, scratch):
     if scenario in {"duplicate_tool", "loop_budget"}:
         state = ToolLoopState()
         count = 2 if scenario == "duplicate_tool" else 9
-        outcomes = [AgentToolPolicy().authorize(REGISTRY._tools["job_stats_read"], {} if scenario == "duplicate_tool" else {"x": i}, "查看统计", state)[0] for i in range(count)]
+        outcomes = [ToolCallGuard().check(REGISTRY._tools["job_stats_read"], {} if scenario == "duplicate_tool" else {"x": i}, state)[0] for i in range(count)]
         return check(outcomes[0] and not outcomes[-1], {"allowed": outcomes})
     if scenario == "resume_refresh":
         prefs = NS(target_roles=NS(source="resume", values=[]), search_keywords=NS(source="resume", values=[]), locations=NS(source="resume", values=[]), salary_min=NS(source="resume", value=None))

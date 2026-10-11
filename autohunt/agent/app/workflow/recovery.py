@@ -126,8 +126,8 @@ def recover_plan(run: dict, *, session_id: str, stamp: str,
             if "[REDACTED_" in str(step.get("arguments", {})):
                 return RecoveryDecision("clarify", "旧任务的业务参数已被改写，无法可靠接续，请重新确认原条件。")
             binding = step.get("authority_binding") or {}
-            if binding and (binding.get("session_id") != session_id or binding.get("tool") != step["tool"]):
-                return RecoveryDecision("clarify", "旧执行凭证的工具或会话不一致，未恢复授权。")
+            if step["tool"] == "mock_delivery_start" and not step.get("user_requested", binding.get("user_requested", False)):
+                return RecoveryDecision("clarify", "模拟投递尚待具体范围确认；继续任务不会补出未确认的投递要求。")
             step["authority_binding"] = action_binding(step["tool"], step["arguments"],
                 session_id=session_id, requested=bool(binding.get("user_requested", step.get("user_requested", False))))
     return RecoveryDecision("resume", "已按执行记录接续原任务；已完成步骤不重放，结果不确定的动作仍待核验。", plan)

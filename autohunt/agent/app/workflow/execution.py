@@ -15,16 +15,16 @@ from ..runtime.resilience import classify_failure
 DONE = {"completed", "failed", "skipped", "blocked", "outcome_indeterminate"}
 
 
-def persist(plan: dict) -> None:
+def persist(plan: dict, *, activate: bool = False) -> None:
     previous = (active_run().dialogue or {}).get("instruction_request") or {}
     if previous.get("id") == plan["id"] and previous.get("revision", 0) > plan.get("revision", 0):
         return  # A stale watcher may not overwrite a foreground edit.
     emit("plan_state", plan=plan)
-    if previous.get("id") != plan["id"] and previous.get("status") == "clarifying" and plan["status"] != "clarifying":
-        return  # A background completion must not erase a newer foreground question.
+    if not activate and previous.get("id") and previous.get("id") != plan["id"]:
+        return  # Only foreground begin may replace another logical plan.
     if previous.get("id") == plan["id"]:
         plan["revoked_tools"] = sorted(set(plan.get("revoked_tools", [])) | set(previous.get("revoked_tools", [])))
-    dialogue_change("instruction", request={"revoked_tools": plan.get("revoked_tools", []), "condition_overrides": plan.get("condition_overrides", {}), **{key: plan[key] for key in
+    dialogue_change("instruction", activate=activate, request={"revoked_tools": plan.get("revoked_tools", []), "condition_overrides": plan.get("condition_overrides", {}), **{key: plan[key] for key in
         ("id", "original", "answers", "questions", "resume_stamp", "turn", "expires_at", "status", "goals")},
         "understanding": plan.get("understanding"),
         "revision": plan.get("revision", 0), "paused": plan.get("paused", False),
@@ -102,8 +102,8 @@ async def advance(plan: dict, registry) -> list[dict]:
                     failure={"code": "authority_revoked", "effect_started": False, "uncertain": False})
                 observed.append(step); changed = True
                 continue
-            if step["effect"] != "read" and (plan["resume_stamp"] != current_stamp or plan["expires_at"] < time.time() or active_plan != plan["id"]):
-                step.update(status="blocked", detail="简历变更、原计划取消/替代或授权过期，请重新授权此动作")
+            if step["effect"] != "read" and (plan["resume_stamp"] != current_stamp or active_plan != plan["id"]):
+                step.update(status="blocked", detail="简历变更或原任务已取消/替代，请确认要执行的任务")
                 step["failure"] = {"code": "authority_stale", "effect_started": False, "uncertain": False}
                 observed.append(step); changed = True
                 continue
@@ -113,6 +113,7 @@ async def advance(plan: dict, registry) -> list[dict]:
                 "resume_stamp": plan["resume_stamp"], "expires_at": plan["expires_at"],
                 "candidate": registry.candidate_state, "resumes": registry.resume_workspace,
                 "evidence_task_id": task_id, "plan_id": plan["id"], "step_id": step["id"]}
+            authority["requested"] = step.get("user_requested", (step.get("authority_binding") or {}).get("user_requested", False))
             authority["binding"] = step.get("authority_binding")
             authority["resume_search_task_id"] = step.get("resume_search_task_id")
             step.update(status="claimed")
@@ -166,12 +167,10 @@ async def advance(plan: dict, registry) -> list[dict]:
 
 
 async def begin(plan: dict, registry) -> ChatResponse:
+    persist(plan, activate=True)
     if plan["questions"]:
-        persist(plan)
         return ChatResponse(message="已记录完整请求，尚未执行。请补充：\n\n" + "\n".join(
             f"{index}. {question}" for index, question in enumerate(plan["questions"], 1)), lane=AgentLane.CANDIDATE)
-    if any(step["effect"] != "read" for step in plan["steps"]):
-        dialogue_change("task", kind="plan_id", id=plan["id"], status="running", bind=True)
     observed = await advance(plan, registry)
     proposal = next((step.get("result", {}).get("proposal") for step in observed
         if step["status"] == "waiting_confirmation" and isinstance(step.get("result"), dict)), None)

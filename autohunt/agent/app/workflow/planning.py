@@ -243,7 +243,6 @@ def _validate_draft(draft: RequestDraft, registry, message: str, *, dialogue: di
                     stamp: str, previous: dict | None = None) -> dict:
     """Validate action contracts, never reconstruct natural language with regex."""
     from ..security.action_grants import action_binding
-    from ..security.risk import grade_action, SecurityRisk
     from ..runtime.search_state import SearchPatch
     from ..core.job_filters import validate_filter
     from .requests import is_continuation
@@ -364,10 +363,10 @@ def _validate_draft(draft: RequestDraft, registry, message: str, *, dialogue: di
                 step["missing_slots"].append("min_score")
         if name == "job_search_start" and args.get("dry_run") and args.get("source", "mock") != "mock":
             questions.append("真实网站不支持自动沟通与投递试运行；请使用本地模拟站。")
-        risk = grade_action(name, args, effect=spec.effect)
-        if risk.risk == SecurityRisk.UNKNOWN or (
-                registry.policy.confirmation.should_confirm(risk.risk)
-                and not step.get("user_requested")):
+        # Only submission/contact has a scope-confirmation requirement. Ordinary
+        # search, reading and local plan generation do not pass a risk gate.
+        submission = name == "mock_delivery_start" or name == "job_search_start" and args.get("dry_run")
+        if submission and not step.get("user_requested"):
             questions.append("请确认是否执行：" + spec.description[:160] + "；参数：" +
                              json.dumps(args, ensure_ascii=False))
         if name in EVIDENCE_TOOLS and searches:

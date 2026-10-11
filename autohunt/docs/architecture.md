@@ -1,6 +1,6 @@
 # AutoHunt：当前架构与能力清单
 
-2026-10-08 更新：完整单目标走规则快路径；其他请求采用全部目标规划、参数/授权校验及持久化依赖执行。Review 与边界见 [意图识别与任务编排](intent-orchestration-review.md)，运行层见 [会话与统一运行层](agent-runtime.md)。
+2026-10-11 更新：删除通用工具授权核对，普通工具走 schema/依赖校验与持久执行；投递保护仅在投递模块。计划启用原子更新会话记录与执行指针。当前分工及验证见 [工具执行简化](tool-dispatch-simplification.md)；旧 Review 文档保留历史背景，运行层见 [会话与统一运行层](agent-runtime.md)。
 
 更新于 2026-09-18。本文描述当前代码，不把设计中的模块视为已经实现。定位为**本地、单用户、有人类接管的求职 Agent MVP**；不是无人值守的多租户招聘机器人。
 
@@ -16,7 +16,7 @@ flowchart TB
   Router --> Fast[完整单目标规则处理]
   Router --> Planner[主模型无工具完整目标规划]
   Planner <--> LLM[LLMManager / DeepSeek / 出口脱敏]
-  Planner --> Runner[参数与授权校验 / 最多8步依赖图 / claim检查点]
+  Planner --> Runner[参数与依赖校验 / 最多8步依赖图 / claim检查点]
   Fast --> Registry[内部 AgentToolRegistry]
   Runner --> Registry
   Runner --> Runtime
@@ -66,7 +66,7 @@ flowchart TB
 - `frontend/app/api/agent/*`：转发给 FastAPI；服务 Token 不应进入浏览器代码。
 - `agent/app/api/application.py`：API 路由与生命周期。`core/dependencies.py` 装配单例。
 - `core/main_agent.py`：统一请求入口与完整规则快路；`intent/` 管理规则/小模型/熔断/路由日志。`workflow/planning.py` 规划和校验全部目标；`workflow/execution.py` 管理依赖、claim、等待与结果。旧回退仅兼容历史运行/缺少注册表的调用方。
-- `core/agent_tools.py`：唯一内部工具 schema、权限策略、执行与 observation。模型没有自由 shell、任意路径或任意 URL 权限；步骤授权是代码安装的内部上下文，不是模型参数。
+- `core/agent_tools.py`：唯一内部工具 schema、调用预算、执行与 observation，不再二次核对旧计划/授权摘要。模型没有自由 shell、任意路径或任意 URL 工具；步骤上下文携带证据来源，实际投递仍有独立预览/一次性令牌。
 - `browser/`：搜索、站点识别、页面绑定、生命周期证据。`delivery/`：有外部写入的投递状态机；两者共用锁。
 - `jobs/`：职位记录、评分、预览授权和统计。`memory/`：候选人材料、主简历与偏好。
 

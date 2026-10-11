@@ -64,7 +64,7 @@ class ToolLoopState:
     calls: int = 0
     explicit_search_intent: bool = False
     confirmed_action_id: str | None = None
-    denial_code: str = "authorization_denied"
+    denial_code: str = "tool_call_rejected"
 
 
 @dataclass
@@ -86,90 +86,21 @@ class AgentToolOutcome:
         }, budget=9000)
 
 
-class AgentToolPolicy:
-    """Action-level policy: no natural-language authorization regexes."""
-    READ_EFFECTS = {"read"}
-    DIRECT_CONTROLS = {"task_continue", "browser_task_stop", "browser_task_pause", "browser_task_resume",
-                       "mock_delivery_cancel"}
-    LOCAL_ACTIONS = {"context_action_propose", "context_question_ask", "job_review_selection",
-                     "search_state_update"}
+class ToolCallGuard:
+    """Loop budget only; task state and submission checks belong to their owners."""
 
-    def __init__(self):
-        import os
-        from ..security.risk import ConfirmRisky, AlwaysConfirm, SecurityRisk
-        policy = os.getenv("AUTOHUNT_APPROVAL_POLICY", "risk").lower()
-        threshold = os.getenv("AUTOHUNT_APPROVAL_THRESHOLD", "HIGH").upper()
-        try:
-            level = SecurityRisk(threshold)
-            if level == SecurityRisk.UNKNOWN:
-                level = SecurityRisk.HIGH
-        except ValueError:
-            level = SecurityRisk.HIGH
-        # Never-confirm is intentionally not a way to bypass account/resume scope.
-        self.confirmation = AlwaysConfirm() if policy == "always" else ConfirmRisky(threshold=level)
-
-    def authorize(self, spec: AgentToolSpec, arguments: dict[str, Any],
-                  user_message: str, state: ToolLoopState) -> tuple[bool, str]:
-        from ..security.action_grants import binding_matches
-        from ..security.risk import grade_action, SecurityRisk
+    def check(self, spec: AgentToolSpec, arguments: dict[str, Any],
+              state: ToolLoopState) -> tuple[bool, str]:
         state.calls += 1
         if state.calls > 8:
+            state.denial_code = "tool_budget_exhausted"
             return False, "工具循环超过有限预算"
         digest = json.dumps([spec.name, arguments], ensure_ascii=False, sort_keys=True, default=str)
         if digest in state.seen_calls:
+            state.denial_code = "duplicate_tool_call"
             return False, "相同调用已经处理，禁止重复执行"
         state.seen_calls.add(digest)
-        if spec.effect == "read":
-            return True, "只读工具"
-        context = active_run()
-        authority = context.action_authority if context else None
-        risk = grade_action(spec.name, arguments, effect=spec.effect)
-        emit("action_policy", tool=spec.name, risk=str(risk.risk),
-             policy=self.confirmation.describe(), bound=bool(authority))
-        if authority:
-            from ..growth.requests import resume_stamp
-            instruction = (context.dialogue or {}).get("instruction_request") or {}
-            saved_step = next((step for step in instruction.get("steps", [])
-                               if step.get("id") == authority.get("step_id")), {})
-            binding = authority.get("binding")
-            checks = [
-                ("authority_revoked", spec.name in instruction.get("revoked_tools", []), "用户已撤回此动作"),
-                ("authority_expired", authority.get("expires_at", 0) < time.time(), "动作授权已过期，请明确继续原任务以重新核对范围"),
-                ("resume_changed", authority.get("resume_stamp") != resume_stamp(authority["resumes"].read_document(), authority["candidate"]), "主简历已变化，需要重新确认范围"),
-                ("plan_binding_changed", instruction.get("id") != authority.get("plan_id") or (context.dialogue or {}).get("tasks", {}).get("plan_id") != authority.get("plan_id"), "任务已被替换或计划归属不一致"),
-                ("claim_missing", saved_step.get("status") != "claimed", "缺少已持久化的步骤执行凭证"),
-                ("arguments_changed", saved_step.get("tool") != spec.name or saved_step.get("arguments") != arguments or authority.get("tool") != spec.name or authority.get("arguments") != arguments, "执行参数与原计划不一致"),
-                ("binding_invalid", saved_step.get("authority_binding") != binding or not binding_matches(binding, spec.name, arguments, context.session_id), "内部动作绑定校验失败，未执行"),
-            ]
-            for code, rejected, detail in checks:
-                if rejected:
-                    state.denial_code = code
-                    return False, detail
-            if risk.risk == SecurityRisk.UNKNOWN:
-                state.denial_code = "unknown_risk"
-                return False, "未分类动作需要人工审批，不自动执行"
-            if self.confirmation.should_confirm(risk.risk) and not binding.get("user_requested"):
-                state.denial_code = "confirmation_required"
-                return False, "此动作尚待具体范围确认"
-            return True, "已绑定的工作流动作；不重复检查用户措辞"
-        if context and state.confirmed_action_id:
-            item = next((item for item in (context.dialogue or {}).get("pending", [])
-                         if item.get("id") == state.confirmed_action_id), {})
-            if (item.get("status") == "claimed" and item.get("tool") == spec.name
-                    and item.get("arguments") == arguments and spec.name != "mock_delivery_start"):
-                return True, "已人工确认的具体提案"
-            return False, "确认提案与执行动作不一致"
-        if spec.name in self.LOCAL_ACTIONS:
-            return (context is not None, "仅当前会话的本地动作，不提交简历")
-        if spec.name in self.DIRECT_CONTROLS:
-            return (context is not None and not arguments, "参数为空的会话内任务控制，执行器检查任务归属")
-        if spec.name == "job_search_start" and state.explicit_search_intent:
-            # Only an exact operation-only quick route may set this marker.
-            # It carries no extracted keywords or criteria.
-            if any(key in arguments for key in ("query", "queries", "dry_run")):
-                return False, "快捷搜索只能继承条件；新岗位或试运行由模型解析"
-            return (context is not None, "明确快捷搜索，复用当前条件")
-        return False, "需先解析为受范围约束的动作或确认提案"
+        return True, "工具调用预算内"
 
 
 
@@ -196,7 +127,7 @@ class AgentToolRegistry:
         self.memory = memory
         self.learning_plans = learning_plans
         self.mock_workflow = mock_workflow
-        self.policy = AgentToolPolicy()
+        self.call_guard = ToolCallGuard()
         self._tools = {spec.name: spec for spec in self._build_specs()}
 
     @staticmethod
@@ -380,12 +311,12 @@ class AgentToolRegistry:
                 failure={"code": "unknown_tool", "retryable": False, "effect_started": False, "uncertain": False})
         context = active_run()
         try:
-            allowed, reason = self.policy.authorize(spec, arguments, user_message, state)
+            allowed, reason = self.call_guard.check(spec, arguments, state)
         except Exception as exc:
             failure = classify_failure(exc, effect=spec.effect, started=False).metadata()
-            failure["retryable"] = False  # Never retry or repair the policy gate.
-            emit("tool_finished", tool=name, status="error", detail="工具授权校验未完成", failure=failure)
-            return AgentToolOutcome(name, "error", "工具授权校验未完成，没有执行", spec.effect, failure=failure)
+            failure["retryable"] = False
+            emit("tool_finished", tool=name, status="error", detail="工具调用预算检查未完成", failure=failure)
+            return AgentToolOutcome(name, "error", "工具调用预算检查未完成，没有执行", spec.effect, failure=failure)
         if not allowed:
             dialogue_change("tool", tool=name, status="denied", detail=reason)
             emit("tool_denied", tool=name, detail=reason)
@@ -658,6 +589,8 @@ class AgentToolRegistry:
         context = active_run()
         if context is None:
             raise PreflightRefused("自动投递需要当前会话")
+        if not (context.action_authority or {}).get("requested"):
+            raise PreflightRefused("自动投递需要已确认的投递范围；请先明确目标分数和投递要求")
         # Remember the user's own instruction as the boundary of what this batch is
         # authorised to cover. Measurement only for now: queue_deliveries records what
         # falls inside it without filtering anything yet.

@@ -26,8 +26,9 @@ class RunContext:
     revise_task: Callable | None = None
     enforce_task_scope: bool = False
     user_message: str = ""
-    # Only the validated plan runner may install a single-step authority. Model
-    # tool arguments and historical messages cannot populate this field.
+    # Legacy field name: execution metadata (step/plan/evidence and requested
+    # scope), NOT a generic token checked against dialogue or an argument hash.
+    # Only the plan runner populates it; submission has its own preview/token.
     action_authority: dict | None = None
 
 
