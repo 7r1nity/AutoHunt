@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import time
@@ -172,6 +173,9 @@ class AgentToolRegistry:
                               "source": {"type": "string", "enum": ["mock", "boss", "zhaopin"]},
                               "filters": {**filter_schema(), "type": ["object", "null"], "description": "完整语义条件树；null 显式清除；省略保持"},
                           }), "session", self._search_state_update),
+            AgentToolSpec("job_results_refilter", "用户改变条件后，按本会话新条件重新筛选已完成搜索中保存的JD（含原信息不足结果）。不启动浏览器，不沟通或投递；后续投递/成长计划必须依赖此步骤。最多30个，不会补入未读取职位。",
+                obj({"task_id": {"type": "string", "description": "已有搜索ID；省略使用本会话绑定的搜索，不取其他会话最新任务"}}),
+                "write", self._job_results_refilter),
             AgentToolSpec(
                 "job_results_read",
                 "读取已经保存的职位搜索结果。用户说“职位搜索结果、找到哪些岗位、查看结果”时使用；绝不能用它启动浏览器。",
@@ -547,6 +551,42 @@ class AgentToolRegistry:
         if any(len(keyword) > 80 or any(ord(char) < 32 for char in keyword) for keyword in state["queries"]):
             raise ValueError("岗位关键词过长或包含控制字符")
         return save_search_state(state, user_edit=args)
+
+    async def _job_results_refilter(self, args: dict[str, Any]) -> Any:
+        from .job_filters import evaluate_filter, filter_digest, validate_filter
+        from .salary_conditions import normalized_search_filters
+        from ..growth.requests import resume_stamp
+        context = active_run()
+        if context is None:
+            raise PreflightRefused("重新筛选需要当前会话")
+        task_id = args.get("task_id") or (context.dialogue or {}).get("tasks", {}).get("browser_id")
+        if not task_id:
+            raise PreflightRefused("请先完成一轮搜索；没有本会话的结果可重新筛选")
+        profile = self.candidate_state.read().profile
+        document = self.resume_workspace.read_document()
+        stamp = resume_stamp(document, self.candidate_state)
+        candidates = self.jobs.refilter_candidates(task_id, resume_id=profile.resume_id, session_id=context.session_id)
+        constraints = dict(context.search_state or {})
+        filters = normalized_search_filters(constraints.get("filters"), constraints.get("salary_min"))
+        semaphore = asyncio.Semaphore(4)
+        async def judge(job):
+            facts = {**job, "tags": json.loads(job.get("tags") or "[]")}
+            async with semaphore:
+                cities = constraints.get("locations") or []
+                if cities and not any(city in str(job.get("location") or "") for city in cities):
+                    return {"status": "unknown" if not job.get("location") or job["location"] in {"未知", "未注明"} else "fail",
+                            "conditions": [], "reason": "工作地点无法满足更新后的城市条件",
+                            "digest": filter_digest(validate_filter(filters) if filters else None)}
+                return await evaluate_filter(self.browser.llm.generate, filters, facts)
+        async with asyncio.TaskGroup() as group:
+            workers = [group.create_task(judge(job)) for job in candidates]
+        if stamp != resume_stamp(self.resume_workspace.read_document(), self.candidate_state):
+            raise PreflightRefused("筛选期间简历已变化，没有保存筛选结果")
+        verdicts = [worker.result() for worker in workers]
+        self.jobs.save_refilter_results(task_id, candidates, verdicts, {**constraints, "filters": filters})
+        counts = {state: sum(verdict["status"] == state for verdict in verdicts) for state in ("pass", "fail", "unknown")}
+        return {"task_id": task_id, "checked": len(candidates), **counts,
+                "message": f"已按新条件重新筛选 {len(candidates)} 个已保存职位：符合 {counts['pass']}、不符合 {counts['fail']}、信息不足 {counts['unknown']}。未启动搜索或投递；仅覆盖本次读取的最多30个职位。"}
 
     async def _preference_read(self, _args: dict[str, Any]) -> Any:
         return self.candidate_state.read().preferences.model_dump(mode="json")

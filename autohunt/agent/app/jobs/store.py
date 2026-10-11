@@ -741,6 +741,45 @@ class JobStore:
             db.execute("UPDATE jobs SET filter_status=?,filter_evidence=? WHERE id=?",
                 (result["status"], json.dumps(result, ensure_ascii=False), job_id))
 
+    def refilter_candidates(self, task_id: str, *, resume_id: str, session_id: str, limit: int = 30) -> list[dict]:
+        """Read this completed search's recorded JDs, including previously unknown ones."""
+        with self.lock, self._connect() as db:
+            task = db.execute("SELECT status,resume_id FROM browser_tasks WHERE id=?", (task_id,)).fetchone()
+            saved = db.execute("SELECT request_json FROM search_recovery WHERE task_id=?", (task_id,)).fetchone()
+            if not task or task["status"] != "completed" or task["resume_id"] != resume_id:
+                raise ValueError("只能重新筛选当前简历已完成搜索的职位")
+            request = json.loads(saved[0]) if saved else {}
+            if request.get("conversation_id") != session_id:
+                raise ValueError("搜索不属于当前会话，不能修改其筛选结果")
+            rows = db.execute("SELECT DISTINCT j.* FROM jobs j JOIN browser_events e "
+                "ON j.id=json_extract(e.sample_json,'$.job_id') WHERE e.task_id=? "
+                "AND e.event_type IN ('job_stored','job_duplicate') ORDER BY j.id LIMIT ?",
+                (task_id, min(limit, 30))).fetchall()
+        return [dict(row) for row in rows]
+
+    def save_refilter_results(self, task_id: str, candidates: list[dict], verdicts: list[dict], constraints: dict) -> None:
+        """Commit new evidence together; never leave a new status with an old receipt."""
+        if len(candidates) != len(verdicts):
+            raise ValueError("重新筛选结果不完整")
+        with self.lock, self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            for candidate in candidates:
+                row = db.execute("SELECT * FROM jobs WHERE id=?", (candidate["id"],)).fetchone()
+                if not row or self.review_fingerprint(dict(row)) != self.review_fingerprint(candidate):
+                    raise ValueError("职位证据已变化，请重新读取再筛选")
+            for candidate, verdict in zip(candidates, verdicts):
+                encoded = json.dumps(verdict, ensure_ascii=False)
+                db.execute("UPDATE jobs SET filter_status=?,filter_evidence=? WHERE id=?",
+                    (verdict["status"], encoded, candidate["id"]))
+                updated = {**candidate, "filter_status": verdict["status"], "filter_evidence": encoded}
+                sample = {"job_id": candidate["id"], "filter_status": verdict["status"],
+                    "filter_evidence": verdict, "filter_fingerprint": self.review_fingerprint(updated)}
+                db.execute("INSERT INTO browser_events(task_id,event_type,detail,sample_json,created_at) VALUES (?,?,?,?,?)",
+                    (task_id, "job_refiltered", "按新条件重新筛选已有JD", json.dumps(sample, ensure_ascii=False), utc_now()))
+            db.execute("INSERT INTO browser_events(task_id,event_type,detail,sample_json,created_at) VALUES (?,?,?,?,?)",
+                (task_id, "refilter_constraints", "更新已有结果的筛选条件；未启动新搜索",
+                 json.dumps(constraints, ensure_ascii=False), utc_now()))
+
     def save_search_request(self, task_id: str, request: dict) -> None:
         """Canonical internal checkpoint, never a redacted event projection."""
         with self.lock, self._connect() as db:
@@ -788,11 +827,24 @@ class JobStore:
         with self.lock, self._connect() as db:
             events = db.execute(
                 "SELECT sample_json FROM browser_events WHERE task_id=? "
-                "AND event_type IN ('job_stored','job_duplicate') ORDER BY id",
+                "AND event_type IN ('job_stored','job_duplicate','job_refiltered') ORDER BY id",
                 (task_id,),
             ).fetchall()
-            constraint_row = db.execute("SELECT sample_json FROM browser_events WHERE task_id=? AND event_type='search_constraints' ORDER BY id DESC LIMIT 1", (task_id,)).fetchone()
+            constraint_row = db.execute("SELECT event_type,sample_json FROM browser_events WHERE task_id=? AND event_type IN ('search_constraints','refilter_constraints') ORDER BY id DESC LIMIT 1", (task_id,)).fetchone()
             constraints = json.loads(constraint_row["sample_json"] or "{}") if constraint_row else {}
+            if constraint_row and constraint_row["event_type"] == "refilter_constraints":
+                from ..core.job_filters import filter_digest, validate_filter
+                expression = constraints.get("filters")
+                digest = filter_digest(validate_filter(expression) if expression else None)
+                events = [dict(event) for event in events]
+                for event in events:
+                    sample = json.loads(event["sample_json"] or "{}")
+                    # Partial refresh must not count untouched old decisions as
+                    # matching the newly displayed conditions in statistics.
+                    if sample.get("filter_evidence", {}).get("digest") != digest:
+                        sample.update(filter_status="unknown", filter_evidence={"status": "unknown",
+                            "reason": "尚未按本轮新条件重新核对", "conditions": []})
+                    event["sample_json"] = json.dumps(sample, ensure_ascii=False)
             job_ids: list[int] = []
             outcomes: dict[int, dict] = {}
             for event in events:
@@ -1052,9 +1104,17 @@ class JobStore:
             if not task_ids:
                 return []
             placeholders = ",".join("?" for _ in task_ids)
+            from ..core.job_filters import filter_digest, validate_filter
+            updated_digests = {}
+            for selected_task in task_ids:
+                updated = db.execute("SELECT sample_json FROM browser_events WHERE task_id=? "
+                    "AND event_type='refilter_constraints' ORDER BY id DESC LIMIT 1", (selected_task,)).fetchone()
+                if updated:
+                    value = json.loads(updated[0]).get("filters")
+                    updated_digests[selected_task] = filter_digest(validate_filter(value) if value else None)
             events = db.execute(
-                "SELECT sample_json FROM browser_events WHERE task_id IN (" + placeholders + ") "
-                "AND event_type IN ('job_stored','job_duplicate') ORDER BY id DESC",
+                "SELECT task_id,sample_json FROM browser_events WHERE task_id IN (" + placeholders + ") "
+                "AND event_type IN ('job_stored','job_duplicate','job_refiltered') ORDER BY id DESC",
                 task_ids,
             ).fetchall()
             ids: list[int] = []
@@ -1069,12 +1129,13 @@ class JobStore:
                 if job_id > 0 and job_id not in seen_ids:
                     seen_ids.add(job_id)
                     outcomes[job_id] = sample
-                    if sample.get("filter_status", "pass") == "pass":
+                    fresh = event["task_id"] not in updated_digests or sample.get("filter_evidence", {}).get("digest") == updated_digests[event["task_id"]]
+                    if fresh and sample.get("filter_status", "pass") == "pass":
                         ids.append(job_id)
             if not ids:
                 return []
             rows = db.execute(
-                "SELECT id,title,company,location,salary,description,source_url,stage,score "
+                "SELECT * "
                 "FROM jobs WHERE id IN (" + ",".join("?" for _ in ids) + ")", ids,
             ).fetchall()
         by_id = {int(row["id"]): dict(row) for row in rows}

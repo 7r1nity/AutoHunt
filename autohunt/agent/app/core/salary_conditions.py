@@ -56,8 +56,6 @@ def judge_salary(predicate: SalaryPredicate, facts: dict) -> dict:
     salary = str(facts.get("salary") or "")
     observed = salary_facts(salary)
     if predicate.applies_to == "internship":
-        if predicate.unit == "daily" and observed["unit"] == "monthly":
-            return {"status": "pass", "reason": "披露的是月薪，不受实习日薪条件限制", "evidence": []}
         employment = str(facts.get("employment_type") or "")
         description = str(facts.get("description") or "")
         match = re.search(r"招聘类型[：:]\s*([^。；;\n]+)", description)
@@ -66,10 +64,14 @@ def judge_salary(predicate: SalaryPredicate, facts: dict) -> dict:
             return {"status": "pass", "reason": "非实习岗位，不受此日薪条件限制", "evidence": []}
         if "实习" not in employment and "实习" not in str(facts.get("title") or ""):
             return {"status": "unknown", "reason": "无法确认实习条件是否适用", "evidence": []}
+        if predicate.unit == "daily" and observed["unit"] == "monthly":
+            return {"status": "unknown", "reason": "实习披露的是月薪，无法直接核实日薪门槛，不折算", "evidence": []}
         if observed["unit"] == "negotiable":
             return {"status": "unknown", "reason": "实习薪资面议，无法核实日薪门槛", "evidence": []}
     if observed["unit"] == "unknown":
         status, reason = "unknown", "薪资单位或区间未披露，不能猜测或折算"
+    elif observed["unit"] == "negotiable" and predicate.unit != "negotiable":
+        status, reason = "unknown", "薪资面议，无法核实数值门槛"
     elif observed["unit"] != predicate.unit:
         status, reason = "fail", "薪资类型不符合该条件"
     elif predicate.unit == "negotiable":

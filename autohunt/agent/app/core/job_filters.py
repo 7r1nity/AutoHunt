@@ -51,7 +51,7 @@ def filter_schema(depth=4):
                   "text": {"type": "string", "maxLength": 400},
                   "quote": {"type": "string", "maxLength": 1000, "description": "用户的连续原文；text可补齐此原文中的语义省略，不得增添要求"}}
     properties["mode"] = {"type": "string", "enum": ["require", "prefer", "allow"],
-        "description": "叶节点强度：必须=require，尽量/优先=prefer，可以有/也可以=allow；组合节点仅require"}
+        "description": "require=岗位必须满足的事实；prefer=排序偏好；allow=扩大接受范围，不要求JD证明接受，不能作为硬条件。备选方案用any，各方案内部用all；组合节点仅require"}
     properties["salary"] = {"type": ["object", "null"], "description": "薪资叶节点的确定性结构，金额单位元；月薪或面议必须用any组合，不是软allow。",
         "properties": {"unit": {"type": "string", "enum": ["monthly", "daily", "negotiable"]},
             "minimum": {"type": ["integer", "null"], "minimum": 0, "maximum": 10000000},
@@ -119,7 +119,7 @@ def filter_summary(value):
                     if salary.range_mode == "overlap":
                         text = ("日薪" if salary.unit == "daily" else "月薪") + "区间与要求有交集（" + bounds + "）"
                     if salary.applies_to == "internship":
-                        text = "仅限制按日计薪的实习岗位：" + text
+                        text = "仅限制实习岗位：" + text
             return {"require": "", "prefer": "优先（不排除其他）：", "allow": "允许包含："}[node.mode] + text
         parts = [render(child) for child in node.children]
         return "非（" + parts[0] + "）" if node.op == "not" else "（" + (" 且 " if node.op == "all" else " 或 ").join(parts) + "）"
@@ -138,7 +138,10 @@ async def evaluate_filter(generate, expression, facts):
     documents["tags"] = "、".join(str(tag) for tag in facts.get("tags", []))[:4000]
     judgments = [{"index": index, "status": "unknown", "reason": "条件证据不足或模型不可用", "evidence": []}
                  for index in range(len(leaves))]
-    semantic = [index for index, leaf in enumerate(leaves) if leaf.salary is None]
+    semantic = [index for index, leaf in enumerate(leaves) if leaf.salary is None and leaf.mode != "allow"]
+    for index, leaf in enumerate(leaves):
+        if leaf.mode == "allow":
+            judgments[index].update(status="pass", reason="用户允许包含的范围，不是岗位必须满足的事实", evidence=[])
     for index, leaf in enumerate(leaves):
         if leaf.salary:
             judgments[index].update(judge_salary(leaf.salary, facts))

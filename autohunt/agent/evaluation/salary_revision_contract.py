@@ -88,7 +88,7 @@ class SalaryContracts(unittest.IsolatedAsyncioTestCase):
         cases = [("300-500元/天", "实习", "pass"), ("200-400元/天", "实习", "fail"),
                  ("299元/天", "实习", "fail"), ("300元/天", "实习", "pass"),
                  ("面议", "实习", "unknown"), ("未注明", "实习", "unknown"),
-                 ("13-20K", "社招", "pass"), ("5-8K", "实习", "pass"), ("15-20K", "", "pass")]
+                 ("13-20K", "社招", "pass"), ("5-8K", "实习", "unknown"), ("15-20K", "", "unknown")]
         for salary, employment, expected in cases:
             self.assertEqual(partial_filter_status(expression, {"salary": salary, "employment_type": employment}), expected)
 

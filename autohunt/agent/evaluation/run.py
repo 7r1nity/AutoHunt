@@ -303,7 +303,13 @@ async def execution_case(scenario, database):
         check(persisted == statuses, actual, "database final state differs from DAG")
         if scenario in {"success", "repeat_advance"}:
             check(calls == [s["tool"] for s in plan["steps"]] and statuses == ["completed"] * 4, actual, "repeat or lost dependent")
-        elif scenario == "waiting": check(calls == ["job_search_start"] and statuses[1:] == ["pending"] * 3, actual)
+        elif scenario in {"waiting", "expired"}:
+            # Plan expires_at is compatibility/audit metadata after generic
+            # tool authority removal. Search may start; downstream steps must
+            # still wait for results. Concrete expired submission credentials
+            # are separately rejected by delivery_contract("expired").
+            check(calls == ["job_search_start"] and statuses[0] == "waiting_external"
+                  and statuses[1:] == ["pending"] * 3, actual)
         elif scenario == "cancel": check(cancelled and statuses[0] == "claimed" and len(calls) == 1, actual, "cancel must preserve uncertain claim")
         elif scenario == "independent_branch": check(calls == ["job_search_start", "job_results_read"] and statuses[2:] == ["skipped"] * 2, actual)
         else:

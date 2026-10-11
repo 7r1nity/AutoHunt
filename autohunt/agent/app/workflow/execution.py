@@ -124,7 +124,7 @@ async def advance(plan: dict, registry) -> list[dict]:
             try:
                 # A plan over 20 JDs needs the full analysis budget; a 100s cap cut
                 # it off mid-write and reported "结果未确认" instead of a plan.
-                timeout = 180 if step["tool"] == "learning_plan_generate" else 20
+                timeout = 180 if step["tool"] in {"learning_plan_generate", "job_results_refilter"} else 20
                 async with asyncio.timeout(timeout):
                     outcome = await registry.execute(step["tool"], step["arguments"],
                         user_message=step["command_quote"], state=ToolLoopState())
@@ -132,6 +132,8 @@ async def advance(plan: dict, registry) -> list[dict]:
                     step.update(status="completed", result=outcome.content)
                     if step["tool"] == "job_search_start":
                         step.update(status="waiting_external", task_id=outcome.content["id"], wait_started_at=time.time())
+                    if step["tool"] == "job_results_refilter":
+                        step["task_id"] = outcome.content["task_id"]
                     if step["tool"] in {"job_results_read", "resume_document_read"} and outcome.content.get("snapshot_id"):
                         dialogue_change("display", snapshot_id=outcome.content["snapshot_id"])
                 elif outcome.resume_proposal is not None:

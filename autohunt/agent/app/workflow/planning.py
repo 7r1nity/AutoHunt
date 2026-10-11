@@ -195,7 +195,13 @@ async def plan_request(llm, registry, message: str, *, dialogue: dict, condition
             "85以上投递、以下的分析不足表示投递min_score=85，计划max_score=84；85以下且25k以上生成计划还需salary_min=25000。"
             "目前mock_delivery_start仅支持min_score，不支持独立任意条件：先读取其schema，不支持的限制应说明，不得忽略。"
             "任意搜索条件使用filters条件树condition/all/any/not；叶text是完整语义，quote仅作审计，不要求机械复制。"
-            "叶mode=require表示硬条件，prefer表示尽量，allow表示可以包含；允许实习不能改成只要实习。"
+            "先区分准入范围、每个备选方案的硬条件和排序偏好。叶mode=require表示岗位必须满足的事实，prefer仅排序，allow只是允许包含，不需要JD证明接受。"
+            "也可以/也接受是在扩大范围，不得放在all中作为新增require。A或B分别有条件时用any(all(A,A的条件),all(B,B的条件))，共同条件才放在外层all。"
+            "例如正式岗有月薪门槛或面议、实习有独立日薪门槛：any(all(正式岗位,any(月薪门槛,面议)),all(实习岗位,日薪门槛))，门槛金额只能来自有效用户请求或conditions。"
+            "系统说明和schema里的示例数值不是用户条件，不得复制。用户没有提出日薪门槛且会话也没有该门槛时，绝不能增加日薪条件。没有提出独立实习门槛时只添加allow，不得自行创建带门槛的实习备选分支。"
+            "这里正式岗位/实习岗位是当前岗位的类型事实，不是公司是否接受实习生；不要生成‘接受实习岗位’的require叶。仅说实习也可且没有独立实习门槛时用allow，不额外限制正式岗位。"
+            "用户本轮修改搜索条件并要求对已有结果投递时，不能只生成mock_delivery_start：先search_state_update保存完整新条件树，再job_results_refilter刷新已有JD，投递依赖refilter。"
+            "若需要新增候选则按新条件job_search_start，后续依赖搜索；若条件未变化且仅要求投递可直接投递。省略的条件继承，明确修改的条件必须覆盖旧树对应要求，不能丢失。"
             "保留条件否定与组合逻辑，不把不要外包理解成取消搜索；缺JD证据不能猜符合。"
             "搜索异步，结果读取/总结、投递、成长计划依赖搜索真正完成。默认每次新搜索后生成job_results_read(summary=true)。"
             "成长/学习/提升计划同义，分析不足并更新成长计划可由learning_plan_generate输出。"
@@ -279,6 +285,26 @@ def _validate_draft(draft: RequestDraft, registry, message: str, *, dialogue: di
     questions = list(draft.questions)
     revoked_tools = list(previous.get("revoked_tools", [])) if continued else []
     searches = [step for step in steps if step["tool"] == "job_search_start"]
+    updates = [step for step in steps if step["tool"] == "search_state_update"]
+    refreshes = [step for step in steps if step["tool"] == "job_results_refilter"]
+    # A condition write invalidates old decisions. This is a data dependency,
+    # not another interpretation of the user's language or an authorization gate.
+    if updates and not searches and not refreshes and any(step["tool"] in {"mock_delivery_start", "learning_plan_generate"} for step in steps):
+        key = "refilter_results"
+        while any(step["id"] == key for step in steps):
+            key += "_"
+        if len(steps) >= 8:
+            raise PlanValidationError("plan_budget", "请合并步骤，保留条件更新后的证据刷新")
+        refresh = {"id": key, "tool": "job_results_refilter", "arguments": {}, "command_quote": "", "scope_quote": "",
+            "slot_evidence": {}, "depends_on": [step["id"] for step in updates], "missing_slots": [], "user_requested": True}
+        steps.append(refresh)
+        refreshes.append(refresh)
+        goals.append({"quote": "按更新后的条件刷新已有职位证据", "disposition": "steps", "step_ids": [key]})
+    for producer in [*searches, *refreshes]:
+        for update in updates:
+            if update["id"] not in producer["depends_on"]:
+                producer["depends_on"].append(update["id"])
+    evidence_producers = [*searches, *refreshes]
     context = active_run()
     session_id = context.session_id if context else "default"
     overrides = previous.get("condition_overrides", {}) if continued else {}
@@ -369,16 +395,16 @@ def _validate_draft(draft: RequestDraft, registry, message: str, *, dialogue: di
         if submission and not step.get("user_requested"):
             questions.append("请确认是否执行：" + spec.description[:160] + "；参数：" +
                              json.dumps(args, ensure_ascii=False))
-        if name in EVIDENCE_TOOLS and searches:
-            producers = [item["id"] for item in searches
+        if name in EVIDENCE_TOOLS and evidence_producers:
+            producers = [item["id"] for item in evidence_producers
                          if item["id"] in dependency_ancestors(step["id"], steps)]
             producers = [key for key in producers if not any(
                 key in dependency_ancestors(other, steps) for other in producers if other != key)]
-            if not producers and len(searches) == 1:
-                if step["id"] in dependency_ancestors(searches[0]["id"], steps):
+            if not producers and len(evidence_producers) == 1:
+                if step["id"] in dependency_ancestors(evidence_producers[0]["id"], steps):
                     raise PlanValidationError("evidence_order", "证据读取在搜索之前，请修正依赖", tool=name)
-                step["depends_on"].append(searches[0]["id"])
-                producers = [searches[0]["id"]]
+                step["depends_on"].append(evidence_producers[0]["id"])
+                producers = [evidence_producers[0]["id"]]
             if len(producers) != 1:
                 raise PlanValidationError("ambiguous_evidence_binding", "多个搜索需绑定对应的结果来源", tool=name)
             step["evidence_step"] = producers[0]
