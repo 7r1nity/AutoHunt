@@ -4,6 +4,7 @@ import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from "re
 import { ImportedResume, ImportedResumeEditor } from "@/components/imported-resume";
 import { useAgentRuntime } from "@/lib/use-agent-runtime";
 import { RuntimePanel } from "@/components/runtime-panel";
+import { WorkspaceIcon } from "@/components/workspace-icon";
 import { interruptionCommand, terminalRun } from "@/lib/agent-runtime";
 import { createChatTurn, createMessageId } from "@/lib/chat-message";
 import { chatDisplay } from "@/lib/chat-display";
@@ -28,6 +29,16 @@ const navItems = [
   ["plans", "✓", "成长计划"],
   ["settings", "⚙", "模型设置"],
 ] as const;
+
+const viewDescriptions = {
+  overview: "从简历到申请，每一步都有迹可循。",
+  chat: "说出你的目标，一起找到下一份工作。",
+  board: "筛选合适的岗位，跟进每一次申请。",
+  profile: "让你的简历和真实经历，成为 Agent 理解你的起点。",
+  insights: "从已核对的职位中，了解薪资与岗位要求。",
+  plans: "把岗位差距转化为学习与实践。",
+  settings: "管理模型配置与模拟站的工作方式。",
+};
 
 function now() {
   return new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false });
@@ -1678,22 +1689,25 @@ export default function Home() {
 
   return (
     <main className={`app-shell${activeView === "chat" ? " chat-layout" : ""}`}>
+      <a className="skip-link" href="#workspace-content">跳到主要内容</a>
       <aside className="sidebar">
         <div className="brand">
           <span className="brand-mark">A</span>
           <div><strong>AutoHunt</strong><small>求职智能体</small></div>
         </div>
-        <nav>
-          {navItems.map(([id, icon, label]) => (
-            <button key={id} className={activeView === id ? "nav-item active" : "nav-item"} onClick={() => setActiveView(id)}>
-              <span aria-hidden="true">{icon}</span>{label}
+        <nav aria-label="工作区导航">
+          {navItems.map(([id, , label]) => (
+            <button key={id} className={activeView === id ? "nav-item active" : "nav-item"} aria-current={activeView === id ? "page" : undefined} onClick={() => setActiveView(id)}>
+              <WorkspaceIcon name={id} /><span className="nav-label">{label}</span>
+              {id === "board" && counts.review > 0 && <b className="nav-count">{counts.review}</b>}
             </button>
           ))}
         </nav>
         <div className="sidebar-card">
-          <span className="eyebrow">待审核职位</span>
+          <span className="eyebrow">等待你审阅</span>
           <strong>{counts.review}</strong>
-          <small>高质量申请优先于数量</small>
+          <small>{counts.review ? "先了解岗位，再决定下一步。" : "搜索后的职位会集中到申请看板。"}</small>
+          <button type="button" onClick={() => setActiveView("board")}>打开申请看板<WorkspaceIcon name="arrow" /></button>
         </div>
         <div className="profile-mini">
           <span className="avatar">A</span>
@@ -1702,12 +1716,12 @@ export default function Home() {
         </div>
       </aside>
 
-      <section className={`workspace${activeView === "chat" ? " chat-workspace" : ""}`}>
+      <section id="workspace-content" tabIndex={-1} className={`workspace${activeView === "chat" ? " chat-workspace" : ""}`}>
         <header className="topbar">
           <div>
             <span className="mobile-brand">AutoHunt</span>
-            <h1>{activeView === "overview" ? "你的求职工作台" : navItems.find((item) => item[0] === activeView)?.[2]}</h1>
-            <p>{activeView === "chat" ? "规划、搜索与申请，围绕你的目标展开。" : activeView === "overview" ? "你的求职 Agent 已准备好继续工作。" : "Demo 数据会在当前页面会话中即时更新。"}</p>
+            <h1>{activeView === "overview" ? "求职工作台" : navItems.find((item) => item[0] === activeView)?.[2]}</h1>
+            <p>{viewDescriptions[activeView]}</p>
           </div>
           <div className="topbar-actions">
           <button type="button" className="button secondary compact history-reset-button" onClick={() => void openHistoryReset()}>清除历史数据</button>
@@ -1720,15 +1734,18 @@ export default function Home() {
           </div>
         </header>
 
-        {activeView !== "chat" && <div className="notice"><span>i</span>{notice}</div>}
+        {activeView !== "chat" && <div className="notice" role="status"><span aria-hidden="true">i</span>{notice}</div>}
 
-        {activeView !== "chat" && browserTask && browserTask.status !== "idle" && <div className="browser-evidence panel">
+        {activeView !== "chat" && browserTask && browserTask.status !== "idle" && <details className="browser-evidence panel browser-evidence-disclosure" open={browserTask.status === "waiting_for_user"}>
+          <summary>搜索执行信息<span>{({ starting: "准备中", running: "搜索中", paused: "已暂停", waiting_for_user: "需要你接管", completed: "已完成", failed: "未完成", stopped: "已停止" })[browserTask.status]}</span></summary>
+          <div className="browser-evidence-grid">
           <div><small>浏览器</small><strong>{browserTask.browser_mode === "cdp" ? "现有 Chrome（CDP）" : browserTask.browser_mode === "managed" ? "Agent 专用浏览器" : "正在选择"}</strong></div>
-          <div><small>搜索 Run</small><strong>{browserTask.id?.slice(0, 8) ?? "—"}</strong></div>
+          <div><small>任务编号</small><strong>{browserTask.id?.slice(0, 8) ?? "—"}</strong></div>
           <div><small>恢复点</small><strong>{browserTask.checkpoint ?? "尚未记录"}</strong></div>
           <div><small>登录证据</small><strong>{browserTask.login_evidence?.verification_visible ? "等待真人验证" : browserTask.login_evidence?.login_control_visible ? "等待登录/MFA" : browserTask.login_evidence?.authenticated_signal ? "登录已确认" : browserTask.login_evidence?.loading_visible ? "页面加载中" : "检查中"}</strong></div>
-          <div><small>Adapter</small><strong>{browserTask.adapter_version ?? browserTask.selector_version ?? "—"}</strong></div>
-        </div>}
+          <div><small>页面适配版本</small><strong>{browserTask.adapter_version ?? browserTask.selector_version ?? "—"}</strong></div>
+          </div>
+        </details>}
 
         {activeView !== "chat" && deliveryTask && deliveryTask.status !== "idle" && <div className="browser-evidence panel">
           <div><small>投递任务</small><strong>{deliveryTask.status}</strong></div>
@@ -1746,6 +1763,22 @@ export default function Home() {
         </div>}
         {(activeView === "overview" || activeView === "chat" || activeView === "board") && (
           <>
+            {activeView === "overview" && <section className="workspace-intro" aria-label="求职流程">
+              <div className="intro-copy">
+                <h2>{candidateState?.profile.resume_id ? <>简历已就绪。<br />去发现新的机会。</> : <>下一份工作，<br />从你的简历开始。</>}</h2>
+                <p>{candidateState?.profile.resume_id ? "把城市、薪资和岗位要求告诉 Agent。搜索结果会保留在看板，方便你比较与跟进。" : "准备简历，告诉 Agent 你的目标，再把合适的职位变成有进度的申请。"}</p>
+                <div className="intro-actions">
+                  <button className="button primary" onClick={() => setActiveView(candidateState?.profile.resume_id ? "chat" : "profile")}>{candidateState?.profile.resume_id ? "开始对话" : "准备我的简历"}<WorkspaceIcon name="arrow" /></button>
+                  <button className="button secondary" onClick={() => setActiveView(candidateState?.profile.resume_id ? "profile" : "chat")}>{candidateState?.profile.resume_id ? "查看当前简历" : "先聊聊求职目标"}</button>
+                </div>
+                <small>真实网站仅支持只读搜索；投递演练在模拟站进行。</small>
+              </div>
+              <ol className="journey-list">
+                <li><button onClick={() => setActiveView("profile")}><span className="journey-icon"><WorkspaceIcon name="profile" /></span><div><strong>准备简历</strong><p>{candidateState?.profile.resume_id ? "主简历已启用" : "上传简历，建立你的求职起点"}</p></div><span className={candidateState?.profile.resume_id ? "journey-state ready" : "journey-state"}>{candidateState?.profile.resume_id ? "已就绪" : "待准备"}</span></button></li>
+                <li><button onClick={() => setActiveView("chat")}><span className="journey-icon"><WorkspaceIcon name="search" /></span><div><strong>发现机会</strong><p>{jobs.length ? `已保存 ${jobs.length} 个职位` : "按你的方向与条件查找岗位"}</p></div><span className="journey-state">{jobs.length ? "有结果" : "待搜索"}</span></button></li>
+                <li><button onClick={() => setActiveView("board")}><span className="journey-icon"><WorkspaceIcon name="board" /></span><div><strong>跟进申请</strong><p>{counts.applying + counts.waiting ? `${counts.applying + counts.waiting} 个申请正在跟进` : "审阅岗位，记录沟通与投递"}</p></div><span className="journey-state">{counts.applying + counts.waiting ? "进行中" : "待申请"}</span></button></li>
+              </ol>
+            </section>}
             {activeView === "overview" && <section className="stats-grid">
               <article><span className="stat-icon mint">⌕</span><div><small>本次发现职位</small><strong>{automationStats.discovered}</strong><em>真实浏览器事件</em></div></article>
               <article><span className="stat-icon peach">◎</span><div><small>去重后保存</small><strong>{automationStats.stored}</strong><em>{automationStats.duplicates} 个重复</em></div></article>
@@ -1769,7 +1802,17 @@ export default function Home() {
                 <div className="chat-body">
                 <div className="chat-main">
                 <div className="messages chat-thread" role="log" aria-label="对话消息">
-                  {messages.length === 0 && <div className="chat-empty"><span className="bot-avatar">A</span><div><small>发送「搜索 + 关键词」开始职位搜索；例如：搜索深圳的大模型算法岗位</small></div></div>}
+                  {messages.length === 0 && <div className="chat-empty">
+                    <span className="chat-welcome-mark" aria-hidden="true">A</span>
+                    <h2>你想找什么样的工作？</h2>
+                    <p>可以说岗位、城市、薪资，或聊聊你的经历。没有简历时，也可以先明确想找的方向。</p>
+                    <div className="chat-starters">
+                      <button onClick={() => setChatText("帮我找15份工作，上海或深圳，月薪15k以上")}><WorkspaceIcon name="search" /><strong>找到适合的岗位</strong><small>告诉我城市、薪资和方向</small></button>
+                      <button onClick={() => setChatText("查看当前申请进度")}><WorkspaceIcon name="board" /><strong>跟进我的申请</strong><small>查看沟通与投递进展</small></button>
+                      <button onClick={() => setChatText("根据最近的 JD 和我的简历，分析差距并生成成长计划")}><WorkspaceIcon name="plans" /><strong>规划下一步成长</strong><small>从岗位要求找到提升方向</small></button>
+                    </div>
+                    <small className="starter-hint">点击填入消息，确认后再发送。</small>
+                  </div>}
                   {messages.map((message) => (
                     <div className={`message ${message.author}`} key={message.id}>
                       {message.author === "agent" && <span className="bot-avatar">A</span>}
@@ -1805,7 +1848,7 @@ export default function Home() {
                         {message.action === "resume_proposal" && message.resumeProposal && (
                           <div className="resume-proposal-card">
                             <div className="proposal-heading">
-                              <div><span className="eyebrow">RESUME PATCH</span><strong>主简历 v{message.resumeProposal.document_version} 修改提案</strong></div>
+                              <div><span className="eyebrow">简历修改</span><strong>主简历 v{message.resumeProposal.document_version} 修改提案</strong></div>
                               <span>{message.resumeProposal.operations.length} 项</span>
                             </div>
                             <p className="proposal-reason">{message.resumeProposal.reason}</p>
@@ -1864,22 +1907,27 @@ export default function Home() {
                 <div className="chat-input-dock">
                   <div className="quick-actions">
                     <button onClick={() => setChatText("搜索：")}>开始职位搜索</button>
-                    <button onClick={() => setChatText("生成一份针对 Frontend Engineer 的简历")}>生成针对性简历</button>
+                    <button onClick={() => setChatText("根据我选择的岗位生成针对性简历")}>生成针对性简历</button>
                     <button onClick={() => setChatText("我在实习中完成了一个项目：请把下面的经历加入简历，并提取技能与成果：")}>描述经历并更新简历</button>
                     <button onClick={() => setChatText("查看当前申请进度")}>查看申请进度</button>
                     <button onClick={() => setChatText("根据最近的 JD 生成学习计划")}>生成学习计划</button>
                   </div>
                   <form className="composer" onSubmit={sendMessage}>
-                    <button type="button" onClick={() => chatUploadRef.current?.click()} aria-label="上传简历或候选人材料">＋</button>
-                    <input value={chatText} onChange={(event) => setChatText(event.target.value)} placeholder="给 AutoHunt Agent 发消息…" />
+                    <button type="button" onClick={() => chatUploadRef.current?.click()} aria-label="上传简历或候选人材料"><WorkspaceIcon name="plus" /></button>
+                    <textarea rows={2} aria-label="给 Agent 的消息" value={chatText} onChange={(event) => setChatText(event.target.value)} placeholder="说说你想找的工作，或继续之前的任务…" onKeyDown={(event) => {
+                      if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+                        event.preventDefault();
+                        if (chatText.trim() && !runtime.stopping && ((!runtime.busyRun && !conversationLoading) || interruptionCommand(chatText))) event.currentTarget.form?.requestSubmit();
+                      }
+                    }} />
                     {runtime.canInterrupt && <button type="button" className="stop-task" aria-label="停止当前会话任务" title="停止当前会话任务，保留已完成的步骤" disabled={runtime.stopping} onClick={() => void interruptTask()}>{runtime.stopping ? "停止中…" : "■ 停止"}</button>}
-                    <button type="submit" className="send" aria-label="发送" disabled={runtime.stopping || ((Boolean(runtime.busyRun) || conversationLoading) && !interruptionCommand(chatText))}>↑</button>
+                    <button type="submit" className="send" aria-label="发送" disabled={!chatText.trim() || runtime.stopping || ((Boolean(runtime.busyRun) || conversationLoading) && !interruptionCommand(chatText))}><WorkspaceIcon name="send" /></button>
                   </form>
-                  <small className="chat-disclaimer">Agent 可能出错；投递前请核对职位与申请内容。</small>
+                  <small className="chat-disclaimer">Enter 发送，Shift + Enter 换行。投递前请核对职位与申请内容。</small>
                 </div>
                 </div>
                 <aside className="chat-runtime-sidebar" id="chat-runtime-panel" aria-label="任务与上下文" hidden={!chatDetailsOpen}>
-                  <div className="chat-runtime-heading"><div><span className="eyebrow">SESSION INSPECTOR</span><h2>任务与上下文</h2></div><button type="button" className="chat-inspector-close" aria-label="关闭任务详情" onClick={() => setChatDetailsOpen(false)}>×</button></div>
+                  <div className="chat-runtime-heading"><div><h2>任务与上下文</h2></div><button type="button" className="chat-inspector-close" aria-label="关闭任务详情" onClick={() => setChatDetailsOpen(false)}>×</button></div>
                   <RuntimePanel runtime={runtime} notice={setNotice} showSession={false} />
                   <div className="chat-runtime-status" role="status"><small>最近状态</small><p>{notice}</p></div>
                   {browserTask && browserTask.status !== "idle" && <section className="chat-task-evidence"><h3>浏览器任务</h3><dl><div><dt>搜索词</dt><dd>{browserTask.query || "—"}</dd></div><div><dt>状态</dt><dd>{browserTask.detail || browserTask.status}</dd></div><div><dt>恢复点</dt><dd>{browserTask.checkpoint || "—"}</dd></div><div><dt>登录证据</dt><dd>{browserTask.login_evidence?.authenticated_signal ? "登录已确认" : browserTask.takeover_reason || "尚未确认"}</dd></div><div><dt>Adapter</dt><dd>{browserTask.adapter_version || browserTask.selector_version || "—"}</dd></div></dl></section>}
@@ -1890,19 +1938,25 @@ export default function Home() {
               </div>}
 
               {activeView === "overview" && <div className="panel insights-panel">
-                <div className="panel-heading"><div><span className="eyebrow">CURRENT RESUME</span><h2>当前简历搜索职位的技能分布</h2></div><button className="text-button" onClick={() => setActiveView("insights")}>完整报告 →</button></div>
+                <div className="panel-heading"><div><h2>岗位需要哪些能力</h2><p>来自当前简历对应的已保存职位</p></div><button className="text-button" onClick={() => setActiveView("insights")}>查看统计</button></div>
                 <div className="skill-bars">
                   {(insights?.tags ?? []).slice(0, 5).map(({ tag, count }) => (
                     <div className="skill-row" key={tag}><div><span>{tag}</span><strong>{count} 个职位</strong></div><div className="bar"><i style={{ width: `${Math.min(100, count / Math.max(insights?.stored_total ?? 0, 1) * 100)}%` }} /></div></div>
                   ))}
-                  {!insights?.tags.length && <div className="empty-state">暂无职位统计，完成搜索后生成。</div>}
+                  {!insights?.tags.length && <div className="empty-state skills-empty"><WorkspaceIcon name="insights" /><strong>先找到岗位，再了解需求</strong><p>搜索后，在这里查看常见技能与岗位要求。</p><button className="text-button" onClick={() => setActiveView("chat")}>前往 Agent 对话</button></div>}
                 </div>
                 <div className="insight-callout"><span>⌗</span><p>仅统计本地已保存职位，不代表整个招聘市场的趋势。</p></div>
               </div>}
+              {activeView === "overview" && <aside className="panel next-actions">
+                <div className="panel-heading"><h2>继续你的求职准备</h2></div>
+                <button onClick={() => setActiveView("profile")}><WorkspaceIcon name="profile" /><div><strong>完善简历与经历</strong><small>上传材料，核对并更新主简历</small></div><WorkspaceIcon name="arrow" /></button>
+                <button onClick={() => setActiveView("plans")}><WorkspaceIcon name="plans" /><div><strong>查看成长计划</strong><small>让岗位差距变成下一步实践</small></div><WorkspaceIcon name="arrow" /></button>
+                <button onClick={() => setActiveView("settings")}><WorkspaceIcon name="settings" /><div><strong>检查模型配置</strong><small>配置理解、分析与规划所用的模型</small></div><WorkspaceIcon name="arrow" /></button>
+              </aside>}
             </section>}
 
             {activeView === "board" && <section className="board-section panel standalone-board">
-              <div className="section-heading"><div><span className="eyebrow">APPLICATION PIPELINE</span><h2>自动申请看板</h2><div className="board-actions"><button className="button secondary compact" onClick={() => void importMockJob()}>导入直接投递职位</button><button className="button secondary compact" disabled={workflowBusy} onClick={() => void syncMockWorkflow()}>同步模拟站会话</button></div></div><div className="legend"><span><i className="auto" />允许自动投递</span><span><i />需要人工确认</span><span className="click-hint">点击卡片查看详情</span></div></div>
+              <div className="section-heading"><div><h2>每一份申请，都有下一步</h2><div className="board-actions"><button className="button secondary compact" onClick={() => void importMockJob()}>导入直接投递职位</button><button className="button secondary compact" disabled={workflowBusy} onClick={() => void syncMockWorkflow()}>同步模拟站会话</button></div></div><div className="legend"><span><i className="auto" />允许自动投递</span><span><i />需要人工确认</span><span className="click-hint">点击卡片查看详情</span></div></div>
               {workflowNotice && <p className="workflow-feedback">{workflowNotice}</p>}
               <div className="kanban">
                 {(Object.keys(stageMeta) as JobStage[]).map((stage) => (
@@ -1910,7 +1964,7 @@ export default function Home() {
                     <header><div><h3>{stageMeta[stage].title}<b>{counts[stage]}</b></h3><p>{stageMeta[stage].hint}</p></div><button aria-label="更多">•••</button></header>
                     <div className="card-stack">
                       {jobs.filter((job) => job.stage === stage).map((job) => (
-                        <article className="job-card" key={job.id} onClick={() => setDetailJobId(job.id)} title="点击查看职位详情">
+                        <article className="job-card" key={job.id} role="button" tabIndex={0} aria-label={`查看 ${job.role}，${job.company}，匹配分 ${job.score}`} onClick={() => setDetailJobId(job.id)} onKeyDown={(event) => { if (event.target === event.currentTarget && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); setDetailJobId(job.id); } }} title="点击查看职位详情">
                           <div className="job-top"><span className={scoreClass(job.score)}>{job.score}</span><span className={job.mode === "自动投递" ? "mode auto" : "mode"}>{job.review_approved && job.stage === "review" ? "审核通过 · 待授权" : job.mode}</span></div>
                           <h4>{job.role}</h4><p className="company">{job.company} · {job.location}</p><strong className="salary">{job.salary}</strong>
                           <div className="tags">{job.tags.slice(0, 2).map((tag) => <span key={tag}>{tag}</span>)}</div>
@@ -1920,7 +1974,7 @@ export default function Home() {
                           {stage === "review" && <button className="reject" onClick={(event) => { event.stopPropagation(); rejectJob(job.id); }}>跳过这个职位</button>}
                         </article>
                       ))}
-                      {jobs.filter((job) => job.stage === stage).length === 0 && <div className="empty-state">暂无职位</div>}
+                      {jobs.filter((job) => job.stage === stage).length === 0 && <div className="empty-state board-empty"><WorkspaceIcon name={stage === "review" ? "search" : stage === "interview" ? "plans" : "board"} /><strong>{stage === "review" ? "等待发现好机会" : "还没有申请到这一步"}</strong><p>{stage === "review" ? "搜索后的待审核职位会显示在这里。" : stageMeta[stage].hint}</p></div>}
                     </div>
                   </div>
                 ))}
@@ -1931,7 +1985,7 @@ export default function Home() {
 
         {activeView === "profile" && (
           <section className="detail-layout">
-            <div className="panel profile-hero"><span className="avatar large">AI</span><div><span className="eyebrow">候选人结构化画像</span><h2>{candidateState?.profile.role_suggestions[0] ?? "等待简历解析"}</h2><p>{candidateState?.profile.summary ?? "上传简历后，Agent 将提取有证据支持的职业信息。"}</p><div className="tags">{candidateState?.profile.skills.slice(0, 8).map((skill) => <span key={skill}>{skill}</span>)}</div></div><span className="preference-version">偏好 v{candidateState?.preferences.version ?? 0}</span></div>
+            <div className="panel profile-hero"><span className="avatar large">简历</span><div><span className="eyebrow">候选人结构化画像</span><h2>{candidateState?.profile.role_suggestions[0] ?? "等待简历解析"}</h2><p>{candidateState?.profile.summary ?? "上传简历后，Agent 将提取有证据支持的职业信息。"}</p><div className="tags">{candidateState?.profile.skills.slice(0, 8).map((skill) => <span key={skill}>{skill}</span>)}</div></div><span className="preference-version">偏好 v{candidateState?.preferences.version ?? 0}</span></div>
             <div className="two-columns">
               <div className="panel candidate-material-panel">
                 <div className="panel-heading"><div><h2>候选人材料中心</h2><p>{resumes.length} 份简历 · {candidateMaterials.length} 份课程/项目/代码材料</p></div><div className="material-actions"><button className="button secondary compact" onClick={() => uploadRef.current?.click()} disabled={resumeBusy}>{resumeBusy ? "上传中…" : "上传简历"}</button><select value={materialKind} onChange={(event) => setMaterialKind(event.target.value as "course" | "project" | "code")} disabled={resumeBusy} aria-label="材料类型"><option value="course">课程报告</option><option value="project">项目材料</option><option value="code">代码/ZIP</option></select><button className="button primary compact" onClick={() => materialUploadRef.current?.click()} disabled={resumeBusy}>{resumeBusy ? "解析中…" : "上传材料"}</button></div></div>
@@ -1957,7 +2011,7 @@ export default function Home() {
             <div className="panel resume-draft-panel">
               <div className="panel-heading resume-draft-heading">
                 <div>
-                  <span className="eyebrow">EDITABLE RESUME</span>
+                  <span className="eyebrow">简历文本</span>
                   <h2>动态简历草稿</h2>
                   <p>{resumeSourceMode === "verbatim" ? "保留上传简历的内容，自动统一标题、字体与间距。点击编辑即可在排版页面中修改并保存，不自动润色或新增经历。" : "按职业摘要、核心能力与项目成果分区；自动区分架构、技术栈、核心实现与调优结果。"}</p>
                 </div>
@@ -2007,7 +2061,7 @@ export default function Home() {
         {activeView === "insights" && (
           <section className="detail-layout">
             <div className="panel report-hero">
-              <div><span className="eyebrow">CURRENT RESUME · {insights?.tasks_total ?? 0} 次搜索</span><h2>搜索统计</h2><p>{insights?.scope === "latest_legacy_run" ? "旧版搜索任务未记录简历关联：暂仅展示当前简历启用后的最近一次搜索；下一轮搜索起将按主简历累计。" : "仅统计当前主简历对应的搜索结果；包含中断或失败前已记录的职位，其他简历的历史结果不会混入。"}</p></div>
+              <div><span className="eyebrow">当前简历 · {insights?.tasks_total ?? 0} 次搜索</span><h2>搜索统计</h2><p>{insights?.scope === "latest_legacy_run" ? "旧版搜索任务未记录简历关联：暂仅展示当前简历启用后的最近一次搜索；下一轮搜索起将按主简历累计。" : "仅统计当前主简历对应的搜索结果；包含中断或失败前已记录的职位，其他简历的历史结果不会混入。"}</p></div>
             </div>
             {insights ? (
               <>
@@ -2068,7 +2122,7 @@ export default function Home() {
           <section className="detail-layout learning-page">
             <RuntimePanel runtime={runtime} notice={setPlanNotice} />
             <div className="panel plan-header">
-              <div><span className="eyebrow">JD EVIDENCE · CURRENT RESUME</span><h2>成长计划</h2><p>对照当前主简历与真实 JD，优先分析专业技术、行业知识和实习方向。明确点击后才调用模型生成计划；岗位原文可追溯，完成时需提交实践证据。</p></div>
+              <div><span className="eyebrow">依据当前简历与岗位要求</span><h2>成长计划</h2><p>对照当前主简历与真实 JD，优先分析专业技术、行业知识和实习方向。明确点击后才调用模型生成计划；岗位原文可追溯，完成时需提交实践证据。</p></div>
               <div className="plan-generate"><input aria-label="计划关注方向" value={planFocus} maxLength={400} onChange={(event) => setPlanFocus(event.target.value)} placeholder="可选：本次优先关注的岗位或方向" /><button className="button primary" disabled={planBusy || !candidateState?.profile.resume_id} onClick={() => void generateLearningPlan()}>{planBusy ? "处理中…" : "分析差距并生成计划"}</button></div>
             </div>
             {planNotice && <div className="panel workflow-feedback">{planNotice}</div>}
@@ -2100,7 +2154,7 @@ export default function Home() {
         {activeView === "settings" && (
           <section className="detail-layout settings-layout">
             <div className="panel settings-hero">
-              <div><span className="eyebrow">BRING YOUR OWN KEY</span><h2>模型连接</h2><p>API Key 只发送到本机后端并加密保存；页面不会读取或回显已保存的 Key。</p></div>
+              <div><span className="eyebrow">本机模型配置</span><h2>模型连接</h2><p>API Key 只发送到本机后端并加密保存；页面不会读取或回显已保存的 Key。</p></div>
               <span className={llmConfigured ? "connection-badge ready" : "connection-badge"}>{llmConfigured ? "已配置" : "未配置"}</span>
             </div>
             <form className="panel settings-form" onSubmit={saveLlmConfig}>
@@ -2123,7 +2177,7 @@ export default function Home() {
               <div className="settings-actions full"><button type="submit" className="button primary" disabled={llmBusy}>{llmBusy ? "处理中…" : "保存设置"}</button><button type="button" className="button secondary" disabled={llmBusy || !llmConfigured} onClick={testLlmConnection}>测试连接</button></div>
             </form>
             <form className="panel settings-form workflow-settings" onSubmit={saveWorkflowSettings}>
-              <div className="field full"><span className="eyebrow">LOCAL SIMULATOR ONLY</span><h2>模拟站会话与每日任务</h2><p>默认关闭。仅操作本地模拟招聘网站；验证码和 MFA 仍由你人工完成。自动投递需单独开启，并为每个岗位生成一次性授权；仅处理开启后收到的回复。定时任务要求 Agent 后端持续运行。</p></div>
+              <div className="field full"><span className="eyebrow">仅限本地模拟站</span><h2>模拟站会话与每日任务</h2><p>默认关闭。仅操作本地模拟招聘网站；验证码和 MFA 仍由你人工完成。自动投递需单独开启，并为每个岗位生成一次性授权；仅处理开启后收到的回复。定时任务要求 Agent 后端持续运行。</p></div>
               <div className="field full"><label className="workflow-toggle"><input type="checkbox" checked={workflowSettings?.monitor_enabled ?? false} onChange={(event) => setWorkflowSettings((current) => current ? { ...current, monitor_enabled: event.target.checked, auto_submit: event.target.checked && current.auto_submit, daily_enabled: event.target.checked && current.daily_enabled } : current)} />监测手动沟通和 HR 回复，自动同步申请看板</label></div>
               <div className="field full"><label className="workflow-toggle"><input type="checkbox" checked={workflowSettings?.auto_submit ?? false} onChange={(event) => setWorkflowSettings((current) => current ? { ...current, monitor_enabled: event.target.checked || current.monitor_enabled, auto_submit: event.target.checked } : current)} />HR 明确回复后，自动在模拟站发送简历</label></div>
               <div className="field full"><label className="workflow-toggle"><input type="checkbox" checked={workflowSettings?.daily_enabled ?? false} onChange={(event) => setWorkflowSettings((current) => current ? { ...current, monitor_enabled: event.target.checked || current.monitor_enabled, daily_enabled: event.target.checked } : current)} />每天定时搜索并联系高匹配岗位</label></div>
@@ -2140,7 +2194,7 @@ export default function Home() {
 
         {historyResetOpen && <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="history-reset-title" aria-describedby="history-reset-description" onKeyDown={(event) => { if (event.key === "Escape" && !historyResetBusy) setHistoryResetOpen(false); }}>
           <div className="delivery-modal panel history-reset-modal">
-            <span className="eyebrow">TEMPORARY · LOCAL MAINTENANCE</span>
+            <span className="eyebrow">本地数据管理</span>
             <h2 id="history-reset-title">清除历史数据？</h2>
             <p id="history-reset-description">清空所有会话、简历与上传材料、求职偏好与搜索条件、搜索记录、申请看板及成长计划。同时关闭监测和每日任务。</p>
             <p>保留模型配置、API Key、浏览器登录、规则及技能。清理前自动备份到本地；有任务运行时不会清理。</p>
@@ -2159,7 +2213,7 @@ export default function Home() {
           <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label="职位详情" onClick={() => setDetailJobId(null)}>
             <div className="delivery-modal job-detail-modal panel" onClick={(event) => event.stopPropagation()}>
               <div className="job-detail-top">
-                <span className="eyebrow">JOB DETAIL · {stageMeta[detailJob.stage].title}</span>
+                <span className="eyebrow">职位详情 · {stageMeta[detailJob.stage].title}</span>
                 <button className="text-button" onClick={() => setDetailJobId(null)}>关闭 ✕</button>
               </div>
               <h2>{detailJob.role}</h2>
@@ -2189,7 +2243,7 @@ export default function Home() {
 
         {deliveryPreview && <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label="投递预览">
           <div className="delivery-modal panel">
-            <span className="eyebrow">DELIVERY PREVIEW</span><h2>确认本次投递</h2>
+            <span className="eyebrow">投递预览</span><h2>确认本次投递</h2>
             <dl><div><dt>职位</dt><dd>{deliveryPreview.title}</dd></div><div><dt>公司</dt><dd>{deliveryPreview.company}</dd></div><div><dt>简历</dt><dd>{deliveryPreview.resume_label} · v{deliveryPreview.resume_version}</dd></div><div><dt>简历快照</dt><dd>{deliveryPreview.resume_digest.slice(0, 12)}…</dd></div><div><dt>动作</dt><dd>{deliveryPreview.action_summary}</dd></div></dl>
             <p>授权只绑定这一个职位、当前简历版本和“发送简历”动作，30 分钟过期且只能消费一次。确认后若简历变化，系统会拒绝旧预览。验证码、MFA 或结果无法确认时必须暂停。</p>
             <div className="modal-actions"><button className="button secondary" onClick={() => setDeliveryPreview(null)}>取消</button><button className="button primary" onClick={authorizeDelivery}>确认并生成一次性授权</button></div>
