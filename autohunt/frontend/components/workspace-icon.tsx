@@ -20,7 +20,7 @@ export type WorkspaceIconName = keyof typeof paths;
 export function WorkspaceIcon({ name, className, style }: {
   name: WorkspaceIconName; className?: string; style?: CSSProperties;
 }) {
-  return <svg className={className} style={style} width="20" height="20" viewBox="0 0 24 24"
-    fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"
+  return <svg className={["workspace-icon", className].filter(Boolean).join(" ")} style={style} width="20" height="20" viewBox="0 0 24 24"
+    fill="none" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"
     aria-hidden="true" focusable="false"><path d={paths[name]} /></svg>;
 }

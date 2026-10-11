@@ -2,6 +2,12 @@
 
 记录已交付变更、验证范围及尚未解决的问题。日期采用 Asia/Shanghai；未完成项不代表已发布能力。
 
+## 2026-10-11 — SVG 扩展样式 hydration 冲突
+
+- 用户提供的属性差异包含 `--darkreader-inline-stroke`：Dark Reader 在 hydration 前为 SVG 描边注入行内样式，与 React 的无行内样式输出冲突。工作区图标描边颜色从 SVG 属性改到全局 CSS，保留尺寸、路径、颜色继承、打印和装饰性语义；不新增 hydration 警告屏蔽，也不禁用 SSR。
+- 新增离线图标渲染契约，12 种图标共 87 项检查通过；前端类型检查和生产构建通过。干净浏览器刷新验证 CSS 描边生效、无控制台警告；未在用户安装 Dark Reader 的配置中执行扩展 E2E，需用户刷新确认。不修改任务、授权或历史数据。
+- 回归命令：在 `autohunt/` 运行 `node agent/evaluation/frontend_icon_contract.cjs`。
+
 ## 2026-10-11 — 求职工作区前端设计重构
 
 - 使用用户指定的 `frontend-design` skill，先制定颜色/字体/布局与自检，再实现冷白、雾蓝、深蓝的统一工作区。移除多层旧主题覆盖，保留简历文档和打印结构；统一 SVG 导航图标、按钮、看板、材料、统计与成长页面。
