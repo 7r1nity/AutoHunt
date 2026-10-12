@@ -68,8 +68,8 @@ def preflight(steps: list[dict], goals: list[dict], sources: list[str], tools: s
               check_goal_coverage: bool = True) -> None:
     """Validate shape first; goal coverage belongs to the normalized DAG.
 
-    A goal names its terminal steps, not every implementation prerequisite.
-    Dependency ancestors are covered too, but unrelated extra actions are not.
+    Goal annotations describe terminal steps and their ancestors for auditing.
+    Missing annotations warn; they cannot independently grant or revoke authority.
     """
     _warnings.set([])       # isolated per concurrent planning context
     issues: list[ValidationIssue] = []
@@ -79,7 +79,7 @@ def preflight(steps: list[dict], goals: list[dict], sources: list[str], tools: s
     covered = set()
     for goal in goals:
         if not set(goal["step_ids"]) <= ids or goal["disposition"] == "steps" and not goal["step_ids"]:
-            issues.append(ValidationIssue("goal_binding", "repair", "目标没有绑定到有效步骤"))
+            issues.append(ValidationIssue("goal_binding", "repair", "目标没有绑定到有效步骤", severity="warn"))
         covered.update(goal["step_ids"])
     citations = [(f"goals[{index}].quote", "", goal["quote"]) for index, goal in enumerate(goals)]
     citations.extend((f"steps[{step['id']}].{field}", step["tool"], step[field])
@@ -108,7 +108,7 @@ def preflight(steps: list[dict], goals: list[dict], sources: list[str], tools: s
         missing = sorted(ids - covered)
         if missing:
             issues.append(ValidationIssue("uncovered_step", "repair", "规划包含未绑定用户目标的步骤",
-                                          field=",".join(f"steps.{key}" for key in missing)))
+                                          field=",".join(f"steps.{key}" for key in missing), severity="warn"))
     if issues:
         issues = list(dict.fromkeys(issues))
         _record_warnings([issue for issue in issues if not issue.blocking])

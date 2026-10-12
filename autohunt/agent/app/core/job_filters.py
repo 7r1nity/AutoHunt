@@ -100,6 +100,13 @@ def filter_digest(expression):
                                     ensure_ascii=False, sort_keys=True).encode()).hexdigest()
 
 
+def filter_facts_digest(facts):
+    """Bind reusable judgments to all supplied JD facts, not just one quote."""
+    supplied = {key: facts.get(key) or "" for key in
+                ("title", "company", "location", "salary", "description", "tags")}
+    return hashlib.sha256(json.dumps(supplied, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+
+
 def filter_summary(value):
     if value is None:
         return "未设置语义限制"
@@ -126,10 +133,11 @@ def filter_summary(value):
     return render(node)
 
 
-async def evaluate_filter(generate, expression, facts):
+async def evaluate_filter(generate, expression, facts, *, prior_evidence=None):
     """One bounded no-tools call. Timeout, mock provider, invalid evidence fail closed."""
     expression = validate_filter(expression) if expression is not None else None
-    result = {"status": "pass", "digest": filter_digest(expression), "conditions": []}
+    result = {"status": "pass", "digest": filter_digest(expression), "conditions": [],
+              "facts_digest": filter_facts_digest(facts)}
     if expression is None:
         return result
     leaves = expression.leaves()
@@ -145,6 +153,25 @@ async def evaluate_filter(generate, expression, facts):
     for index, leaf in enumerate(leaves):
         if leaf.salary:
             judgments[index].update(judge_salary(leaf.salary, facts))
+    # Reuse only the same semantic predicate with still-verifiable JD evidence.
+    # Different wording is interpreted by the model, never guessed equivalent.
+    for index in list(semantic):
+        leaf = leaves[index]
+        if (prior_evidence or {}).get("facts_digest") != result["facts_digest"]:
+            continue  # Legacy or changed facts must be judged again.
+        prior = next((item for item in (prior_evidence or {}).get("conditions", [])
+                      if item.get("text", "").strip() == leaf.text.strip()
+                      and item.get("status") in {"pass", "fail"}
+                      and item.get("salary") is None
+                      and item.get("mode") != "allow"), None)
+        if not prior:
+            continue
+        evidence = prior.get("evidence", [])
+        if evidence and all(isinstance(item, dict) and item.get("field") in documents
+                            and isinstance(item.get("quote"), str) and len(item["quote"].strip()) >= 2
+                            and item["quote"] in documents[item["field"]] for item in evidence):
+            judgments[index].update(status=prior["status"], reason=prior.get("reason", ""), evidence=evidence, reused=True)
+            semantic.remove(index)
     try:
         if not semantic:
             return _filter_result(result, expression, leaves, judgments)
@@ -205,7 +232,9 @@ def partial_filter_status(expression, facts):
 
 def _filter_result(result, expression, leaves, judgments):
     result["status"] = combine(expression, iter(item["status"] for item in judgments))
-    result["conditions"] = [{"text": leaf.text, "quote": leaf.quote or leaf.text, "mode": leaf.mode, **item} for leaf, item in zip(leaves, judgments)]
+    result["conditions"] = [{"text": leaf.text, "quote": leaf.quote or leaf.text, "mode": leaf.mode,
+                              "salary": leaf.salary.model_dump(mode="json") if leaf.salary else None,
+                              **item} for leaf, item in zip(leaves, judgments)]
     result["preferences"] = [item for item in result["conditions"] if item["mode"] == "prefer"]
     result["ranking_applied"] = False  # Annotated preference, not global-site ranking.
     return result

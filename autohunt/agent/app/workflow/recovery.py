@@ -73,7 +73,7 @@ def recover_plan(run: dict, *, session_id: str, stamp: str,
         if status == "completed":
             step["retained_result"] = True
             continue
-        if step["tool"] in revoked:
+        if step["tool"] in revoked or step.get("withdrawn"):
             step.update(status="blocked", detail="用户已撤回此动作，续接不恢复授权")
             continue
         if step["tool"] == "job_search_start" and step.get("task_id") and step.get("arguments", {}).get("dry_run"):

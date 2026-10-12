@@ -78,6 +78,7 @@ agent_tool_registry = AgentToolRegistry(
     memory=memory_store,
     learning_plans=learning_plans,
     mock_workflow=mock_workflow,
+    response_llm=llm_manager,
 )
 
 # --- Three-layer intent routing: rules → small model (API placeholder) → LLM ---

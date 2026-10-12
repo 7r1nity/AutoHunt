@@ -30,6 +30,8 @@ class RunContext:
     # scope), NOT a generic token checked against dialogue or an argument hash.
     # Only the plan runner populates it; submission has its own preview/token.
     action_authority: dict | None = None
+    cancellation_requested: Callable[[], bool] | None = None
+    plan_lookup: Callable[[str], dict | None] | None = None
 
 
 current_run: ContextVar[RunContext | None] = ContextVar("autohunt_run", default=None)

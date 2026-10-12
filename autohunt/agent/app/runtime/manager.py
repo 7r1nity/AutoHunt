@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import hashlib
 import json
 import time
 from typing import AsyncIterator
@@ -231,7 +232,9 @@ class AgentRuntime:
                                          request_records=lambda: self.store.request_records(run["session_id"]),
                                          resume_task=lambda message: self.continue_task(run_id, message),
                                          plan_reader=lambda: self.active_plan(run["session_id"]),
+                                         plan_lookup=lambda plan_id: self.plan_for_revision(run["session_id"], plan_id),
                                          revise_task=lambda revision, message: self.revise_plan(run_id, revision, message),
+                                         cancellation_requested=lambda: bool(self.store.get(run_id)["cancel_requested"]),
                                          enforce_task_scope=True)
                     token = current_run.set(context)
                     started = time.monotonic()
@@ -249,6 +252,9 @@ class AgentRuntime:
                             or plan_followup or resuming_request or ((context.dialogue or {}).get("instruction_request") or {}).get("status") == "clarifying"
                             else max(self.chat_timeout, PLANNING_TIMEOUT + 20) if not shortcut_safe(run["payload"].get("message", ""))
                             else self.chat_timeout)
+                        if run["kind"] == "chat":
+                            from ..workflow.presentation import TIMEOUT as RESPONSE_TIMEOUT
+                            budget += RESPONSE_TIMEOUT + 2
                         async with asyncio.timeout(budget):
                             if run["kind"] == "learning_plan":
                                 self.store.event(run_id, "progress", {"detail": "正在核对 JD 证据并生成计划"})
@@ -294,6 +300,8 @@ class AgentRuntime:
                             selection = (self.store.get(run_id)["checkpoint"] or {}).get("response_selection", {})
                             self.store.event(run_id, "response", {"result": result, **selection,
                                 "elapsed_ms": round((time.monotonic()-started)*1000)})
+                            for snapshot_id in selection.get("displayed_snapshot_ids", []):
+                                self.store.mutate_dialogue(run["session_id"], {"op": "display", "snapshot_id": snapshot_id})
                             if run["kind"] == "chat":
                                 planning_failure = (self.store.get(run_id)["checkpoint"] or {}).get("planning_failure")
                                 if planning_failure:
@@ -386,7 +394,7 @@ class AgentRuntime:
 
     async def watch_plan(self, run_id: str):
         """Observe asynchronous dependencies without holding model/session slots."""
-        from ..workflow.execution import advance, DONE, persist, completion_lines
+        from ..workflow.execution import advance, DONE, persist, completion_steps
         run = self.store.get(run_id)
         # A missing plan checkpoint must not raise a bare KeyError that hides the
         # reason. The clarifying questions survive in the dialogue state, so the
@@ -485,7 +493,8 @@ class AgentRuntime:
                             mutate_dialogue=lambda op: self.store.mutate_dialogue(run["session_id"], op),
                             retrieve_history=lambda query, limit: self.jobs.search_conversation_history(run["session_id"], query, limit=limit),
                             request_records=lambda: self.store.request_records(run["session_id"]),
-                            enforce_task_scope=True, user_message=plan["original"])
+                            enforce_task_scope=True, user_message=plan["original"],
+                            cancellation_requested=lambda: bool(self.store.get(run_id)["cancel_requested"]))
                         token = current_run.set(context)
                         try:
                             self.store.update(run_id, status="running")
@@ -495,17 +504,52 @@ class AgentRuntime:
                             current_run.reset(token)
             if all(step["status"] in DONE for step in plan["steps"]):
                 if not self.store.has_event(run_id, "workflow_summary") and any(step.get("task_id") or step.get("proposal_id") for step in plan["steps"]):
-                    lines = completion_lines(plan, self.store.all_events(run_id))
-                    if lines:
-                        message = "任务编排结果：\n\n" + "\n\n".join(lines)
-                        self.jobs.add_conversation_message("assistant", message, conversation_id=run["session_id"], run_id=f"plan:{run_id}")
-                        self.store.event(run_id, "workflow_summary", {"message": message, "statistics_changed": True, "plans_changed": True})
+                    lock = self.sessions.setdefault(run["session_id"], asyncio.Lock())
+                    async with lock:
+                        latest = (self.store.get(run_id)["checkpoint"] or {}).get("plan") or {}
+                        if latest.get("revision", 0) > plan.get("revision", 0):
+                            plan = copy.deepcopy(latest)
+                            continue
+                        selected = completion_steps(plan, self.store.all_events(run_id))
+                        if selected:
+                            await self.publish_plan_answer(run_id, plan, selected)
+                if self.store.get(run_id)["cancel_requested"]:
+                    return
                 uncertain = any(step["status"] == "outcome_indeterminate" for step in plan["steps"])
-                failed = any(step["status"] in {"failed", "blocked", "skipped"} for step in plan["steps"])
+                failed = any(step["status"] in {"failed", "blocked", "skipped"}
+                             and (step.get("failure") or {}).get("code") != "user_withdrawn" for step in plan["steps"])
                 self.finish(run_id, "outcome_indeterminate" if uncertain else "failed" if failed else "completed",
                     "所有步骤已结束；部分步骤未成功，请查看逐步记录" if uncertain or failed else "完整请求执行结束")
                 return
             await asyncio.sleep(1)
+
+    async def publish_plan_answer(self, run_id: str, plan: dict, steps: list[dict]):
+        """Persist presentation before publishing; recovery never reruns tools."""
+        from ..workflow.presentation import compose
+        run = self.store.get(run_id)
+        fingerprint = hashlib.sha256(json.dumps({"id": plan["id"], "revision": plan.get("revision", 0),
+            "original": plan.get("original"), "answers": plan.get("answers"), "goals": plan.get("goals"),
+            "steps": steps}, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+        prepared = next((event["data"] for event in reversed(self.store.all_events(run_id))
+            if event["kind"] == "plan_answer_prepared" and event["data"].get("fingerprint") == fingerprint), None)
+        if prepared is None:
+            started = time.monotonic()
+            self.store.event(run_id, "response_synthesis", {"status": "started", "plan_id": plan["id"]})
+            async with self.slots:
+                answer = await compose(plan, steps, getattr(self.agent.tool_registry, "response_llm", None))
+            prepared = {"fingerprint": fingerprint, "message": answer.text, "snapshot_ids": answer.snapshot_ids,
+                "mode": answer.mode, "reason": answer.reason, "elapsed_ms": round((time.monotonic()-started)*1000)}
+            self.store.event(run_id, "plan_answer_prepared", prepared)
+            self.store.event(run_id, "response_synthesis", {"status": "finished", "plan_id": plan["id"],
+                **{key: prepared[key] for key in ("mode", "reason", "elapsed_ms")}})
+        if self.store.get(run_id)["cancel_requested"]:
+            return
+        message = prepared["message"]
+        if message and not self.store.has_event(run_id, "workflow_summary"):
+            self.jobs.add_conversation_message("assistant", message, conversation_id=run["session_id"], run_id=f"plan:{run_id}")
+            self.store.event(run_id, "workflow_summary", {"message": message, "statistics_changed": True, "plans_changed": True})
+            for snapshot_id in prepared["snapshot_ids"]:
+                self.store.mutate_dialogue(run["session_id"], {"op": "display", "snapshot_id": snapshot_id})
 
     async def complete_workflow(self, run_id: str, browser):
         """Post-search actions are finite, resume/task bound, claimed before effects.
@@ -839,23 +883,38 @@ class AgentRuntime:
         return copy.deepcopy(candidates[0][1])
 
     async def revise_plan(self, run_id: str, revision: dict, message: str):
-        """Called under the session execution lock; no new action plan is launched."""
+        """Session-locked edits; terminal receipts are retained in child additions."""
         from .context import active_run, dialogue_change
         from ..core.models import ChatResponse, AgentLane
         from ..growth.requests import resume_stamp
         from ..workflow.revision import RevisionDraft, edited_plan
         from ..workflow.requests import TaskRequest
         session_id = self.store.get(run_id)["session_id"]
-        target = self.active_plan(session_id)
+        target = self.plan_for_revision(session_id, revision.get("plan_id"))
         if target is None:
             raise ValueError("没有唯一可修改的原任务")
         edit = RevisionDraft.model_validate(revision)
         stamp = resume_stamp(self.resume_workspace.read_document(), self.agent.candidate_state)
         updated = edited_plan(target, edit, self.agent.tool_registry, stamp=stamp, session_id=session_id, message=message)
-        owner = next(run for run in self.store.list(session_id, active=True, limit=None)
-                     if ((run.get("checkpoint") or {}).get("plan") or {}).get("id") == target["id"])
-        self.store.update(owner["id"], checkpoint={**(owner["checkpoint"] or {}), "plan": updated},
-                          status="waiting_user" if edit.pause else "running")
+        paused = updated["paused"]
+        sources = [run for run in self.store.list(session_id, limit=None)
+                   if ((run.get("checkpoint") or {}).get("plan") or {}).get("id") == target["id"]]
+        owner = next((run for run in sources if run["status"] not in TERMINAL), None)
+        if owner is None:
+            # Search may finish while the model is preparing an addition. Keep
+            # that run immutable and continue only the new steps in this turn.
+            source = sources[0]
+            owner = self.store.get(run_id)
+            for step in updated["steps"]:
+                if step["status"] == "completed":
+                    step["retained_result"] = True
+            self.store.update(run_id, parent_id=source["id"])
+            for event in self.store.all_events(source["id"]):
+                if event["kind"] in {"browser_summary", "report_reference"}:
+                    self.store.event(run_id, "report_reference", {"task_id": event["data"].get("task_id"),
+                        "report_rendered": event["data"].get("report_rendered", True), "source_run_id": source["id"]})
+        self.store.update(owner["id"], checkpoint={**(owner["checkpoint"] or {}), "phase": "action_plan", "plan": updated},
+                          status="waiting_user" if paused else "running")
         # A compact instruction is memory; the complete plan above remains the checkpoint.
         dialogue_change("instruction", request=updated)
         dialogue_change("task", kind="plan_id", id=updated["id"], status=updated["status"], bind=True)
@@ -866,9 +925,11 @@ class AgentRuntime:
             amendments=[{"message": item, "source": run_id, "fields": {}} for item in updated.get("answers", [])][-12:])
         dialogue_change("request_state", request=anchor.model_dump())
         self.store.event(owner["id"], "plan_revision", {"revision": updated["revision"], "source_run_id": run_id,
-                         "updated_steps": [item.step_id for item in edit.updates], "paused": edit.pause})
+                         "updated_steps": [item.step_id for item in edit.updates],
+                         "added_steps": [item.id for item in edit.add_steps],
+                         "removed_steps": edit.remove_steps, "paused": paused})
         browser_id = (owner["checkpoint"] or {}).get("browser_id")
-        if edit.pause and browser_id and self.browser.current().id == browser_id and self.browser.current().status in {"starting", "running"}:
+        if paused and browser_id and self.browser.current().id == browser_id and self.browser.current().status in {"starting", "running"}:
             await self.browser.pause()
         details = []
         for item in edit.updates:
@@ -882,9 +943,25 @@ class AgentRuntime:
             else:
                 from ..core.replies import tool_label
                 details.append(tool_label(step["tool"]) + "的未执行参数已更新")
-        return ChatResponse(message=("已暂停原任务的新动作；已有进度保留。" if edit.pause else "原任务条件已更新。") +
+        for item in edit.add_steps:
+            from ..core.replies import tool_label
+            details.append("已追加" + tool_label(item.tool) + "，将在其前置步骤完成后执行")
+        for step_id in edit.remove_steps:
+            from ..core.replies import tool_label
+            step = next(item for item in updated["steps"] if item["id"] == step_id)
+            details.append("已取消后续" + tool_label(step["tool"]))
+        return ChatResponse(message=("已暂停原任务的新动作；已有进度保留。" if paused else "原任务已更新。") +
             ("\n\n" + "\n".join(details) if details else "") +
-            "\n\n其他要求及依赖保留，本次没有生成计划或投递。" + ("可说「继续任务」。" if edit.pause else ""), lane=AgentLane.APPLICATION)
+            "\n\n已有结果及任务依赖保留。" + ("可说「继续任务」。" if paused else ""), lane=AgentLane.APPLICATION)
+
+    def plan_for_revision(self, session_id: str, plan_id: str | None) -> dict | None:
+        if not plan_id:
+            return self.active_plan(session_id)
+        for run in self.store.list(session_id, limit=None):
+            plan = (run.get("checkpoint") or {}).get("plan") or {}
+            if plan.get("id") == plan_id and not run["cancel_requested"]:
+                return copy.deepcopy(plan)
+        return None
 
     async def continue_task(self, run_id: str, message: str):
         """Resolve a user continuation against durable plans before model routing."""

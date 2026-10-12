@@ -197,6 +197,8 @@ class LearningPlanService:
             "search_task_id": task_id,
             "job_sources": [
                 {"id": int(job["id"]), "title": str(job["title"])[:120],
+                 "score": job["score"], "salary": job["salary"],
+                 "company": job["company"], "location": job["location"],
                  "source_url": str(job["source_url"])[:500]}
                 for job in jobs
             ],

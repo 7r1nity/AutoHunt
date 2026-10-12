@@ -13,7 +13,7 @@ from app.llm.base import LLMResult
 from app.runtime.context import RunContext, current_run
 from app.workflow.execution import begin
 from app.workflow.planning import RequestDraft, plan_request, validate_draft
-from app.workflow.validation import PlanValidationError, preflight
+from app.workflow.validation import PlanValidationError, preflight, preflight_warnings
 from .condition_refresh_contract import alternatives
 
 TRACES = []
@@ -126,18 +126,25 @@ class Contracts(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("arguments", traces[0]["steps"][0])
         self.assertNotIn("quote", traces[0]["goals"][0])
 
-    async def test_unrelated_extra_submission_remains_rejected(self):
+    async def test_missing_goal_link_does_not_override_submission_confirmation(self):
         steps = [step("search","job_search_start"), step("extra_delivery","mock_delivery_start",{"min_score":85})]
-        with self.assertRaises(PlanValidationError) as caught: self.validate(draft(steps,["search"]))
-        self.assertEqual(caught.exception.issue.code,"uncovered_step")
-        self.assertIn("extra_delivery",caught.exception.issue.field)
+        steps[1]["user_requested"] = False
+        plan = self.validate(draft(steps,["search"]))
+        self.assertEqual(plan["status"], "clarifying")
+        warnings = preflight_warnings()
+        self.assertTrue(any(item["code"] == "uncovered_step" and item["severity"] == "warn" for item in warnings))
+        self.assertFalse(next(item for item in plan["steps"] if item["id"] == "extra_delivery")["user_requested"])
+
+    async def test_goal_metadata_omission_is_warning_for_requested_steps(self):
+        plan = self.validate(draft([step("update", "search_state_update")], ["missing"]))
+        self.assertEqual(plan["status"], "ready")
+        self.assertTrue(any(item["code"] == "goal_binding" for item in preflight_warnings()))
 
     async def test_invalid_graphs_remain_rejected(self):
         cases = [([step("x","search_state_read",deps=["missing"])],["x"],"invalid_dependency"),
                  ([step("x","search_state_read",deps=["y"]),step("y","search_state_read",deps=["x"])],["x"],"dependency_cycle"),
                  ([step("x","search_state_read"),step("x","search_state_read")],["x"],"duplicate_step_ids"),
-                 ([step("x","invented_tool")],["x"],"unknown_tool"),
-                 ([step("x","search_state_read")],["missing"],"goal_binding")]
+                 ([step("x","invented_tool")],["x"],"unknown_tool")]
         for steps,roots,code in cases:
             with self.subTest(code=code):
                 with self.assertRaises(PlanValidationError) as caught: self.validate(draft(steps,roots))

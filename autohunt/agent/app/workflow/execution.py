@@ -37,7 +37,7 @@ def render_step(step: dict) -> str:
     return public_reply(tool_reply(step["tool"], step["status"], result))
 
 
-def completion_lines(plan: dict, events: list[dict]) -> list[str]:
+def completion_steps(plan: dict, events: list[dict]) -> list[dict]:
     """Do not republish a search report already delivered by its task watcher.
 
     Deduplicate by this run's durable task identity, not by text or tool name.
@@ -49,7 +49,7 @@ def completion_lines(plan: dict, events: list[dict]) -> list[str]:
     rendered = {step_id for event in events if event["kind"] == "response"
                 and event["data"].get("plan_id") == plan["id"]
                 for step_id in event["data"].get("completed_step_ids", [])}
-    lines = []
+    selected = []
     for step in plan["steps"]:
         if step["status"] == "completed" and (step.get("retained_result") or step["id"] in rendered):
             continue
@@ -62,8 +62,13 @@ def completion_lines(plan: dict, events: list[dict]) -> list[str]:
                     and isinstance(result.get("search_task"), dict)
                     and result["search_task"].get("id") in published):
                 continue
-        lines.append(render_step(step))
-    return lines
+        selected.append(step)
+    return selected
+
+
+def completion_lines(plan: dict, events: list[dict]) -> list[str]:
+    """Compatibility renderer; production completion uses model synthesis."""
+    return [render_step(step) for step in completion_steps(plan, events)]
 
 
 async def advance(plan: dict, registry) -> list[dict]:
@@ -94,16 +99,21 @@ async def advance(plan: dict, registry) -> list[dict]:
             if not all(dep["status"] == "completed" for dep in deps):
                 continue
             current_stamp = resume_stamp(registry.resume_workspace.read_document(), registry.candidate_state)
-            active_plan = (context.dialogue or {}).get("tasks", {}).get("plan_id")
             current_instruction = (context.dialogue or {}).get("instruction_request") or {}
             withdrawn = set(plan.get("revoked_tools", [])) | (set(current_instruction.get("revoked_tools", [])) if current_instruction.get("id") == plan["id"] else set())
-            if step["tool"] in withdrawn:
+            if step["tool"] in withdrawn or step.get("withdrawn"):
                 step.update(status="blocked", detail="用户已撤回此动作，记忆回顾或继续任务不能恢复授权",
                     failure={"code": "authority_revoked", "effect_started": False, "uncertain": False})
                 observed.append(step); changed = True
                 continue
-            if step["effect"] != "read" and (plan["resume_stamp"] != current_stamp or active_plan != plan["id"]):
-                step.update(status="blocked", detail="简历变更或原任务已取消/替代，请确认要执行的任务")
+            cancelled = plan.get("status") == "cancelled" or (context.cancellation_requested and context.cancellation_requested())
+            if cancelled or plan.get("session_id", context.session_id) != context.session_id:
+                step.update(status="blocked", detail="此任务已取消或不属于当前会话，未执行后续动作",
+                            failure={"code": "task_cancelled_or_foreign", "effect_started": False, "uncertain": False})
+                observed.append(step); changed = True
+                continue
+            if step["effect"] != "read" and plan["resume_stamp"] != current_stamp:
+                step.update(status="blocked", detail="任务绑定的简历已变化，请确认新的简历范围")
                 step["failure"] = {"code": "authority_stale", "effect_started": False, "uncertain": False}
                 observed.append(step); changed = True
                 continue
@@ -124,7 +134,8 @@ async def advance(plan: dict, registry) -> list[dict]:
             try:
                 # A plan over 20 JDs needs the full analysis budget; a 100s cap cut
                 # it off mid-write and reported "结果未确认" instead of a plan.
-                timeout = 180 if step["tool"] in {"learning_plan_generate", "job_results_refilter"} else 20
+                timeout = 180 if step["tool"] in {"learning_plan_generate", "job_results_refilter"} or (
+                    step["tool"] == "mock_delivery_start" and step["arguments"].get("filters")) else 20
                 async with asyncio.timeout(timeout):
                     outcome = await registry.execute(step["tool"], step["arguments"],
                         user_message=step["command_quote"], state=ToolLoopState())
@@ -134,8 +145,6 @@ async def advance(plan: dict, registry) -> list[dict]:
                         step.update(status="waiting_external", task_id=outcome.content["id"], wait_started_at=time.time())
                     if step["tool"] == "job_results_refilter":
                         step["task_id"] = outcome.content["task_id"]
-                    if step["tool"] in {"job_results_read", "resume_document_read"} and outcome.content.get("snapshot_id"):
-                        dialogue_change("display", snapshot_id=outcome.content["snapshot_id"])
                 elif outcome.resume_proposal is not None:
                     step.update(status="waiting_confirmation", result={"proposal": outcome.resume_proposal.model_dump(mode="json")},
                         proposal_id=outcome.resume_proposal.id)
@@ -177,13 +186,20 @@ async def begin(plan: dict, registry) -> ChatResponse:
     proposal = next((step.get("result", {}).get("proposal") for step in observed
         if step["status"] == "waiting_confirmation" and isinstance(step.get("result"), dict)), None)
     pending = [step["tool"] for step in plan["steps"] if step["status"] == "pending"]
-    text = "\n\n".join(render_step(step) for step in observed) or (
+    from .presentation import compose
+    response_started = time.monotonic()
+    emit("response_synthesis", status="started", plan_id=plan["id"])
+    presentation = await compose(plan, observed, getattr(registry, "response_llm", None))
+    emit("response_synthesis", status="finished", plan_id=plan["id"], mode=presentation.mode, reason=presentation.reason,
+         elapsed_ms=round((time.monotonic() - response_started) * 1000))
+    text = presentation.text or (
         "正在观察原任务的未完成步骤，没有重放已完成动作。" if plan.get("recovery_count") else
         plan["reply"] or "没有识别到可执行目标，请说明希望完成的操作。")
     if pending:
         text += "\n\n待前置步骤完成后：" + "、".join(tool_label(tool) for tool in pending) + "。不会把启动、入队或提案视为最终完成。"
     # This selects content, but is not proof that a response was delivered.
     emit("plan_response_selection", plan_id=plan["id"],
+         displayed_snapshot_ids=presentation.snapshot_ids,
          completed_step_ids=[step["id"] for step in observed if step["status"] == "completed"])
     return ChatResponse(message=text, lane=AgentLane.APPLICATION,
         action="resume_proposal" if proposal else None, resume_proposal=proposal,

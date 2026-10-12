@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -56,6 +57,7 @@ class MockWorkflowCoordinator:
         self.on_delivery_started = None
         self.delivery_owner = None
         self.stopping_sessions: set[str] = set()
+        self.stop_epochs: dict[str, int] = {}
         self.operations: dict[asyncio.Task, str] = {}
         self.operation_jobs: dict[asyncio.Task, int | None] = {}
         self.poll_failures: dict[str, tuple[int, float]] = {}
@@ -185,10 +187,12 @@ class MockWorkflowCoordinator:
             min_score=min_score, limit=constraints.get("result_limit"),
             requirements=requirements)
 
-    async def queue_deliveries(self, *, min_score: int, session_id: str, task_id: str | None = None) -> dict:
+    async def queue_deliveries(self, *, min_score: int = 0, session_id: str, task_id: str | None = None,
+                               filters: dict | None = None) -> dict:
+        """One explicit bounded batch, not a persistent rule for unseen future jobs."""
         if session_id in self.stopping_sessions or "*" in self.stopping_sessions:
             raise PreflightRefused("当前正在停止任务，未加入投递队列")
-        """One explicit bounded batch, not a persistent rule for unseen future jobs."""
+        stop_epoch = (self.stop_epochs.get(session_id, 0), self.stop_epochs.get("*", 0))
         from ..growth.requests import resume_stamp
         if not 0 <= min_score <= 100:
             raise PreflightRefused("匹配分数必须在 0–100 之间")
@@ -201,14 +205,40 @@ class MockWorkflowCoordinator:
                                "请在浏览器中完成登录（如需要），登录成功后账号会自动绑定，"
                                "随后再发起本次投递即可。"}
         document = self.resume.read_document()
+        document_digest = resume_document_digest(document)
         evidence = self.jobs.jobs_for_resume_analysis(profile.resume_id, limit=200, min_score=min_score, task_id=task_id)
         eligible = [self.jobs.get_job(item["id"]) for item in evidence
                     if item["stage"] in {"review", "applying"}
                     and item.get("filter_status", "pass") == "pass"
                     and self.delivery.supports(item["source_url"])
                     and self.jobs.latest_delivery_status_for_job(item["id"]) is None]
+        scope_evidence, excluded, unknown = {}, 0, 0
+        if filters is not None:
+            from ..core.job_filters import evaluate_filter, validate_filter
+            filters = validate_filter(filters).model_dump(mode="json")
+            slots = asyncio.Semaphore(3)
+            async def judge(job):
+                facts = dict(job)
+                if isinstance(facts.get("tags"), str):
+                    facts["tags"] = json.loads(facts["tags"] or "[]")
+                prior = job.get("filter_evidence") or {}
+                if isinstance(prior, str):
+                    prior = json.loads(prior)
+                async with slots:
+                    scope_evidence[job["id"]] = await evaluate_filter(self.browser.llm.generate, filters, facts, prior_evidence=prior)
+            async with asyncio.TaskGroup() as group:
+                for job in eligible:
+                    group.create_task(judge(job))
+            excluded = sum(item["status"] == "fail" for item in scope_evidence.values())
+            unknown = sum(item["status"] == "unknown" for item in scope_evidence.values())
+            eligible = [job for job in eligible if scope_evidence[job["id"]]["status"] == "pass"]
+        if stop_epoch != (self.stop_epochs.get(session_id, 0), self.stop_epochs.get("*", 0)):
+            raise PreflightRefused("筛选期间用户已停止投递，未加入队列")
+        if (resume_document_digest(self.resume.read_document()) != document_digest
+                or self.candidate.read().profile.resume_id != profile.resume_id):
+            raise PreflightRefused("筛选期间简历已变化，请核对要投递的简历")
         binding = {"resume_document_id": document.id, "resume_version": document.version,
-                   "resume_digest": resume_document_digest(document)}
+                   "resume_digest": document_digest}
         # Stage (c): measure what the authorization layer would decide and change nothing.
         # This call must never raise into the delivery path or filter a candidate — a
         # broken measurement costs a misleading row, and letting it block delivery would
@@ -220,11 +250,18 @@ class MockWorkflowCoordinator:
         except Exception as exc:  # noqa: BLE001
             self.jobs.record_mock_workflow_error(
                 f"授权度量未记录（不影响投递）：{type(exc).__name__}：{exc}")
-        ids = self.jobs.enqueue_mock_deliveries(eligible, session_id=session_id,
-            resume_stamp=resume_stamp(document, self.candidate), binding=binding, min_score=min_score)
+        queue_kwargs = {"session_id": session_id, "resume_stamp": resume_stamp(document, self.candidate),
+                        "binding": binding, "min_score": min_score}
+        if filters is not None:
+            queue_kwargs.update(scope={"filters": filters, "min_score": min_score}, scope_evidence=scope_evidence)
+        ids = self.jobs.enqueue_mock_deliveries(eligible, **queue_kwargs)
         self.wakeup.set()
-        return {"queued": len(ids), "job_ids": ids, "min_score": min_score,
-                "message": f"已将 {len(ids)} 个匹配分 ≥{min_score} 的模拟站职位加入本次自动投递队列（不是已投递）。"
+        from ..core.job_filters import filter_summary
+        scope_label = (f"匹配分≥{min_score}" if min_score else "不设额外分数门槛") + ("；" + filter_summary(filters) if filters else "")
+        return {"queued": len(ids), "job_ids": ids, "min_score": min_score, "filters": filters,
+                "excluded": excluded, "unknown": unknown,
+                "message": f"已将 {len(ids)} 个符合本次投递范围的模拟站职位加入队列（不是已投递）。范围：{scope_label}。"
+                + (f"未入队：不符合{excluded}个，信息不足{unknown}个。" if filters else "") +
                 "先沟通，收到招聘方回复且投递按钮解锁后才发送已授权简历；验证需人工接管，失败或不确定不会重试。"
                 "仅处理当前简历的已搜索职位，不启用每日任务，也不自动添加未来职位。可说「停止自动投递」。"}
 
@@ -251,6 +288,7 @@ class MockWorkflowCoordinator:
 
     async def cancel_delivery_queue(self, session_id: str | None) -> dict:
         key = session_id if session_id is not None else "*"
+        self.stop_epochs[key] = self.stop_epochs.get(key, 0) + 1
         self.stopping_sessions.add(key)
         try:
             # Revoke before yielding: stale observations and restart cannot replay.

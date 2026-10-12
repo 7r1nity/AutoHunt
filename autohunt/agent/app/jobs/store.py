@@ -190,6 +190,8 @@ class JobStore:
             self._ensure_column(db, "jobs", "recruiter_reply", "TEXT")
             self._ensure_column(db, "jobs", "filter_status", "TEXT NOT NULL DEFAULT 'pass'")
             self._ensure_column(db, "jobs", "filter_evidence", "TEXT NOT NULL DEFAULT '{}'")
+            self._ensure_column(db, "mock_delivery_queue", "scope_json", "TEXT NOT NULL DEFAULT '{}'")
+            self._ensure_column(db, "mock_delivery_queue", "scope_evidence_json", "TEXT NOT NULL DEFAULT '{}'")
             self._ensure_column(db, "jobs", "recruiter_reply_at", "TEXT")
             self._ensure_column(db, "jobs", "reply_last_checked_at", "TEXT")
             self._ensure_column(db, "mock_workflow_settings", "last_reported_run_id", "TEXT")
@@ -1161,7 +1163,8 @@ class JobStore:
             )
 
     def enqueue_mock_deliveries(self, items: list[dict], *, session_id: str, resume_stamp: str,
-                                binding: dict, min_score: int) -> list[int]:
+                                binding: dict, min_score: int, scope: dict | None = None,
+                                scope_evidence: dict | None = None) -> list[int]:
         inserted = []
         with self.lock, self._connect() as db:
             for item in items:
@@ -1169,10 +1172,11 @@ class JobStore:
                     continue
                 cursor = db.execute(
                     "INSERT OR IGNORE INTO mock_delivery_queue "
-                    "(job_id,session_id,resume_stamp,binding_json,job_hash,min_score,status,updated_at) "
-                    "VALUES (?,?,?,?,?,?,'queued',?)",
+                    "(job_id,session_id,resume_stamp,binding_json,job_hash,min_score,status,updated_at,scope_json,scope_evidence_json) "
+                    "VALUES (?,?,?,?,?,?,'queued',?,?,?)",
                     (item["id"], session_id, resume_stamp, json.dumps(binding),
-                     self.review_fingerprint(item), min_score, utc_now()),
+                     self.review_fingerprint(item), min_score, utc_now(), json.dumps(scope or {}),
+                     json.dumps((scope_evidence or {}).get(item["id"], {}))),
                 )
                 if cursor.rowcount:
                     # The user authorised this batch in words ("85分以上的自动投递").

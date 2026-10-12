@@ -114,6 +114,7 @@ class Refresh(unittest.IsolatedAsyncioTestCase):
         self.coordinator.resume = self.resume
         self.coordinator.authorization_scope = None
         self.coordinator.stopping_sessions = set()
+        self.coordinator.stop_epochs = {}
         self.coordinator.wakeup = asyncio.Event()
         self.coordinator.delivery = NS(supports=lambda url: url.startswith("http://127.0.0.1:8080/"))
         async def bound(_): return "bound"

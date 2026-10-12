@@ -120,6 +120,7 @@ class AgentToolRegistry:
         memory: MemoryStore,
         learning_plans: LearningPlanService | None = None,
         mock_workflow=None,
+        response_llm=None,
     ) -> None:
         self.jobs = jobs
         self.browser = browser
@@ -128,6 +129,7 @@ class AgentToolRegistry:
         self.memory = memory
         self.learning_plans = learning_plans
         self.mock_workflow = mock_workflow
+        self.response_llm = response_llm
         self.call_guard = ToolCallGuard()
         self._tools = {spec.name: spec for spec in self._build_specs()}
 
@@ -280,8 +282,9 @@ class AgentToolRegistry:
         ]
         if self.mock_workflow is not None:
             specs.extend([
-                AgentToolSpec("mock_delivery_start", "用户明确要求按最低匹配分自动投递时，将当前简历已搜索的模拟站职位加入有限队列。内部生成逐职位预览与一次性授权，先沟通、回复后发送；不是立即已投递，不支持真实网站。",
-                    obj({"min_score": {"type": "integer", "minimum": 0, "maximum": 100}}, ["min_score"]), "external", self._mock_delivery_start),
+                AgentToolSpec("mock_delivery_start", "将用户要求范围内的已搜索模拟站职位加入有限投递队列。filters为投递独立语义条件，可复用搜索判断；min_score可选，省略不设分数门槛。内部生成逐职位预览与一次性授权，先沟通、回复后发送；不支持真实网站。",
+                    obj({"min_score": {"type": "integer", "minimum": 0, "maximum": 100},
+                         "filters": {**filter_schema(), "type": ["object", "null"], "description": "投递分支条件树，不改变搜索条件；未知不投递"}}), "external", self._mock_delivery_start),
                 AgentToolSpec("mock_delivery_cancel", "按明确停止命令取消本会话的模拟站投递队列，已发送结果保留。", obj({}), "external", self._mock_delivery_cancel),
                 AgentToolSpec("mock_delivery_status", "读取本会话模拟站自动投递队列状态，不启动或重试。", obj({}), "read", self._mock_delivery_status),
             ])
@@ -630,14 +633,17 @@ class AgentToolRegistry:
         if context is None:
             raise PreflightRefused("自动投递需要当前会话")
         if not (context.action_authority or {}).get("requested"):
-            raise PreflightRefused("自动投递需要已确认的投递范围；请先明确目标分数和投递要求")
+            raise PreflightRefused("自动投递需要已确认的投递范围；请核对要投递的岗位")
         # Remember the user's own instruction as the boundary of what this batch is
         # authorised to cover. Measurement only for now: queue_deliveries records what
         # falls inside it without filtering anything yet.
         self.mock_workflow.remember_authorization_scope(
-            active_run().user_message if active_run() else "", context.search_state, min_score=args["min_score"])
+            active_run().user_message if active_run() else "", context.search_state, min_score=args.get("min_score", 0))
         task_id = (context.action_authority or {}).get("evidence_task_id")
-        return await self.mock_workflow.queue_deliveries(min_score=args["min_score"], session_id=context.session_id, task_id=task_id)
+        kwargs = {"min_score": args.get("min_score", 0), "session_id": context.session_id, "task_id": task_id}
+        if args.get("filters") is not None:
+            kwargs["filters"] = args["filters"]
+        return await self.mock_workflow.queue_deliveries(**kwargs)
 
     async def _mock_delivery_cancel(self, _args: dict) -> dict:
         context = active_run()

@@ -234,9 +234,10 @@ class RevisionContracts(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(draft["operation"], "revise")
         self.assertEqual(captured[0]["active_plan"]["steps"][0]["status"], "waiting_external")
         self.assertNotIn("result", captured[0]["active_plan"]["steps"][0])
-        invalid = RequestDraft(operation="revise", revision=self.edit(), steps=[{"id": "new", "tool": "learning_plan_generate"}])
-        with self.assertRaises(ValueError):
-            validate_draft(invalid, self.registry, "修改", dialogue={}, conditions={}, stamp=STAMP)
+        addition = RequestDraft(operation="revise", revision=self.edit(), steps=[{"id": "new", "tool": "learning_plan_generate"}])
+        normalized = validate_draft(addition, self.registry, "修改", dialogue={}, conditions={}, stamp=STAMP)
+        self.assertEqual(normalized["revision"]["add_steps"][0]["id"], "new")
+        self.assertEqual(self.calls, [])  # Normalization is never execution.
 
     async def test_main_planner_dispatch_updates_parent_without_new_plan(self):
         self.enter()
