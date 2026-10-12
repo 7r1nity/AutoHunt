@@ -114,6 +114,8 @@ class LearningPlanService:
 
     async def generate(self, focus: str = "", *, min_score: int | None = None, max_score: int | None = None,
                        salary_min: int | None = None, task_id: str | None = None) -> dict:
+        from ..runtime.context import effect_checkpoint
+        effect_checkpoint("preparing")
         if isinstance(self.llm, LLMManager) and self.llm.settings_store.read()["provider"] == "mock":
             raise ValueError("详细跨行业学习计划需要真实模型；请先在模型设置中配置 DeepSeek")
         profile = self.candidates.read().profile
@@ -210,7 +212,9 @@ class LearningPlanService:
             raise ValueError("生成期间主简历发生变化；请使用当前简历重新生成计划")
         from ..runtime.context import emit
         emit("tool_started", tool="learning_plan_save", effect="write")
+        effect_checkpoint("started")
         self.jobs.save_learning_plan(saved)
+        effect_checkpoint("committed")
         emit("tool_finished", tool="learning_plan_save", status="ok", result={"plan_id": saved["id"]})
         return saved
 

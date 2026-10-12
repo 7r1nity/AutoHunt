@@ -6,6 +6,7 @@ import time
 from dataclasses import dataclass
 
 from ..security.action_grants import action_binding
+from .lifecycle import successful_receipt
 
 
 @dataclass
@@ -32,15 +33,16 @@ def reconcile_receipts(plan: dict, events: list[dict]) -> None:
                     and event.get("seq", 0) > starts[-1].get("seq", 0)
                     and event["data"].get("plan_id") == plan["id"]
                     and event["data"].get("step_id") == step["id"]
-                    and event["data"].get("tool") == step["tool"]]
+                    and event["data"].get("tool") == step["tool"]
+                    and (not starts[-1]["data"].get("execution_id") or
+                         event["data"].get("execution_id") == starts[-1]["data"]["execution_id"])]
         if not receipts or receipts[-1]["data"].get("status") != "ok":
             continue
         result = copy.deepcopy(receipts[-1]["data"].get("result"))
         if not isinstance(result, dict):
             continue
-        step.update(status="completed", result=result, retained_result=True)
-        if step["tool"] == "job_search_start" and result.get("id"):
-            step.update(status="waiting_external", task_id=result["id"])
+        successful_receipt(step, result)
+        step["retained_result"] = True
         if step["tool"] == "resume_propose_patch" and isinstance(result.get("proposal"), dict):
             step.update(status="waiting_confirmation", proposal_id=result["proposal"]["id"])
 
@@ -63,7 +65,11 @@ def recover_plan(run: dict, *, session_id: str, stamp: str,
     if plan.get("resume_stamp") != stamp:
         return RecoveryDecision("clarify", "原任务绑定的简历已变化，请确认按新简历执行的范围；旧结果和授权未复用。")
     if plan.get("questions"):
-        return RecoveryDecision("clarify", "原任务仍有条件待补充：" + "；".join(plan["questions"]))
+        scoped = any(step.get("missing_slots") or step.get("questions") or step["status"] == "waiting_input" for step in plan["steps"])
+        independent = any(step["status"] == "pending" and not step.get("missing_slots")
+            and (scoped or step.get("effect") == "read") for step in plan["steps"])
+        if not independent:
+            return RecoveryDecision("clarify", "原任务仍有条件待补充：" + "；".join(plan["questions"]))
     if int(plan.get("recovery_count", 0)) >= 5:
         return RecoveryDecision("clarify", "本任务已接续五次仍未完成，请先查看失败原因并修正条件；未继续循环执行。")
     revoked = set(plan.get("revoked_tools", [])) | set(revoked_tools)
@@ -79,7 +85,9 @@ def recover_plan(run: dict, *, session_id: str, stamp: str,
         if step["tool"] == "job_search_start" and step.get("task_id") and step.get("arguments", {}).get("dry_run"):
             verify.append(step["id"])
             continue  # A dead dry-run executor may have already communicated.
-        if status in {"waiting_external", "waiting_confirmation", "waiting_approval", "pending"}:
+        if status == "waiting_input":
+            continue  # Observing a wait is not retrying an unanswered operation.
+        if status in {"waiting_external", "waiting_binding", "waiting_confirmation", "waiting_approval", "pending"}:
             retry.append(step["id"])
             continue
         failure = step.get("failure") or {}
@@ -91,7 +99,7 @@ def recover_plan(run: dict, *, session_id: str, stamp: str,
         if status == "skipped" and step.get("depends_on"):
             safe = True  # The runner skipped it before claiming any action.
         if status in {"claimed", "outcome_indeterminate"} and effect != "read" and not step.get("resume_search_task_id"):
-            safe = False
+            safe = step.get("execution_phase") == "preparing"
         if not safe:
             verify.append(step["id"])
             continue

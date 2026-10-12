@@ -34,6 +34,7 @@ class RunContext:
     plan_lookup: Callable[[str], dict | None] | None = None
     authorize_action: Callable | None = None
     resolve_approval: Callable | None = None
+    effect_state: dict | None = None
 
 
 current_run: ContextVar[RunContext | None] = ContextVar("autohunt_run", default=None)
@@ -55,6 +56,27 @@ def checkpoint(data: dict) -> None:
     context = active_run()
     if context:
         context.save(data)
+
+
+def effect_checkpoint(phase: str) -> None:
+    """Trusted adapter instrumentation, never a model-provided credential.
+
+    Uninstrumented executors remain UNKNOWN. Once an effect starts, a later
+    preparing marker cannot lower it. Every event belongs to one durable claim.
+    """
+    if phase not in {"preparing", "started", "committed"}:
+        raise ValueError("Invalid execution effect phase")
+    context = active_run()
+    metadata = context.action_authority or {} if context else {}
+    if not context or context.effect_state is None or not metadata.get("execution_id"):
+        return
+    previous = context.effect_state.get("phase", "unknown")
+    order = {"unknown": 0, "preparing": 1, "started": 2, "committed": 3}
+    if order[phase] < order[previous]:
+        return
+    context.effect_state["phase"] = phase
+    emit("effect_phase", phase=phase, plan_id=metadata["plan_id"], step_id=metadata["step_id"],
+         execution_id=metadata["execution_id"], tool=metadata["tool"])
 
 
 def save_search_state(value: dict, *, user_edit: bool | dict = False) -> dict:

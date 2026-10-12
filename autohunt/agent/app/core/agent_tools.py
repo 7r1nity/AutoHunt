@@ -15,7 +15,7 @@ from ..growth.plans import LearningPlanService, is_explicit_plan_request
 from ..memory.candidate_state import CandidateStateStore
 from ..memory.resume_workspace import ResumeWorkspaceStore
 from ..memory.stores import MemoryStore
-from ..runtime.context import active_run, emit, save_search_state, dialogue_change, scoped_browser, browser_availability, browser_search_available
+from ..runtime.context import active_run, emit, effect_checkpoint, save_search_state, dialogue_change, scoped_browser, browser_availability, browser_search_available
 from ..runtime.dialogue import bounded_data, compact_state, resolve_reference, ACTION_TOOLS
 from ..runtime.search_state import merge_search_state, prepare_search_state
 from .search_contract import missing_search_message
@@ -365,7 +365,8 @@ class AgentToolRegistry:
             return AgentToolOutcome(name, "denied", reason, spec.effect,
                 failure={"code": state.denial_code, "retryable": False, "effect_started": False, "uncertain": False})
         receipt = {"plan_id": (context.action_authority or {}).get("plan_id"),
-                   "step_id": (context.action_authority or {}).get("step_id")} if context else {}
+                   "step_id": (context.action_authority or {}).get("step_id"),
+                   "execution_id": (context.action_authority or {}).get("execution_id")} if context else {}
         executor_started = False
         started_at, attempts = time.monotonic(), 1
         def record_retry(data: dict) -> None:
@@ -429,7 +430,8 @@ class AgentToolRegistry:
                                     failure={"code": "precondition_unmet", "retryable": True,
                                              "effect_started": False, "uncertain": False})
         except Exception as exc:
-            failure = classify_failure(exc, effect=spec.effect, started=executor_started)
+            preparing = context and context.effect_state and context.effect_state.get("phase") == "preparing"
+            failure = classify_failure(exc, effect=spec.effect, started=executor_started and not preparing)
             metadata = failure.metadata()
             metadata["retryable"] = metadata["retryable"] and name in self.RETRY_SAFE_READS
             metadata.update(attempts=attempts, retry_exhausted=metadata["retryable"] and attempts >= 3)
@@ -672,6 +674,7 @@ class AgentToolRegistry:
         return result
 
     async def _mock_delivery_start(self, args: dict) -> dict:
+        effect_checkpoint("preparing")
         context = active_run()
         if context is None:
             raise PreflightRefused("自动投递需要当前会话")

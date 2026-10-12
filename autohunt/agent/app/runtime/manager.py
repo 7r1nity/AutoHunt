@@ -148,12 +148,27 @@ class AgentRuntime:
     def emit(self, run_id: str, kind: str, data: dict):
         if self.store.get(run_id)["status"] in TERMINAL:
             return
+        if kind == "effect_phase":
+            run = self.store.get(run_id)
+            saved = copy.deepcopy(run["checkpoint"] or {})
+            plan = saved.get("plan") or {}
+            node = next((step for step in plan.get("steps", []) if step["id"] == data.get("step_id")), None)
+            if (plan.get("id") == data.get("plan_id") and node and node.get("status") == "claimed"
+                    and node.get("execution_id") == data.get("execution_id")):
+                node["execution_phase"] = data["phase"]
+                self.store.save_plan(run_id, plan)
+            if data["phase"] in {"started", "committed"}:
+                self.store.update(run_id, mutation_started=1)
         if kind == "tool_started" and data.get("effect") in {"write", "external"}:
             self.store.update(run_id, mutation_started=1)
         if kind == "tool_finished" and data.get("tool") == "job_search_start" and data.get("status") == "ok":
             browser_id = (data.get("result") or {}).get("id")
             if browser_id:
                 self.store.update(run_id, checkpoint={**(self.store.get(run_id)["checkpoint"] or {}), "browser_id": browser_id})
+        if kind == "tool_finished" and data.get("tool") == "mock_delivery_start" and data.get("status") == "ok":
+            binding_id = (data.get("result") or {}).get("binding_task_id")
+            if binding_id:
+                self.store.update(run_id, checkpoint={**(self.store.get(run_id)["checkpoint"] or {}), "binding_browser_id": binding_id})
         if kind == "plan_state":
             saved = self.store.get(run_id)["checkpoint"] or {}
             previous_plan = saved.get("plan") or {}
@@ -523,9 +538,6 @@ class AgentRuntime:
             self.store.event(run_id, "watchdog_expired", {"code": "missing_plan_checkpoint", "detail": detail})
             self.finish(run_id, "completed" if questions else "failed", detail)
             return
-        if plan["questions"]:
-            self.finish(run_id, "completed", "参数尚待补充，没有执行动作")
-            return
         from ..workflow.recovery import reconcile_receipts
         reconcile_receipts(plan, self.store.all_events(run_id))
         searches = [step for step in plan["steps"] if step["tool"] == "job_search_start"]
@@ -602,7 +614,35 @@ class AgentRuntime:
                         step.update(status="skipped", withdrawn=True, detail="此动作已拒绝或范围已变化",
                             failure={"code": "user_withdrawn", "effect_started": False, "uncertain": False})
                         changed = True
-            if changed or not waiting:
+                elif step["status"] == "waiting_input":
+                    waiting = True
+                elif step["status"] == "waiting_binding":
+                    coordinator = getattr(self.agent.tool_registry, "mock_workflow", None)
+                    if coordinator and callable(getattr(coordinator, "settings", None)) and coordinator.settings().get("applicant_id"):
+                        step.update(status="pending")
+                        changed = True
+                    elif step.get("wait_reason") == "waiting_resource":
+                        if self.browser.can_start_search():
+                            step.update(status="pending")
+                            changed = True
+                        else:
+                            waiting = True
+                    elif step.get("task_id"):
+                        browser = self.observe_browser(step["task_id"])
+                        if browser.status in {"completed", "failed", "stopped"}:
+                            question = "登录/账号绑定尚未确认，请核对模拟站求职者账号后更新或继续本次投递范围。"
+                            step.update(status="waiting_input", wait_reason="account_binding", detail=question, questions=[question])
+                            plan["questions"] = list(dict.fromkeys([*plan.get("questions", []), question]))
+                            changed = True
+                        else:
+                            waiting = True
+                    else:
+                        step.update(status="waiting_input", wait_reason="account_binding", detail="缺少可观察的账号绑定任务，请确认求职者登录")
+                        changed = True
+            ready = any(step["status"] == "pending" and all(
+                next(item for item in plan["steps"] if item["id"] == dep)["status"] in DONE
+                for dep in step["depends_on"]) for step in plan["steps"])
+            if changed or not waiting or ready:
                 lock = self.sessions.setdefault(run["session_id"], asyncio.Lock())
                 async with lock:
                     latest = (self.store.get(run_id)["checkpoint"] or {}).get("plan") or {}
@@ -630,7 +670,10 @@ class AgentRuntime:
                         finally:
                             current_run.reset(token)
             if all(step["status"] in DONE for step in plan["steps"]):
-                if not self.store.has_event(run_id, "workflow_summary") and any(step.get("task_id") or step.get("proposal_id") or step.get("approval_id") for step in plan["steps"]):
+                if plan.get("questions"):
+                    self.store.update(run_id, status="waiting_user")
+                    return
+                if not self.store.has_event(run_id, "workflow_summary"):
                     lock = self.sessions.setdefault(run["session_id"], asyncio.Lock())
                     async with lock:
                         latest = (self.store.get(run_id)["checkpoint"] or {}).get("plan") or {}
@@ -648,6 +691,11 @@ class AgentRuntime:
                 self.finish(run_id, "outcome_indeterminate" if uncertain else "failed" if failed else "completed",
                     "所有步骤已结束；部分步骤未成功，请查看逐步记录" if uncertain or failed else "完整请求执行结束")
                 return
+            if any(step["status"] == "waiting_input" for step in plan["steps"]) and not any(
+                    step["status"] in {"waiting_external", "waiting_binding", "waiting_approval", "waiting_confirmation"}
+                    for step in plan["steps"]) and not ready:
+                self.store.update(run_id, status="waiting_user")
+                return  # Input waits do not occupy a polling worker or LLM slot.
             await asyncio.sleep(1)
 
     async def publish_plan_answer(self, run_id: str, plan: dict, steps: list[dict]):
@@ -935,7 +983,8 @@ class AgentRuntime:
                 if not service:
                     continue
                 view = service.current()
-                bound = any((run.get("checkpoint") or {}).get(f"{kind}_id") == view.id
+                bound = any((run.get("checkpoint") or {}).get(f"{kind}_id") == view.id or
+                            kind == "browser" and (run.get("checkpoint") or {}).get("binding_browser_id") == view.id
                             for run in self.store.list(session_id))
                 daily_owned = kind == "browser" and session_id == "default" and coordinator and coordinator.settings().get("last_run_id") == view.id
                 if session_id is None or bound or owned.get(f"{kind}_id") == view.id or daily_owned:
@@ -969,6 +1018,9 @@ class AgentRuntime:
             await asyncio.gather(task, return_exceptions=True)
         current = self.store.get(run_id)
         browser_id = (current["checkpoint"] or {}).get("browser_id")
+        binding_id = (current["checkpoint"] or {}).get("binding_browser_id")
+        if binding_id and self.browser.current().id == binding_id:
+            browser_id = binding_id
         if browser_id and self.browser.current().id == browser_id:
             view = await self.browser.stop()
             self.browser_summary(run_id, view)
@@ -984,11 +1036,12 @@ class AgentRuntime:
             plan.update(status="cancelled", expires_at=0)
             for step in plan["steps"]:
                 if step["status"] == "claimed":
-                    unknown = step.get("effect") in {"write", "external"}
+                    unknown = step.get("effect") in {"write", "external"} and step.get("execution_phase") != "preparing"
                     uncertain |= unknown
                     step.update(status="outcome_indeterminate" if unknown else "skipped", detail="执行期间中断，结果需核对" if unknown else "已中断")
-                elif step["status"] in {"pending", "waiting_external", "waiting_confirmation", "waiting_approval"}:
-                    step.update(status="skipped", detail="用户已停止，后续步骤不再执行；已产生的结果/提案保留")
+                elif step["status"] in {"pending", "waiting_external", "waiting_binding", "waiting_input", "waiting_confirmation", "waiting_approval"}:
+                    step.update(status="skipped", withdrawn=True, failure={"code": "user_withdrawn", "effect_started": False, "uncertain": False},
+                        detail="用户已停止，后续步骤不再执行；已产生的结果/提案保留")
             self.store.update(run_id, checkpoint=checkpoint)
             active = self.store.dialogue_state(current["session_id"]).get("instruction_request") or {}
             if active.get("id") == plan["id"]:
@@ -1047,7 +1100,8 @@ class AgentRuntime:
             raise ValueError("任务已结束，请重新读取执行记录")
         self.store.update(owner["id"], status="waiting_user" if paused else "running")
         changed_ids = [step["id"] for step in updated["steps"] if step.get("withdrawn") or
-            any(old["id"] == step["id"] and old["arguments"] != step["arguments"] for old in target["steps"])]
+            any(old["id"] == step["id"] and (old["arguments"] != step["arguments"] or
+                old.get("evidence_step") != step.get("evidence_step")) for old in target["steps"])]
         if changed_ids:
             self.store.invalidate_approvals(owner["id"], changed_ids)
         # A compact instruction is memory; the complete plan above remains the checkpoint.
@@ -1061,16 +1115,20 @@ class AgentRuntime:
         dialogue_change("request_state", request=anchor.model_dump())
         self.store.event(owner["id"], "plan_revision", {"revision": updated["revision"], "source_run_id": run_id,
                          "updated_steps": [item.step_id for item in edit.updates],
-                         "added_steps": [item.id for item in edit.add_steps],
+                         "added_steps": updated["revision_history"][-1]["added_steps"],
                          "removed_steps": edit.remove_steps, "paused": paused})
         browser_id = (owner["checkpoint"] or {}).get("browser_id")
         if paused and browser_id and self.browser.current().id == browser_id and self.browser.current().status in {"starting", "running"}:
             await self.browser.pause()
+        if existing_owner and owner["status"] == "waiting_user" and not paused:
+            self.schedule(owner["id"], watch_only=True)
         details = []
         for item in edit.updates:
             step = next(step for step in updated["steps"] if step["id"] == item.step_id)
             args = step["arguments"]
-            if step["tool"] == "learning_plan_generate":
+            if step.get("staged_arguments") is not None:
+                details.append("新搜索条件已暂存；继续时会安全结束旧只读搜索并按新条件启动，旧请求与已有结果保留")
+            elif step["tool"] == "learning_plan_generate":
                 details.append("不足分析/成长计划范围：" + "、".join(text for text in (
                     f"匹配分数≤{args['max_score']}" if 'max_score' in args else '',
                     f"匹配分数≥{args['min_score']}" if 'min_score' in args else '',
@@ -1147,6 +1205,8 @@ class AgentRuntime:
                 stamp = resume_stamp(self.resume_workspace.read_document(), self.agent.candidate_state)
                 if active_plan.get("resume_stamp") != stamp:
                     return ChatResponse(message="简历已变化，请确认新的执行范围；原任务仍暂停。", lane=AgentLane.APPLICATION)
+                from ..workflow.lifecycle import activate_staged_searches
+                await activate_staged_searches(active_plan, self.browser)
                 active_plan.update(paused=False, status="running", revision=active_plan.get("revision", 0) + 1,
                                    expires_at=time.time() + 1800)
                 self.store.update(source["id"], checkpoint={**saved, "plan": active_plan}, status="running")
@@ -1169,6 +1229,8 @@ class AgentRuntime:
         if decision.action != "resume":
             return ChatResponse(message=decision.message, lane=AgentLane.APPLICATION)
         plan = decision.plan
+        from ..workflow.lifecycle import activate_staged_searches
+        await activate_staged_searches(plan, self.browser)
         for step in plan["steps"]:
             if step.get("approval_id"):
                 old = self.store.approval(step["approval_id"])

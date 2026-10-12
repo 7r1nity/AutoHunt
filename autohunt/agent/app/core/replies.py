@@ -51,8 +51,10 @@ def tool_reply(tool: str, status: str, result) -> str:
     human = result if isinstance(result, str) and not has_internal_data(result) else ""
     if status == "outcome_indeterminate":
         return f"{label}的执行结果尚未确认；已停止后续操作，不会自动重试。请核对运行记录和申请看板。"
-    if status == "awaiting_user":
+    if status in {"awaiting_user", "waiting_input"}:
         return human or f"{label}需要补充信息或人工确认，尚未完成。请查看任务与上下文。"
+    if status == "waiting_binding":
+        return f"{label}正在等待账号绑定或浏览器资源，尚未完成入队；条件满足后会继续同一批次，不需要重复发起投递。"
     if status in {"awaiting_approval", "waiting_approval"}:
         return f"{label}等待范围确认。请在任务记录中确认或修改；确认后从此步骤继续，其他独立步骤不受影响。"
     if status not in {"ok", "completed", "waiting_external", "waiting_confirmation"}:

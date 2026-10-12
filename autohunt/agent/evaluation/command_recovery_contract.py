@@ -180,8 +180,16 @@ class DurableCommandContracts(unittest.IsolatedAsyncioTestCase):
         for step in (delivery_step(depends_on=["deliver_extra"]), delivery_step(tool="made_up")):
             with self.assertRaises(ValueError):
                 self.normalize({"operation": "revise", "steps": [step]})
+        running = edited_plan(self.value, RevisionDraft(plan_id="plan-1", expected_revision=0,
+            updates=[{"step_id": "search", "arguments": {"result_limit": 20}}]),
+            self.registry, stamp=STAMP, session_id="default", message="改数量")
+        self.assertTrue(running["paused"])
+        self.assertEqual(running["steps"][0]["arguments"], self.value["steps"][0]["arguments"])
+        self.assertEqual(running["steps"][0]["staged_arguments"]["result_limit"], 20)
+        finished = copy.deepcopy(self.value)
+        finished["steps"][0]["status"] = "completed"
         with self.assertRaises(ValueError):
-            edited_plan(self.value, RevisionDraft(plan_id="plan-1", expected_revision=0,
+            edited_plan(finished, RevisionDraft(plan_id="plan-1", expected_revision=0,
                 updates=[{"step_id": "search", "arguments": {"result_limit": 20}}]),
                 self.registry, stamp=STAMP, session_id="default", message="改数量")
 

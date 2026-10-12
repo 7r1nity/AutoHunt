@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import time
+import uuid
 
 from ..core.agent_tools import ToolLoopState
 from ..core.models import AgentLane, ChatResponse, ToolEvent
@@ -11,8 +12,9 @@ from ..growth.requests import resume_stamp
 from ..runtime.context import active_run, dialogue_change, emit
 from ..core.replies import tool_reply, tool_label, public_reply
 from ..runtime.resilience import classify_failure
+from .contracts import EXECUTION_BATCH_SIZE
+from .lifecycle import DONE, input_waits, successful_receipt
 
-DONE = {"completed", "failed", "skipped", "blocked", "outcome_indeterminate"}
 RESUME_BOUND_TOOLS = {"job_search_start", "job_results_refilter", "mock_delivery_start",
                       "learning_plan_generate", "resume_propose_patch", "job_review_selection"}
 
@@ -30,7 +32,7 @@ def persist(plan: dict, *, activate: bool = False) -> None:
         ("id", "original", "answers", "questions", "resume_stamp", "turn", "expires_at", "status", "goals")},
         "understanding": plan.get("understanding"),
         "revision": plan.get("revision", 0), "paused": plan.get("paused", False),
-        "steps": [{key: step.get(key) for key in ("id", "tool", "arguments", "depends_on", "missing_slots", "status", "authority_binding")}
+        "steps": [{key: step.get(key) for key in ("id", "tool", "arguments", "staged_arguments", "depends_on", "missing_slots", "questions", "status", "authority_binding")}
                   for step in plan["steps"]]})
 
 
@@ -82,13 +84,19 @@ async def advance(plan: dict, registry) -> list[dict]:
     context = active_run()
     if plan.get("paused"):
         return []
+    input_waits(plan)
     persist(plan)  # Make the exact action snapshot authoritative before decisions.
     observed = []
     steps = {step["id"]: step for step in plan["steps"]}
     for step in plan["steps"]:
         if step["status"] == "claimed":
-            step.update(status="outcome_indeterminate", detail="步骤执行期间中断，请核对结果；不会重放")
+            preparing = step.get("execution_phase") == "preparing"
+            uncertain = not preparing and step.get("effect") in {"write", "external"}
+            step.update(status="outcome_indeterminate" if uncertain else "failed",
+                detail="步骤准备期间中断，尚未产生效果，可按记录接续" if preparing else "步骤执行期间中断，请核对结果；不会重放",
+                failure={"code": "worker_lost", "effect_started": not preparing, "uncertain": uncertain})
             observed.append(step)
+    claimed = 0
     while True:
         changed = False
         for step in plan["steps"]:
@@ -97,6 +105,9 @@ async def advance(plan: dict, registry) -> list[dict]:
             deps = [steps[key] for key in step["depends_on"]]
             if any(dep["status"] in DONE - {"completed"} for dep in deps):
                 step.update(status="skipped", detail="前置步骤未成功，依赖动作未执行")
+                if any(dep.get("withdrawn") or (dep.get("failure") or {}).get("code") == "user_withdrawn" for dep in deps):
+                    step.update(withdrawn=True, failure={"code": "user_withdrawn", "effect_started": False, "uncertain": False},
+                        detail="前置分支已按用户要求取消，此后续动作也已取消")
                 observed.append(step); changed = True
                 continue
             if not all(dep["status"] == "completed" for dep in deps):
@@ -151,7 +162,11 @@ async def advance(plan: dict, registry) -> list[dict]:
                 context.user_message, context.action_authority = previous_message, previous_authority
                 persist(plan)
                 continue
-            step.update(status="claimed")
+            step.update(status="claimed", execution_id=uuid.uuid4().hex, execution_phase="unknown")
+            authority["execution_id"] = step["execution_id"]
+            previous_effect_state = context.effect_state
+            context.effect_state = {"phase": "unknown"}
+            claimed += 1
             persist(plan)  # Durable claim BEFORE the executor or any write.
             emit("plan_step", step_id=step["id"], tool=step["tool"], status="claimed", depends_on=step["depends_on"])
             try:
@@ -163,17 +178,17 @@ async def advance(plan: dict, registry) -> list[dict]:
                     outcome = await registry.execute(step["tool"], step["arguments"],
                         user_message=step["command_quote"], state=ToolLoopState())
                 if outcome.status == "ok":
-                    step.update(status="completed", result=outcome.content)
-                    if step["tool"] == "job_search_start":
-                        step.update(status="waiting_external", task_id=outcome.content["id"], wait_started_at=time.time())
-                    if step["tool"] == "job_results_refilter":
-                        step["task_id"] = outcome.content["task_id"]
+                    successful_receipt(step, outcome.content)
                 elif outcome.resume_proposal is not None:
                     step.update(status="waiting_confirmation", result={"proposal": outcome.resume_proposal.model_dump(mode="json")},
                         proposal_id=outcome.resume_proposal.id)
                     step["wait_started_at"] = time.time()
                 elif outcome.status == "awaiting_approval" and outcome.approval:
                     step.update(status="waiting_approval", approval_id=outcome.approval["id"], detail=str(outcome.content))
+                elif outcome.status == "awaiting_user":
+                    step.update(status="waiting_input", wait_reason="business_input", detail=str(outcome.content),
+                        questions=[str(outcome.content)], failure=outcome.failure)
+                    plan["questions"] = list(dict.fromkeys([*plan.get("questions", []), str(outcome.content)]))
                 else:
                     step.update(status="outcome_indeterminate" if outcome.status == "outcome_indeterminate" else "blocked",
                         detail=str(outcome.content)[:1000], failure=outcome.failure)
@@ -181,32 +196,40 @@ async def advance(plan: dict, registry) -> list[dict]:
                         step["status"] = "failed"
             except asyncio.CancelledError:
                 # Leave claim durable so restart cannot replay an uncertain write.
+                step["execution_phase"] = context.effect_state["phase"]
+                persist(plan)
                 raise
             except TimeoutError:
-                step["failure"] = classify_failure(TimeoutError(), effect=step["effect"], started=True).metadata()
-                step.update(status="outcome_indeterminate" if step["effect"] in {"write", "external"} else "failed",
+                started = context.effect_state["phase"] != "preparing"
+                step["failure"] = classify_failure(TimeoutError(), effect=step["effect"], started=started).metadata()
+                step.update(status="outcome_indeterminate" if step["failure"]["uncertain"] else "failed",
                     detail="步骤超时；结果未确认，不自动重试")
             except Exception as exc:
-                step["failure"] = classify_failure(exc, effect=step["effect"], started=True).metadata()
-                step.update(status="outcome_indeterminate" if step["effect"] in {"write", "external"} else "failed",
+                started = context.effect_state["phase"] != "preparing"
+                step["failure"] = classify_failure(exc, effect=step["effect"], started=started).metadata()
+                step.update(status="outcome_indeterminate" if step["failure"]["uncertain"] else "failed",
                     detail=f"步骤异常：{type(exc).__name__}；请查看执行记录，不自动重试")
             finally:
+                step["execution_phase"] = context.effect_state["phase"]
+                context.effect_state = previous_effect_state
                 context.user_message, context.action_authority = previous_message, previous_authority
             observed.append(step); changed = True
             emit("plan_step", step_id=step["id"], tool=step["tool"], status=step["status"], detail=step.get("detail", ""), failure=step.get("failure"))
             persist(plan)
+            if claimed >= EXECUTION_BATCH_SIZE:
+                plan["batch_progress"] = {"claimed": claimed, "remaining": sum(s["status"] == "pending" for s in plan["steps"])}
+                plan["status"] = "running"
+                persist(plan)
+                return observed
         if not changed:
             break
-    plan["status"] = "running" if any(step["status"] not in DONE for step in plan["steps"]) else "finished"
+    plan["status"] = "clarifying" if plan.get("questions") else "running" if any(step["status"] not in DONE for step in plan["steps"]) else "finished"
     persist(plan)
     return observed
 
 
 async def begin(plan: dict, registry) -> ChatResponse:
     persist(plan, activate=True)
-    if plan["questions"]:
-        return ChatResponse(message="已记录完整请求，尚未执行。请补充：\n\n" + "\n".join(
-            f"{index}. {question}" for index, question in enumerate(plan["questions"], 1)), lane=AgentLane.CANDIDATE)
     observed = await advance(plan, registry)
     proposal = next((step.get("result", {}).get("proposal") for step in observed
         if step["status"] == "waiting_confirmation" and isinstance(step.get("result"), dict)), None)
@@ -222,6 +245,8 @@ async def begin(plan: dict, registry) -> ChatResponse:
         plan["reply"] or "没有识别到可执行目标，请说明希望完成的操作。")
     if pending:
         text += "\n\n待前置步骤完成后：" + "、".join(tool_label(tool) for tool in pending) + "。不会把启动、入队或提案视为最终完成。"
+    if plan.get("questions"):
+        text += "\n\n待补充的分支：\n" + "\n".join(f"{index}. {question}" for index, question in enumerate(plan["questions"], 1))
     # This selects content, but is not proof that a response was delivered.
     emit("plan_response_selection", plan_id=plan["id"],
          displayed_snapshot_ids=presentation.snapshot_ids,

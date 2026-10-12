@@ -30,7 +30,7 @@ from cryptography.fernet import Fernet
 from app.core.agent_tools import AgentToolRegistry, AgentToolSpec, AgentToolOutcome, ToolLoopState
 from app.core.job_filters import combine, validate_filter
 from app.llm.base import LLMResult
-from app.runtime.context import RunContext, current_run
+from app.runtime.context import RunContext, current_run, effect_checkpoint
 from app.runtime.manager import AgentRuntime
 from app.runtime.store import RunStore
 from app.workflow.execution import advance, begin, completion_steps
@@ -253,7 +253,12 @@ async def scenario(h, case):
         try: h.edit({"pause": True, "updates": [{"step_id": "target", "arguments": {field: p["value"]}}]})
         except ValueError as exc:
             raise OracleFailure("running_parameter_revision_missing", "pause/stage updated request without losing original", str(exc)) from exc
-        check(h.plan["steps"][0]["arguments"] == {**original, field: p["value"]}, "scope_lost", original, h.plan)
+        current = h.plan["steps"][0]
+        if p["phase"] == "waiting_external":
+            check(current["arguments"] == original, "running_request_mutated", original, current)
+            check(current.get("staged_arguments") == {**original, field: p["value"]}, "scope_lost", original, current)
+        else:
+            check(current["arguments"] == {**original, field: p["value"]}, "scope_lost", original, current)
         await h.tick()
         check(not h.calls, "paused_plan_executed", [], h.calls)
     elif family == "multi_turn":
@@ -348,7 +353,10 @@ async def scenario(h, case):
     elif family == "effect_timeout":
         h.install([step("delivery", "mock_delivery_start", {"min_score": 85})])
         async def fail(*args, **kwargs):
-            if not p["before"]: h.calls.append({"external_accepted": True})
+            effect_checkpoint("preparing")
+            if not p["before"]:
+                effect_checkpoint("started")
+                h.calls.append({"external_accepted": True})
             raise TimeoutError("synthetic before-submit" if p["before"] else "synthetic after-submit")
         with patch.object(h.registry, "execute", fail): await h.tick()
         expected = "failed" if p["before"] else "outcome_indeterminate"
@@ -433,11 +441,13 @@ async def scenario(h, case):
         h.install([step("action", p["tool"])])
         entered, release = asyncio.Event(), asyncio.Event()
         async def held(args):
+            effect_checkpoint("preparing")
             if p["phase"] != "before_effect":
+                effect_checkpoint("started")
                 h.store.event(h.run["id"], "synthetic_external_effect", {"accepted": True, "step_id": "action"})
             if p["phase"] == "after_receipt":
                 h.store.event(h.run["id"], "tool_finished", {"plan_id": h.plan["id"], "step_id": "action",
-                    "tool": p["tool"], "status": "ok", "result": {"confirmed": True}})
+                    "tool": p["tool"], "execution_id": h.plan["steps"][0]["execution_id"], "status": "ok", "result": {"confirmed": True}})
             h.store.event(h.run["id"], "test_barrier", {"when": p["phase"], "action": "crash"})
             entered.set()
             await release.wait()

@@ -21,7 +21,7 @@ from ..core.search_contract import explicit_search_constraints
 from ..core.task_semantics import ACTION_PATTERNS, command_grounded, understand_sources
 from ..llm.base import LLMRequest
 from ..runtime.context import emit, active_run, current_run
-from .contracts import PlannedStep, Goal, EVIDENCE_TOOLS
+from .contracts import PlannedStep, Goal, EVIDENCE_TOOLS, MAX_PLAN_STEPS
 from .validation import (PlanValidationError, normalize_encoding, encoding_schema, dependency_ancestors,
                          resolved_slots, preflight, SLOT_LABELS)
 
@@ -42,8 +42,8 @@ class RequestDraft(Strict):
     operation: Literal["execute", "revise"] = "execute"
     revision: dict | None = None
     continuation: bool = False
-    goals: list[Goal] = Field(default_factory=list, max_length=12)
-    steps: list[PlannedStep] = Field(default_factory=list, max_length=8)
+    goals: list[Goal] = Field(default_factory=list, max_length=MAX_PLAN_STEPS)
+    steps: list[PlannedStep] = Field(default_factory=list, max_length=MAX_PLAN_STEPS)
     questions: list[str] = Field(default_factory=list, max_length=8)
     reply: str = Field(default="", max_length=1500)
 
@@ -152,14 +152,16 @@ async def plan_request(llm, registry, message: str, *, dialogue: dict, condition
         live_plan = None  # Historical plans are not editable active work.
     if live_plan:
         live_plan = {key: live_plan.get(key) for key in ("id", "revision", "original", "status", "paused")} | {
-            "steps": [{key: step.get(key) for key in ("id", "tool", "arguments", "status", "depends_on")}
+            "steps": [{key: step.get(key) for key in ("id", "tool", "arguments", "staged_arguments", "missing_slots", "questions", "status", "depends_on")}
                       for step in live_plan["steps"]]}
     from .revision import RevisionDraft
     request = LLMRequest(
         instructions=(
             "你是AutoHunt任务解释器，只输出符合schema的JSON，不调用工具。"
             "active_plan是正在执行的原计划。用户追加后续动作或修改条件时operation=revise，revision按revision_schema输出。"
-            "已有步骤改参数用updates，追加动作用add_steps；原任务只有搜索也可追加投递/分析/成长计划，并依赖原搜索完成。不要重复原已执行步骤。"
+            "已有步骤改参数用updates，更新未执行步骤的前置关系用updates.depends_on，追加动作用add_steps；原任务只有搜索也可追加投递/分析/成长计划，并依赖原搜索完成。不要重复原已执行步骤。"
+            "正在搜索时更新参数会暂存并暂停；继续时安全结束旧只读搜索并按新参数启动，保留旧结果，不会原地修改旧浏览器请求。"
+            "active_plan的staged_arguments是已确认但暂未激活的最新条件；继续修改时继承它，不回退到旧arguments。"
             "取消尚未执行的单个分支用remove_steps中的原步骤ID，保留其他分支；已执行步骤只能引用其结果，不能删除或重放。"
             "steps也可提交新增步骤，应用会合并到add_steps；revision省略plan_id/expected_revision时使用当前任务。修改已有条件定位原未执行步骤，不另建同一动作。"
             "先暂停添加条件、先改一下等修订设置pause=true，等待用户继续；纯暂停也可revision updates=[]。独立新任务仍operation=execute。"
@@ -196,9 +198,9 @@ async def plan_request(llm, registry, message: str, *, dialogue: dict, condition
             "成长/学习/提升计划同义，分析不足并更新成长计划可由learning_plan_generate输出。"
             "简历修改只生成提案，不接受提案或直接改主简历。长期偏好更新与会话搜索条件调整分开。"
             "继续/重试指向有效原任务；补充范围或修改条件更新原任务，不把短句替换原始需求。"
-            "必要用户信息缺失才填missing_slots和questions；工具JSON问题由系统修复，不要求用户说固定短语。"
+            "必要用户信息缺失填对应步骤的missing_slots和questions；独立且参数完整的分支可以执行，不用全局questions阻断它们。工具JSON问题由系统修复，不要求用户说固定短语。"
             "不要无谓生成authorization缺失槽位；只读与本地可逆动作不必再确认。"
-            "先列出完整goals，再给steps；真实depends_on确保顺序。一次最多8步，答案可steps=[]。"
+            "先列出完整goals，再给steps；真实depends_on确保顺序。计划最多32步，执行器按最多8步一批推进；不要为了8步限制遗漏目标。答案可steps=[]。"
             "输出schema：" + json.dumps(RequestDraft.model_json_schema(), ensure_ascii=False)
         ),
         user_message=json.dumps({"message": message, "pending_request": previous,
@@ -253,6 +255,7 @@ def _validate_draft(draft: RequestDraft, registry, message: str, *, dialogue: di
         revision = copy.deepcopy(draft.revision or {})
         revision.setdefault("plan_id", target["id"])
         revision.setdefault("expected_revision", target.get("revision", 0))
+        revision.setdefault("questions", draft.questions)
         if draft.steps:
             revision["add_steps"] = [*revision.get("add_steps", []), *[step.model_dump() for step in draft.steps]]
             emit("plan_normalized", repair="revision_step_envelope", count=len(draft.steps))
@@ -322,7 +325,7 @@ def _validate_draft(draft: RequestDraft, registry, message: str, *, dialogue: di
         key = "refilter_results"
         while any(step["id"] == key for step in steps):
             key += "_"
-        if len(steps) >= 8:
+        if len(steps) >= MAX_PLAN_STEPS:
             raise PlanValidationError("plan_budget", "请合并步骤，保留条件更新后的证据刷新")
         refresh = {"id": key, "tool": "job_results_refilter", "arguments": {}, "command_quote": "", "scope_quote": "",
             "slot_evidence": {}, "depends_on": [step["id"] for step in updates], "missing_slots": [], "user_requested": True}
@@ -356,7 +359,7 @@ def _validate_draft(draft: RequestDraft, registry, message: str, *, dialogue: di
             key = "summary_" + search["id"][:28]
             while any(step["id"] == key for step in steps):
                 key += "_"
-            if len(steps) >= 8:
+            if len(steps) >= MAX_PLAN_STEPS:
                 raise PlanValidationError("plan_budget", "请合并读取步骤，保留搜索完成报告")
             steps.append({"id": key, "tool": "job_results_read", "arguments": {"summary": True},
                 "command_quote": "", "scope_quote": "", "slot_evidence": {}, "depends_on": [search["id"]],
@@ -438,7 +441,9 @@ def _validate_draft(draft: RequestDraft, registry, message: str, *, dialogue: di
             raise PlanValidationError("invalid_missing_slot", "待补字段不属于工具", tool=name)
         step["missing_slots"] = list(dict.fromkeys(slot for slot in step["missing_slots"] if slot not in filled))
         for slot in step["missing_slots"]:
-            questions.append("请补充" + SLOT_LABELS.get(slot, slot) + "。")
+            question = "请补充" + SLOT_LABELS.get(slot, slot) + "。"
+            questions.append(question)
+            step.setdefault("questions", []).append(question)
         missing_required = set(spec.parameters.get("required", [])) - args.keys()
         if missing_required - set(step["missing_slots"]):
             raise PlanValidationError("missing_required_argument", "规划漏填必需参数", tool=name)
@@ -453,11 +458,53 @@ def _validate_draft(draft: RequestDraft, registry, message: str, *, dialogue: di
             step.update(status="blocked", detail=step["unavailable_reason"],
                 failure={"code": "unsupported_site", "effect_started": False, "uncertain": False})
 
+    if continued:
+        # The model describes desired work, not which historical actions ran.
+        # Preserve canonical receipts even if a follow-up draft repeats a node.
+        historical = previous
+        context = active_run()
+        if context and context.plan_lookup:
+            historical = context.plan_lookup(previous["id"]) or historical
+        elif context and context.plan_reader:
+            saved = context.plan_reader()
+            if saved and saved.get("id") == previous["id"]:
+                historical = saved
+        retained = [copy.deepcopy(step) for step in historical.get("steps", [])
+                    if step.get("status") in {"completed", "skipped", "retained"}]
+        by_id = {step["id"]: step for step in retained}
+        fresh, aliases = [], {}
+        for candidate in steps:
+            old = by_id.get(candidate["id"])
+            if old:
+                if old["tool"] != candidate["tool"] or old["arguments"] != candidate["arguments"]:
+                    raise PlanValidationError("completed_step_changed", "已执行步骤不能原地改写；请追加新步骤或显式刷新分析", category="clarify")
+                continue
+            same = next((item for item in retained if item.get("effect", tools[item["tool"]].effect) != "read"
+                and item["tool"] == candidate["tool"] and item["arguments"] == candidate["arguments"]), None)
+            if same:
+                aliases[candidate["id"]] = same["id"]
+                continue
+            fresh.append(candidate)
+        for candidate in fresh:
+            candidate["depends_on"] = list(dict.fromkeys(aliases.get(key, key) for key in candidate["depends_on"]))
+            if candidate.get("evidence_step") in aliases:
+                candidate["evidence_step"] = aliases[candidate["evidence_step"]]
+        for goal in goals:
+            goal["step_ids"] = list(dict.fromkeys(aliases.get(key, key) for key in goal["step_ids"]))
+        for item in retained:
+            item["retained_result"] = True
+            item.setdefault("effect", tools[item["tool"]].effect)
+            item.setdefault("command_quote", "")
+            item.setdefault("scope_quote", "")
+            item.setdefault("missing_slots", [])
+        steps = [*retained, *fresh]
+        if len(steps) > MAX_PLAN_STEPS:
+            raise PlanValidationError("plan_budget", "任务累计超过32步，请拆分独立任务", category="clarify")
     # Check the final graph after application-added summary/dependency edges.
     preflight(steps, goals, sources, set(tools))
     mutations = set()
     for step in steps:
-        if step["effect"] != "read":
+        if step["effect"] != "read" and step["status"] == "pending":
             key = json.dumps([step["tool"], step["arguments"]], sort_keys=True, ensure_ascii=False)
             if key in mutations:
                 raise PlanValidationError("duplicate_mutation", "同一计划重复了相同动作，请合并")
@@ -472,7 +519,8 @@ def _validate_draft(draft: RequestDraft, registry, message: str, *, dialogue: di
             "detail": q} for q in dict.fromkeys(questions)]]},
         "goals": goals, "steps": steps, "questions": list(dict.fromkeys(questions)), "reply": draft.reply,
         "resume_stamp": stamp, "turn": dialogue.get("turn", 0), "expires_at": time.time() + (600 if questions else 1800),
-        "session_id": session_id, "status": "clarifying" if questions else "ready"}
+        "session_id": session_id, "revision": previous.get("revision", 0) if continued else 0,
+        "status": "clarifying" if questions else "ready"}
 
 
 async def _draft_with_repair(llm, request: LLMRequest, *, validator=None):

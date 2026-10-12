@@ -137,13 +137,21 @@ class MockWorkflowCoordinator:
         """
         if self.settings().get("applicant_id"):
             return "bound"
-        running = self.browser.current().status in {
-            BrowserTaskStatus.STARTING, BrowserTaskStatus.RUNNING, BrowserTaskStatus.WAITING_FOR_USER}
+        running = not self.browser.can_start_search() and self.browser.current().status in {
+            BrowserTaskStatus.STARTING, BrowserTaskStatus.RUNNING, BrowserTaskStatus.WAITING_FOR_USER, BrowserTaskStatus.PAUSED}
         if running:
+            try:
+                request = self.browser.store.search_recovery(self.browser.current().id)["request"] or {}
+            except (AttributeError, KeyError, ValueError):
+                request = {}
+            if request.get("conversation_id") != session_id:
+                return "busy"  # Availability, not ownership of another chat's task.
             return "searching"
         if self.browser.can_start_search():
             conditions = self._saved_search_request(session_id)
             if conditions is not None:
+                from ..runtime.context import effect_checkpoint
+                effect_checkpoint("started")
                 await self.browser.start(conditions)
                 return "searching"
         raise PreflightRefused("请先在模拟站登录求职者账号并完成一次搜索，以绑定账号")
@@ -160,7 +168,7 @@ class MockWorkflowCoordinator:
         from ..core.models import BrowserSearchRequest
         try:
             return BrowserSearchRequest(
-                conversation_id="default", query=query,
+                conversation_id=session_id, query=query, queries=saved.get("queries"),
                 result_limit=saved.get("result_limit"), salary_min=saved.get("salary_min"),
                 locations=saved.get("locations") or None, filters=saved.get("filters"))
         except Exception:  # noqa: BLE001 - malformed saved state must not break delivery
@@ -199,11 +207,14 @@ class MockWorkflowCoordinator:
         profile = self.candidate.read().profile
         if not profile.resume_id:
             raise PreflightRefused("请先上传并启用主简历；没有简历不能投递")
-        if await self._ensure_applicant_bound(session_id) == "searching":
-            return {"queued": 0, "binding": "searching",
+        binding_status = await self._ensure_applicant_bound(session_id)
+        if binding_status != "bound":
+            return {"queued": 0, "binding": "searching" if binding_status == "searching" else "waiting_resource",
+                    "binding_task_id": self.browser.current().id if binding_status == "searching" else None,
                     "message": "尚未绑定求职者账号，已为你启动一次搜索以完成登录与绑定："
                                "请在浏览器中完成登录（如需要），登录成功后账号会自动绑定，"
-                               "随后再发起本次投递即可。"}
+                               "本批次将等待绑定后继续入队，不需要重复发起投递。" if binding_status == "searching" else
+                               "正在等待共享浏览器空闲；未接管另一会话的任务，资源释放后继续账号绑定。"}
         document = self.resume.read_document()
         document_digest = resume_document_digest(document)
         evidence = self.jobs.jobs_for_resume_analysis(profile.resume_id, limit=200, min_score=min_score, task_id=task_id)
@@ -254,7 +265,10 @@ class MockWorkflowCoordinator:
                         "binding": binding, "min_score": min_score}
         if filters is not None:
             queue_kwargs.update(scope={"filters": filters, "min_score": min_score}, scope_evidence=scope_evidence)
+        from ..runtime.context import effect_checkpoint
+        effect_checkpoint("started")
         ids = self.jobs.enqueue_mock_deliveries(eligible, **queue_kwargs)
+        effect_checkpoint("committed")
         self.wakeup.set()
         from ..core.job_filters import filter_summary
         scope_label = (f"匹配分≥{min_score}" if min_score else "不设额外分数门槛") + ("；" + filter_summary(filters) if filters else "")
