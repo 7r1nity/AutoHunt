@@ -263,15 +263,44 @@ def _validate_draft(draft: RequestDraft, registry, message: str, *, dialogue: di
         from .validation import preflight_warnings
         return {"operation": "revise", "revision": edit.model_dump(), "status": "revision",
                 "validation": {"issues": preflight_warnings()}, "questions": draft.questions, "reply": draft.reply}
-    if draft.revision is not None:
-        raise PlanValidationError("invalid_revision", "revision只能用于revise操作")
+    if draft.revision:
+        # A non-empty revision object naming an active plan *is* a revision request,
+        # whatever the model left in `operation`. `operation` defaults to "execute", so a
+        # draft carrying a complete revision but omitting the discriminator was refused
+        # with "revision只能用于revise操作" — a contract mismatch, not a user error, and
+        # the shape of "搜索后追加投递被整单拒绝". The branch above already normalises
+        # `draft.steps` into the revision envelope; inferring the operation is the same
+        # repair, applied one step earlier.
+        #
+        # The guard tests truthiness, not `is not None`: an absent revision is `None`, but
+        # a draft may also carry an empty `{}`, and treating that as a revision request
+        # routed every ordinary plan through the revision path — 25 benchmark cases broke
+        # with "'NoneType' object has no attribute 'get'" before this was tightened.
+        inferred = _validate_draft(
+            draft.model_copy(update={"operation": "revise"}), registry, message,
+            dialogue=dialogue, conditions=conditions, stamp=stamp, previous=previous)
+        if inferred.get("operation") != "revise":
+            raise PlanValidationError("invalid_revision", "revision只能用于revise操作")
+        emit("plan_normalized", repair="revision_operation_inferred",
+             plan_id=str((draft.revision or {}).get("plan_id", "")))
+        return inferred
 
     continued = bool(previous and (draft.continuation or is_continuation(message)))
+    # A continuation re-derives the previous plan's steps, so it must not be allowed once
+    # work has genuinely begun: that would plan an executed action a second time. It must
+    # NOT be refused merely because some step ran — "搜索好了，把合格的投一下" is a
+    # follow-up on completed work, and requiring every step to still be pending (or
+    # treating any executed step as staleness) refused it. Completed steps are exempt
+    # because they are the evidence the new steps build on; a cancelled, failed or
+    # still-running step is what makes the derived plan unsafe.
+    done = {"completed", "skipped", "retained"}
+    unsafe = [step for step in (previous.get("steps", []) if previous else [])
+              if step.get("status", "pending") not in done | {"pending"}]
     if continued and (previous.get("resume_stamp") != stamp
             or previous.get("expires_at", 0) < time.time()
             or dialogue.get("turn", 0) - previous.get("turn", 0) > 4
             or previous.get("status") in {"finished", "completed", "cancelled", "outcome_indeterminate"}
-            or any(step.get("status", "pending") != "pending" for step in previous.get("steps", []))):
+            or unsafe):
         raise PlanValidationError("stale_authority", "原任务已过期、结束或简历已变更，请核对后重新发起", category="clarify")
     original = previous["original"] if continued else message
     answers = [*previous.get("answers", []), message][-12:] if continued else []
