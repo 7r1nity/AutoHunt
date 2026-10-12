@@ -149,7 +149,7 @@ class HistoryResetRequest(BaseModel):
 @app.get(RESET_PATH)
 async def history_reset_options() -> dict:
     return {"enabled": settings.history_reset_enabled,
-        "mock_available": bool(history_resetter.mock_database and history_resetter.mock_database.is_file())}
+        "mock_available": history_resetter.mock_available()}
 
 
 @app.post(RESET_PATH)

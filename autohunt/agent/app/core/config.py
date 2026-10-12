@@ -8,6 +8,18 @@ from pathlib import Path
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
 
 
+def mock_history_path(value: str | None) -> Path | None:
+    """Resolve an explicit local path relative to agent/, independent of cwd.
+
+    abspath normalizes ../ without following links; the resetter still checks
+    and rejects symlinks/junctions before touching the database.
+    """
+    if not value or not value.strip():
+        return None
+    path = Path(value.strip())
+    return Path(os.path.abspath(path if path.is_absolute() else BACKEND_ROOT / path))
+
+
 @dataclass(frozen=True)
 class Settings:
     data_root: Path = Path(os.getenv("AUTOHUNT_DATA_ROOT", str(BACKEND_ROOT / "data"))).resolve()
@@ -37,7 +49,7 @@ class Settings:
     router_small_model: str = os.getenv("AUTOHUNT_ROUTER_SMALL_MODEL", "")
     # Temporary, authenticated local maintenance. No path is accepted from UI.
     history_reset_enabled: bool = os.getenv("AUTOHUNT_HISTORY_RESET_ENABLED", "false").lower() == "true"
-    mock_history_database: str | None = os.getenv("AUTOHUNT_MOCK_HISTORY_DATABASE") or None
+    mock_history_database: Path | None = mock_history_path(os.getenv("AUTOHUNT_MOCK_HISTORY_DATABASE"))
 
 
 settings = Settings()

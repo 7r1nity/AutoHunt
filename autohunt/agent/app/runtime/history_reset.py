@@ -5,7 +5,7 @@ import os
 import sqlite3
 import stat
 import uuid
-from contextlib import ExitStack
+from contextlib import ExitStack, closing
 from pathlib import Path
 
 RESET_PATH = "/api/v1/maintenance/history"
@@ -31,6 +31,16 @@ class HistoryResetter:
         self.browser, self.delivery, self.workflow = browser, delivery, workflow
         self.agent_runtime = agent_runtime
         self.mock_database = Path(mock_database) if mock_database else None
+
+    def mock_available(self) -> bool:
+        path = self.mock_database
+        if not path or not path.is_absolute() or not path.is_file() or path.suffix != ".db":
+            return False
+        try:
+            self.safe_path(path, path.parent)
+        except ValueError:
+            return False
+        return True
 
     def assert_idle(self):
         workers = [*self.agent_runtime.tasks.values(), *self.agent_runtime.cancellations.values(),
@@ -87,7 +97,7 @@ class HistoryResetter:
         for path, _ in specs:
             self.safe_path(path, self.root)
         if include_mock:
-            if not self.mock_database or not self.mock_database.is_absolute() or not self.mock_database.is_file() or self.mock_database.suffix != ".db":
+            if not self.mock_available():
                 raise ValueError("未配置本地模拟站数据库；未清理任何历史")
             self.safe_path(self.mock_database, self.mock_database.parent)
             specs.append((self.mock_database, MOCK_TABLES))
@@ -110,7 +120,7 @@ class HistoryResetter:
                     snapshot = backup_root / f"database-{index}.db"
                     # Reserve the writer first; a separate reader snapshots the
                     # unchanged database without blocking on our transaction.
-                    with sqlite3.connect(path.as_uri() + "?mode=ro", uri=True) as reader, sqlite3.connect(snapshot) as copy:
+                    with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)) as reader, closing(sqlite3.connect(snapshot)) as copy:
                         reader.backup(copy)
                     snapshots.append(snapshot)
                 for index, ((_, tables), db) in enumerate(zip(specs, connections)):
@@ -137,7 +147,7 @@ class HistoryResetter:
                     db.rollback()
                 for db, snapshot in zip(connections, snapshots):
                     if db in committed:
-                        with sqlite3.connect(snapshot) as copy:
+                        with closing(sqlite3.connect(snapshot)) as copy:
                             copy.backup(db)
                 for target, destination in reversed(moved):
                     target.parent.mkdir(parents=True, exist_ok=True)
