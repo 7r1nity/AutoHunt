@@ -56,7 +56,7 @@ export function useAgentRuntime() {
           const task = event.data.task as { detail?: string };
           setProgress((current) => ({ ...current, [run.id]: task.detail ?? "浏览器任务执行中" }));
         }
-        if (event.kind === "status" || event.kind === "browser" || event.kind === "delivery" || event.kind === "confirmation" || event.kind === "plan_step") {
+        if (event.kind === "status" || event.kind === "browser" || event.kind === "delivery" || event.kind === "confirmation" || event.kind === "action_approval" || event.kind === "plan_step") {
           void refresh(run.session_id);
         }
         if (event.kind === "response") {

@@ -35,7 +35,13 @@ class ValidationIssue:
     severity: Literal["block", "warn"] = "block"
 
     def public(self) -> dict:
-        return asdict(self)
+        from ..security.decisions import Decision
+        decision = Decision.WARN if self.severity == "warn" else {
+            "repair": Decision.REPAIR, "clarify": Decision.CLARIFY, "block": Decision.DENY}[self.category]
+        if self.blocking and self.category == "repair" and self.code in {
+                "invalid_dependency", "dependency_cycle", "evidence_order", "ambiguous_evidence_binding"}:
+            decision = Decision.REPLAN
+        return {**asdict(self), "decision": decision.value}
 
     @property
     def blocking(self) -> bool:

@@ -228,7 +228,8 @@ class RuntimeContracts(unittest.IsolatedAsyncioTestCase):
         context = RunContext(saved["id"], asyncio.current_task(),
             lambda kind, data: self.runtime.emit(saved["id"], kind, data),
             lambda checkpoint: self.runtime.save(saved["id"], checkpoint), session_id="default", dialogue=dialogue,
-            mutate_dialogue=lambda operation: self.store.mutate_dialogue("default", operation), search_state={"queries": ["后来改变的方向"]})
+            mutate_dialogue=lambda operation: self.store.mutate_dialogue("default", operation), search_state={"queries": ["后来改变的方向"]},
+            authorize_action=lambda *args: self.runtime.authorize_action(saved["id"], *args))
         self.tokens.append(current_run.set(context))
         return saved, context
 
@@ -356,7 +357,9 @@ class RuntimeContracts(unittest.IsolatedAsyncioTestCase):
             original = self.source(value); child, _ = self.enter(original)
             response = await self.runtime.continue_task(child["id"], "继续任务")
             self.assertEqual(self.calls, [])
-            self.assertIn("简历已变化" if changed else "尚待具体范围确认", response.message)
+            self.assertIn("简历已变化" if changed else "等待范围确认", response.message)
+            if not changed:
+                self.assertEqual(self.store.get(child["id"])["checkpoint"]["plan"]["steps"][0]["status"], "waiting_approval")
 
     async def test_search_recovery_uses_saved_request_not_current_session_slots(self):
         saved = BrowserSearchRequest(query="金融分析师", queries=["金融分析师"], result_limit=15, salary_min=15000)

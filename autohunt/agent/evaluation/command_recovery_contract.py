@@ -151,16 +151,16 @@ class DurableCommandContracts(unittest.IsolatedAsyncioTestCase):
         # Standalone read of already saved results, no fabricated search dependency.
         draft.steps[0].depends_on = []
         plan = validate_draft(draft, self.registry, "看看有什么岗位", dialogue={}, conditions={}, stamp=STAMP)
-        self.assertEqual(plan["status"], "clarifying")
-        self.assertTrue(plan["questions"])
+        self.assertEqual(plan["status"], "ready")
+        await advance(plan, self.registry)
+        self.assertEqual(plan["steps"][0]["status"], "waiting_approval")
         self.assertEqual(self.calls, [])
 
     async def test_uncertain_added_submission_asks_instead_of_repair_loop(self):
         self.enter(); self.search_only()
         plan = self.normalize({"operation": "revise", "steps": [delivery_step(user_requested=False)]})
-        self.assertEqual(plan["status"], "clarifying")
-        self.assertIn("正式岗位", plan["questions"][0])
-        self.assertEqual(plan["validation"]["issues"][0]["category"], "clarify")
+        self.assertEqual(plan["status"], "revision")
+        self.assertFalse(plan["revision"]["add_steps"][0]["user_requested"])
         self.assertEqual(self.calls, [])
         self.assertEqual(self.store.get(self.parent["id"])["checkpoint"]["plan"], self.value)
 

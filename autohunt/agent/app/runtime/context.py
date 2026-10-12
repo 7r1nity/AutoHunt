@@ -32,6 +32,8 @@ class RunContext:
     action_authority: dict | None = None
     cancellation_requested: Callable[[], bool] | None = None
     plan_lookup: Callable[[str], dict | None] | None = None
+    authorize_action: Callable | None = None
+    resolve_approval: Callable | None = None
 
 
 current_run: ContextVar[RunContext | None] = ContextVar("autohunt_run", default=None)

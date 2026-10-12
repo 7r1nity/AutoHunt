@@ -125,6 +125,15 @@ class Refresh(unittest.IsolatedAsyncioTestCase):
         self.context = RunContext("synthetic-run", asyncio.current_task(), lambda kind,data: self.events.append({"kind":kind,**data}), lambda _: None,
             search_state={"queries": ["分析师"], "locations": [], "filters": self.new},
             dialogue={"tasks": {"browser_id": self.task_id}})
+        from app.runtime.store import RunStore
+        from app.runtime.manager import AgentRuntime
+        self.runtime_store = RunStore(Path(self.temp.name) / "runtime.db")
+        self.runtime_run, _ = self.runtime_store.create("default", "synthetic", "chat", {"message": "合成条件修订"})
+        self.runtime = AgentRuntime(self.runtime_store, NS(tool_registry=self.registry, candidate_state=self.candidate), NS(), NS(), None, self.resume)
+        original_emit = self.context.emit
+        self.context.run_id = self.runtime_run["id"]
+        self.context.emit = lambda kind,data: (original_emit(kind,data), self.runtime.emit(self.runtime_run["id"], kind,data))
+        self.context.authorize_action = lambda *args: self.runtime.authorize_action(self.runtime_run["id"], *args)
         self.token = current_run.set(self.context)
 
     async def asyncTearDown(self):

@@ -434,6 +434,10 @@ class AutoHuntAgent:
         emit("progress", detail="正在识别请求并读取当前简历与偏好")
         context = active_run()
         context.user_message = message
+        if context.resolve_approval:
+            approved = await context.resolve_approval(message)
+            if approved is not None:
+                return approved
         patch = None  # Semantic search edits are parsed by models, never regex.
         engine = getattr(self.router, "rule_engine", None)
         safety_match = engine.match(message) if engine else None
@@ -1259,6 +1263,8 @@ class AutoHuntAgent:
                         status=outcome.status,
                         detail=str(outcome.content)[:300],
                     ))
+                    if outcome.status == "awaiting_approval":
+                        return ChatResponse(message=str(outcome.content), lane=AgentLane.APPLICATION, tool_events=events)
                     if outcome.resume_proposal is not None:
                         proposal = outcome.resume_proposal
                     if call.name == "job_detail_read" and outcome.status == "ok":

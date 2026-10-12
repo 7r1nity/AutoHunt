@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_validator
 
 from ..core.security import redact
 
@@ -23,6 +23,13 @@ class RunCreate(BaseModel):
         return self
 
 
+class ApprovalDecision(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    conversation_id: str = Field(pattern=r"^[a-zA-Z0-9_-]{1,80}$")
+    approval_id: str = Field(pattern=r"^[a-f0-9]{32}$")
+    approve: StrictBool
+
+
 def public_run(run: dict) -> dict:
     # Checkpoints contain model context and are internal, never an HTTP response.
     return redact({key: value for key, value in run.items() if key not in {"payload", "checkpoint", "request_hash"}} | {
@@ -31,6 +38,10 @@ def public_run(run: dict) -> dict:
         "delivery_id": (run["checkpoint"] or {}).get("delivery_id"),
         "plan_steps": [{key: step.get(key) for key in ("id", "tool", "depends_on", "status", "detail")}
                        for step in ((run["checkpoint"] or {}).get("plan") or {}).get("steps", [])],
+        "approvals": [{"id": step["approval_id"], "tool": step["tool"], "arguments": step["arguments"],
+                       "detail": step.get("detail", "请核对本次动作范围")}
+                      for step in ((run["checkpoint"] or {}).get("plan") or {}).get("steps", [])
+                      if step.get("status") == "waiting_approval" and step.get("approval_id")],
         "can_resume": bool(run["status"] in {"waiting_user", "waiting_reply"} or (
             run["status"] in {"interrupted", "timed_out", "failed"} and not run["mutation_started"] and (
                 run["kind"] == "learning_plan" or (run["checkpoint"] or {}).get("phase") == "tool_loop"))),

@@ -16,16 +16,15 @@ The graded object is therefore the *action*, not the sentence:
     HIGH     irreversible or bulk external effect: submitting résumés
     UNKNOWN  not classified yet
 
-`UNKNOWN` is deliberately excluded from the ordering, mirroring OpenHands' design
+`UNKNOWN` is deliberately excluded from the ordering
 (``_RISK_ORDER`` omits it so comparisons raise). A new tool therefore cannot be waved
 through by accident: it grades as UNKNOWN until someone classifies it, and the default
 policy asks about UNKNOWN. Forgetting to classify turns into one extra question rather
 than a silent execution.
 
-A user's own explicit instruction is an authorization for the action it names, so it
-satisfies the *question*, not the *boundary*: criteria such as "85分以上" define the set
-the instruction covers, and anything outside that set is not authorized at all. See
-``within_authorised_scope``.
+Runtime policy is in ``decisions``. A server-owned action snapshot records a scoped
+instruction or human decision. Job eligibility uses the shared condition tree;
+ScopedInstruction below remains a legacy audit projection, never an execution gate.
 """
 from __future__ import annotations
 

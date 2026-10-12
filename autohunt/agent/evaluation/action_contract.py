@@ -30,6 +30,8 @@ from app.intent.store import RouterStore
 from app.llm.base import LLMResult
 from app.memory.resume_store import analyze_resume_text
 from app.runtime.context import RunContext, current_run
+from app.runtime.store import RunStore
+from app.runtime.manager import AgentRuntime
 from app.workflow.execution import advance, begin, persist
 from app.workflow.planning import RequestDraft, plan_request, shortcut_safe, validate_draft
 from app.workflow.validation import PlanValidationError, preflight, preflight_warnings
@@ -78,15 +80,24 @@ class Contracts(unittest.IsolatedAsyncioTestCase):
         self.resumes = NS(read_document=lambda: self.document)
         self.registry = AgentToolRegistry(jobs=None, browser=None, candidate_state=self.candidate,
             resume_workspace=self.resumes, memory=None, learning_plans=NS(), mock_workflow=NS())
-        self.context = RunContext("synthetic-run", asyncio.current_task(),
-            lambda k, d: self.events.append({"kind": k, **d}), lambda _: None,
-            session_id="synthetic-session", dialogue={"turn": 1}, search_state={"queries": ["金融分析师"]})
+        self.temp = tempfile.TemporaryDirectory()
+        self.store = RunStore(Path(self.temp.name) / "runtime.db")
+        self.run, _ = self.store.create("default", "synthetic", "chat", {"message": "合成请求"})
+        self.runtime = AgentRuntime(self.store, NS(tool_registry=self.registry, candidate_state=self.candidate), NS(), NS(), None, self.resumes)
+        def event(kind, data):
+            self.events.append({"kind": kind, **data})
+            self.runtime.emit(self.run["id"], kind, data)
+        self.context = RunContext(self.run["id"], asyncio.current_task(), event, lambda _: None,
+            session_id="default", dialogue={"turn": 1}, search_state={"queries": ["金融分析师"]},
+            authorize_action=lambda *args: self.runtime.authorize_action(self.run["id"], *args))
         self.token = current_run.set(self.context)
         self.stamp = "synthetic-resume:synthetic-document:1"
 
     async def asyncTearDown(self):
         RECORDS.append({"test": self.id(), "events": self.events, "executor_calls": self.calls})
         current_run.reset(self.token)
+        gc.collect()
+        self.temp.cleanup()
 
     def validate(self, payload=None, message="找十八个工作，85分以上投递，以下且25k以上生成提升计划", **kwargs):
         return validate_draft(RequestDraft.model_validate(payload or candidate()), self.registry, message,
@@ -179,13 +190,14 @@ class Contracts(unittest.IsolatedAsyncioTestCase):
 
     async def test_unknown_consent_asks_then_context_confirmation(self):
         plan = self.validate(candidate(requested=False))
-        self.assertEqual(plan["status"], "clarifying")
-        amended = candidate(requested=True)
-        amended["continuation"] = True
-        confirmed = self.validate(amended, message="行，那就按这个范围执行", previous=plan)
-        self.assertEqual(confirmed["status"], "ready")
-        self.assertEqual(confirmed["original"], plan["original"])
-        self.assertEqual(confirmed["id"], plan["id"])
+        plan["steps"] = [step for step in plan["steps"] if step["tool"] == "mock_delivery_start"]
+        plan["steps"][0]["depends_on"] = []
+        self.assertEqual(plan["status"], "ready")
+        await advance(plan, self.registry)
+        self.assertEqual(plan["steps"][0]["status"], "waiting_approval")
+        self.assertFalse(plan["steps"][0]["user_requested"])
+        await self.runtime.resolve_approval("default", "可以")
+        self.assertEqual(self.store.approvals(self.run["id"])[0]["status"], "approved")
 
     async def test_audit_binding_is_not_a_tool_authorization_gate(self):
         plan = self.validate()
@@ -203,12 +215,10 @@ class Contracts(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.calls), 1)
 
     async def test_submission_scope_is_enforced_by_submission_executor(self):
-        from app.runtime.resilience import PreflightRefused
-        for metadata in (None, {"requested": False}):
-            self.context.action_authority = metadata
-            with self.assertRaises(PreflightRefused):
-                await self.registry._mock_delivery_start({"min_score": 85})
-        self.context.action_authority = {"requested": True, "evidence_task_id": "original-search"}
+        plan = self.validate()
+        step = plan["steps"][1]
+        self.bind(plan, step)
+        self.context.action_authority["evidence_task_id"] = "original-search"
         async def queue(**args):
             self.calls.append(args)
             return {"queued": 1}
@@ -245,7 +255,12 @@ class Contracts(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.validate(payload)["status"], "clarifying")
         payload = candidate()
         payload["steps"][0]["arguments"]["source"] = "boss"
-        self.assertEqual(self.validate(payload)["status"], "clarifying")
+        value = self.validate(payload)
+        self.assertEqual(value["status"], "ready")
+        self.assertEqual(value["steps"][0]["status"], "pending")
+        denied = next(step for step in value["steps"] if step["tool"] == "mock_delivery_start")
+        self.assertEqual(denied["status"], "blocked")
+        self.assertEqual(denied["failure"]["code"], "unsupported_site")
 
     async def test_structure_errors_repair_not_language_reject(self):
         for changed in ["cycle", "unknown_tool", "bad_type", "bad_range", "duplicate"]:
@@ -361,6 +376,7 @@ class Contracts(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(reopened["instruction_request"]["status"], "finished")
             self.context.mutate_dialogue = None
             del store
+            gc.collect()
             gc.collect()
 
     async def test_waiting_does_not_expire_ordinary_plan_execution(self):

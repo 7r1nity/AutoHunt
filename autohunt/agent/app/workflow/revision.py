@@ -15,6 +15,7 @@ class StepUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     step_id: str
     arguments: dict[str, Any] = Field(default_factory=dict)
+    user_requested: bool | None = None
 
 
 class RevisionDraft(BaseModel):
@@ -25,6 +26,7 @@ class RevisionDraft(BaseModel):
     updates: list[StepUpdate] = Field(default_factory=list, max_length=8)
     add_steps: list[PlannedStep] = Field(default_factory=list, max_length=8)
     remove_steps: list[str] = Field(default_factory=list, max_length=32)
+    invalidated_steps: list[str] = Field(default_factory=list, max_length=8)
     goals: list[Goal] = Field(default_factory=list, max_length=12)
 
 
@@ -36,16 +38,45 @@ def edited_plan(plan: dict, edit: RevisionDraft, registry, *, stamp: str, sessio
     if plan.get("resume_stamp") != stamp:
         raise ValueError("任务绑定的简历已变化，请确认新的任务范围")
     if plan.get("status") in {"cancelled", "outcome_indeterminate"} or (
-            plan.get("status") in {"finished", "completed"} and not edit.add_steps):
+            plan.get("status") in {"finished", "completed"} and not edit.add_steps and not edit.invalidated_steps):
         raise ValueError("原计划已结束或结果不确定，不能修改并重放")
     result = copy.deepcopy(plan)
     steps = {step["id"]: step for step in result["steps"]}
+    invalidated = set(edit.invalidated_steps)
+    if len(invalidated) != len(edit.invalidated_steps) or not invalidated <= steps.keys():
+        raise ValueError("待刷新结果不存在或重复")
+    replacements = {}
+    # Preserve old receipts. Only recomputable evidence/analysis gets a fresh node;
+    # external sends/searches and accepted resume changes cannot be replayed here.
+    for old_id in edit.invalidated_steps:
+        old = steps[old_id]
+        if old["status"] != "completed" or old["tool"] not in {
+                "job_results_read", "job_stats_read", "job_results_refilter", "learning_plan_generate"}:
+            raise ValueError("只能刷新已完成的证据或分析；发送与结果不确定的动作需要核验")
+        new_id = f"r{plan.get('revision', 0) + 1}_{old_id}"[:38]
+        while new_id in steps:
+            new_id = new_id[:37] + "_"
+            if len(new_id) == 38 and new_id in steps:
+                raise ValueError("刷新步骤ID冲突，请拆分修订")
+        replacement = copy.deepcopy(old)
+        replacement.update(id=new_id, status="pending", result=None, task_id=None, refresh_of=old_id)
+        for key in ("retained_result", "failure", "approval_id", "detail", "proposal_id", "invalidated_by"):
+            replacement.pop(key, None)
+        old.update(invalidated_by=new_id, retained_result=True)
+        replacements[old_id] = new_id
+        result["steps"].append(replacement)
+        steps[new_id] = replacement
+    for step in result["steps"]:
+        if step["status"] in {"pending", "waiting_approval"}:
+            step["depends_on"] = [replacements.get(key, key) for key in step["depends_on"]]
+            if step.get("evidence_step") in replacements:
+                step["evidence_step"] = replacements[step["evidence_step"]]
     removed = set(edit.remove_steps)
     if len(removed) != len(edit.remove_steps) or not removed <= steps.keys():
         raise ValueError("待取消步骤不存在或重复")
     for step_id in removed:
         step = steps[step_id]
-        if step["status"] != "pending":
+        if step["status"] not in {"pending", "waiting_approval"}:
             raise ValueError("只能取消尚未执行的步骤；正在发送的操作请使用停止任务入口")
         step.update(status="skipped", withdrawn=True, detail="已按用户要求取消此后续动作",
                     failure={"code": "user_withdrawn", "effect_started": False, "uncertain": False})
@@ -55,7 +86,7 @@ def edited_plan(plan: dict, edit: RevisionDraft, registry, *, stamp: str, sessio
             raise ValueError("修改步骤不存在或重复")
         seen.add(update.step_id)
         step = steps[update.step_id]
-        if step["status"] != "pending" or step["tool"] in result.get("revoked_tools", []):
+        if step["status"] not in {"pending", "waiting_approval"} or step["tool"] in result.get("revoked_tools", []):
             raise ValueError("只能修改尚未执行的步骤；已执行、已撤回和结果不确定的步骤不会重放")
         spec = registry._tools[step["tool"]]
         arguments = normalize_encoding({**step["arguments"], **update.arguments}, spec.parameters)
@@ -70,6 +101,11 @@ def edited_plan(plan: dict, edit: RevisionDraft, registry, *, stamp: str, sessio
         if step["tool"] == "learning_plan_generate" and arguments.get("min_score", 0) > arguments.get("max_score", 100):
             raise ValueError("分析分数下界不能超过上界")
         step["arguments"] = arguments
+        if update.user_requested is not None:
+            step["user_requested"] = update.user_requested
+        if step["status"] == "waiting_approval":
+            step.update(status="pending")
+            step.pop("approval_id", None)
         step["authority_binding"] = action_binding(step["tool"], arguments, session_id=session_id,
             requested=step.get("user_requested", (step.get("authority_binding") or {}).get("user_requested", False)))
     for addition in edit.add_steps:
@@ -89,18 +125,49 @@ def edited_plan(plan: dict, edit: RevisionDraft, registry, *, stamp: str, sessio
         if step["arguments"].get("filters") is not None:
             from ..core.job_filters import validate_filter
             step["arguments"]["filters"] = validate_filter(step["arguments"]["filters"]).model_dump(mode="json")
-        if step["tool"] == "mock_delivery_start" and not step["user_requested"]:
-            raise ValueError("新增投递范围尚待确认，请核对要投递的岗位")
         step.update(status="pending", effect=spec.effect, result=None, task_id=None,
                     command_quote=step["command_quote"] or message)
         step["authority_binding"] = action_binding(step["tool"], step["arguments"], session_id=session_id,
                                                    requested=step["user_requested"])
         result["steps"].append(step)
         steps[step["id"]] = step
+    condition_updates = [step for step in result["steps"] if step["id"] in seen
+                         and step["tool"] == "search_state_update" and step["status"] == "pending"]
+    condition_updates.extend(step for step in result["steps"] if step["tool"] == "search_state_update"
+                             and step["id"] in {addition.id for addition in edit.add_steps})
+    fresh_actions = [step for step in result["steps"] if step["tool"] in EVIDENCE_TOOLS and step["status"] == "pending"
+                     and (step["id"] in {addition.id for addition in edit.add_steps} or step.get("refresh_of"))]
+    if condition_updates and fresh_actions:
+        for producer in result["steps"]:
+            if producer["status"] == "pending" and producer["tool"] in {"job_search_start", "job_results_refilter"}:
+                producer["depends_on"] = list(dict.fromkeys([*producer["depends_on"], *[step["id"] for step in condition_updates]]))
+        key = f"refresh_r{plan.get('revision', 0) + 1}"
+        while key in steps:
+            key += "_"
+        producers = [step for step in result["steps"] if step["tool"] in {"job_search_start", "job_results_refilter"}]
+        if len(producers) > 1:
+            latest = [step for step in producers if not any(step["id"] in dependency_ancestors(other["id"], result["steps"])
+                       for other in producers if other["id"] != step["id"])]
+        else:
+            latest = producers
+        if len(latest) > 1:
+            raise ValueError("多个结果来源，请明确刷新哪一轮证据")
+        refresh = {"id": key, "tool": "job_results_refilter", "arguments": {}, "status": "pending", "effect": "write",
+            "depends_on": [step["id"] for step in condition_updates] + [step["id"] for step in latest],
+            "command_quote": message, "scope_quote": "", "missing_slots": [], "user_requested": True,
+            "result": None, "task_id": None}
+        if latest and latest[0].get("task_id"):
+            refresh["arguments"]["task_id"] = latest[0]["task_id"]
+        result["steps"].append(refresh)
+        steps[key] = refresh
+        for step in fresh_actions:
+            step["depends_on"].append(key)
+            step["evidence_step"] = key
     if len(result["steps"]) > 32:
         raise ValueError("任务累计步骤超过32，请分为独立任务")
-    for addition in edit.add_steps:
-        step = steps[addition.id]
+    for step in result["steps"]:
+        if step["id"] not in {addition.id for addition in edit.add_steps} and not step.get("refresh_of"):
+            continue
         if step["status"] != "pending" or step["tool"] not in EVIDENCE_TOOLS:
             continue
         producers = [item for item in result["steps"] if item["tool"] in {"job_search_start", "job_results_refilter"}]
@@ -122,4 +189,5 @@ def edited_plan(plan: dict, edit: RevisionDraft, registry, *, stamp: str, sessio
     result.setdefault("revision_history", []).append({"revision": result["revision"], "message": message,
         "updated_steps": sorted(seen), "added_steps": [step.id for step in edit.add_steps],
         "removed_steps": sorted(removed), "paused": paused})
+    result["revision_history"][-1]["invalidated_steps"] = sorted(invalidated)
     return result

@@ -169,6 +169,7 @@ class RevisionContracts(unittest.IsolatedAsyncioTestCase):
             lambda kind, data: self.runtime.emit(self.edit_run["id"], kind, data), lambda value: None,
             dialogue=self.store.dialogue_state("default"), mutate_dialogue=lambda operation: self.store.mutate_dialogue("default", operation),
             plan_reader=lambda: self.runtime.active_plan("default"), user_message="先暂停 添加条件 85分以下但是薪资25k以上的分析不足和劣势")
+        self.context.authorize_action = lambda *args: self.runtime.authorize_action(self.edit_run["id"], *args)
         self.token = current_run.set(self.context)
 
     async def asyncTearDown(self):

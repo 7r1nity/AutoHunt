@@ -64,6 +64,12 @@ class RunStore:
                     session_id TEXT PRIMARY KEY REFERENCES agent_sessions(id),
                     state TEXT NOT NULL, updated_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS action_approvals (
+                    id TEXT PRIMARY KEY, run_id TEXT NOT NULL, session_id TEXT NOT NULL,
+                    step_id TEXT NOT NULL, snapshot TEXT NOT NULL, status TEXT NOT NULL,
+                    source TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS action_approvals_owner ON action_approvals(run_id, step_id);
             """)
             db.execute("INSERT OR IGNORE INTO agent_sessions VALUES (?,?,?)", ("default", "默认会话", now()))
             if "error_type" not in {row[1] for row in db.execute("PRAGMA table_info(agent_runs)")}:
@@ -246,6 +252,23 @@ class RunStore:
             db.execute(f"UPDATE agent_runs SET {','.join(key+'=?' for key in values)} WHERE id=?", (*values.values(), run_id))
         return self.get(run_id)
 
+    def save_plan(self, run_id: str, plan: dict, *, expected_revision: int | None = None) -> bool:
+        """Authoritative plan CAS. Dialogue state is a projection, not the lock."""
+        with self.lock, self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT status,checkpoint FROM agent_runs WHERE id=?", (run_id,)).fetchone()
+            if not row or row["status"] in TERMINAL:
+                return False
+            saved = self._load(row["checkpoint"]) if row["checkpoint"] else {}
+            old = saved.get("plan") or {}
+            if expected_revision is not None and old.get("revision", 0) != expected_revision:
+                raise ValueError("计划版本已变化，请重新读取后合并修订")
+            if old.get("id") == plan["id"] and old.get("revision", 0) > plan.get("revision", 0):
+                return False
+            saved.update(phase="action_plan", plan=plan)
+            db.execute("UPDATE agent_runs SET checkpoint=?,updated_at=? WHERE id=?", (self._encode(saved), now(), run_id))
+        return True
+
     def event(self, run_id: str, kind: str, data: dict):
         with self.lock, self.connect() as db:
             db.execute("INSERT INTO agent_run_events (run_id,kind,data,created_at) VALUES (?,?,?,?)",
@@ -266,3 +289,72 @@ class RunStore:
     def public_events(self, run_id: str, after: int = 0) -> list[dict]:
         """Boundary copy for diagnostic HTTP/SSE; internal consumers use events()."""
         return redact(self.events(run_id, after))
+
+    def approval(self, approval_id: str) -> dict:
+        with self.connect() as db:
+            row = db.execute("SELECT * FROM action_approvals WHERE id=?", (approval_id,)).fetchone()
+        if not row:
+            raise KeyError("确认记录不存在")
+        return {**dict(row), "snapshot": self._load(row["snapshot"])}
+
+    def approvals(self, run_id: str | None = None, *, session_id: str | None = None, pending=False) -> list[dict]:
+        with self.connect() as db:
+            rows = db.execute("SELECT id FROM action_approvals WHERE (? IS NULL OR run_id=?) "
+                "AND (? IS NULL OR session_id=?)" + (" AND status='pending'" if pending else "") +
+                " ORDER BY created_at", (run_id, run_id, session_id, session_id)).fetchall()
+        return [self.approval(row["id"]) for row in rows]
+
+    def ensure_approval(self, run_id: str, session_id: str, step_id: str, snapshot: dict, *, requested=False) -> dict:
+        """Authority comes from server-owned action snapshots, never model tokens.
+
+        Plan revision is intentionally absent: an unrelated edit cannot invalidate
+        this action. Business parameters, evidence and resume are compared losslessly.
+        """
+        with self.lock, self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            owner = db.execute("SELECT session_id,status,cancel_requested FROM agent_runs WHERE id=?", (run_id,)).fetchone()
+            if not owner or owner["session_id"] != session_id or owner["status"] in TERMINAL or owner["cancel_requested"]:
+                raise ValueError("任务已停止或不属于本会话")
+            rows = db.execute("SELECT * FROM action_approvals WHERE run_id=? AND step_id=? ORDER BY created_at DESC",
+                              (run_id, step_id)).fetchall()
+            # A rejected scope cannot be silently revived by a retry. A new explicit
+            # task/action has a new identity and can request it again.
+            if rows and self._load(rows[0]["snapshot"]) == snapshot and rows[0]["status"] != "invalidated":
+                item = {**dict(rows[0]), "snapshot": snapshot}
+                if requested and item["status"] == "pending":
+                    db.execute("UPDATE action_approvals SET status='approved',source='instruction',updated_at=? "
+                               "WHERE id=? AND status='pending'", (now(), item["id"]))
+                    item.update(status="approved", source="instruction")
+                return item
+            db.execute("UPDATE action_approvals SET status='invalidated',updated_at=? "
+                       "WHERE run_id=? AND step_id=? AND status IN ('pending','approved')", (now(), run_id, step_id))
+            approval_id, timestamp = uuid.uuid4().hex, now()
+            status, source = ("approved", "instruction") if requested else ("pending", "confirmation")
+            db.execute("INSERT INTO action_approvals VALUES (?,?,?,?,?,?,?,?,?)", (approval_id, run_id, session_id,
+                step_id, self._encode(snapshot), status, source, timestamp, timestamp))
+        return self.approval(approval_id)
+
+    def settle_approval(self, approval_id: str, *, run_id: str, session_id: str, approve: bool, snapshot: dict) -> dict:
+        """CAS decision; double clicks are idempotent, stale/foreign decisions fail."""
+        with self.lock, self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT * FROM action_approvals WHERE id=?", (approval_id,)).fetchone()
+            owner = db.execute("SELECT session_id,status,cancel_requested FROM agent_runs WHERE id=?", (run_id,)).fetchone()
+            if not row or row["run_id"] != run_id or row["session_id"] != session_id or not owner or owner["session_id"] != session_id:
+                raise ValueError("确认记录不属于此任务和会话")
+            if owner["status"] in TERMINAL or owner["cancel_requested"] or self._load(row["snapshot"]) != snapshot:
+                raise ValueError("动作范围已变化或任务已停止，请核对当前记录")
+            status = "approved" if approve else "rejected"
+            if row["status"] != "pending":
+                if row["status"] != status:
+                    raise ValueError("该确认已处理或失效")
+            else:
+                db.execute("UPDATE action_approvals SET status=?,source='confirmation',updated_at=? WHERE id=? AND status='pending'",
+                           (status, now(), approval_id))
+        return self.approval(approval_id)
+
+    def invalidate_approvals(self, run_id: str, step_ids: list[str] | None = None) -> None:
+        with self.lock, self.connect() as db:
+            db.execute("UPDATE action_approvals SET status='invalidated',updated_at=? WHERE run_id=? "
+                "AND status IN ('pending','approved')" + (" AND step_id IN (" + ",".join("?" for _ in step_ids) + ")" if step_ids else ""),
+                (now(), run_id, *(step_ids or [])))

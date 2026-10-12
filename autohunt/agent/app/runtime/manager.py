@@ -55,7 +55,7 @@ class AgentRuntime:
         tasks = list(self.tasks.items())
         for run_id, task in tasks:
             run = self.store.get(run_id)
-            if run["status"] not in TERMINAL and not (run["checkpoint"] or {}).get("browser_id") and not (run["checkpoint"] or {}).get("delivery_id") and run["status"] != "waiting_confirmation":
+            if run["status"] not in TERMINAL and not (run["checkpoint"] or {}).get("browser_id") and not (run["checkpoint"] or {}).get("delivery_id") and (run["checkpoint"] or {}).get("phase") != "action_plan" and run["status"] != "waiting_confirmation":
                 self.finish(run_id, "outcome_indeterminate" if run["mutation_started"] else "interrupted", "服务停止，检查点已保存")
             task.cancel()
         await asyncio.gather(*(task for _, task in tasks), return_exceptions=True)
@@ -64,9 +64,12 @@ class AgentRuntime:
         self.tasks.clear()
 
     def schedule(self, run_id: str, *, watch_only=False):
+        previous = self.tasks.get(run_id)
+        if previous and not previous.done():
+            return
         task = asyncio.create_task(self.execute(run_id, watch_only=watch_only), name=f"agent-run-{run_id}")
         self.tasks[run_id] = task
-        task.add_done_callback(lambda done: self.tasks.pop(run_id, None))
+        task.add_done_callback(lambda done: self.tasks.pop(run_id, None) if self.tasks.get(run_id) is done else None)
 
     def submit(self, session_id: str, request_key: str, kind: str, payload: dict, parent_id=None) -> dict:
         scope = stop_scope(payload.get("message", "")) if kind == "chat" else None
@@ -157,7 +160,8 @@ class AgentRuntime:
             if previous_plan.get("id") == data["plan"]["id"] and previous_plan.get("revision", 0) > data["plan"].get("revision", 0):
                 self.store.event(run_id, "stale_plan_write_ignored", {"revision": data["plan"].get("revision", 0)})
                 return
-            self.store.update(run_id, checkpoint={**saved, "phase": "action_plan", "plan": data["plan"]})
+            if not self.store.save_plan(run_id, data["plan"]):
+                return
         if kind == "plan_response_selection":
             saved = self.store.get(run_id)["checkpoint"] or {}
             self.store.update(run_id, checkpoint={**saved, "response_selection": data})
@@ -177,7 +181,115 @@ class AgentRuntime:
             checkpoint = copy.deepcopy(checkpoint)
             for message in checkpoint.get("messages", []):
                 message.pop("reasoning_content", None)
-            self.store.update(run_id, checkpoint=checkpoint)
+            if (current["checkpoint"] or {}).get("phase") == "action_plan":
+                checkpoint.pop("phase", None)
+                checkpoint.pop("plan", None)
+            self.store.update(run_id, checkpoint={**(current["checkpoint"] or {}), **checkpoint})
+
+    def action_snapshot(self, run_id: str, tool: str, arguments: dict) -> tuple[str, dict, bool]:
+        from .context import active_run
+        context = active_run()
+        run = self.store.get(run_id)
+        metadata = context.action_authority or {} if context else {}
+        plan = (run["checkpoint"] or {}).get("plan") or {}
+        step_id = metadata.get("step_id")
+        if not step_id:
+            # Tool-loop callers use the same durable runner after confirmation.
+            # A model cannot authorize its own speculative external call.
+            step_id = "action"
+            if not plan:
+                from ..growth.requests import resume_stamp
+                stamp = resume_stamp(self.resume_workspace.read_document(), self.agent.candidate_state)
+                plan = {"id": run_id, "session_id": run["session_id"], "original": context.user_message if context else "",
+                    "answers": [], "questions": [], "reply": "", "turn": 0, "expires_at": time.time() + 1800,
+                    "revision": 0, "resume_stamp": stamp, "status": "running", "goals": [],
+                    "steps": [{"id": step_id, "tool": tool, "arguments": copy.deepcopy(arguments), "depends_on": [],
+                        "command_quote": context.user_message if context else "", "scope_quote": "", "missing_slots": [],
+                        "status": "pending", "effect": self.agent.tool_registry._tools[tool].effect, "user_requested": False}]}
+                self.store.update(run_id, checkpoint={**(run["checkpoint"] or {}), "phase": "action_plan", "plan": plan})
+        step = next((step for step in plan.get("steps", []) if step["id"] == step_id), None)
+        if not step or step["tool"] != tool or step["arguments"] != arguments or step.get("withdrawn") or tool in plan.get("revoked_tools", []):
+            raise ValueError("动作与任务执行记录不一致或已撤回")
+        producer = next((item for item in plan["steps"] if item["id"] == step.get("evidence_step")), {})
+        from ..workflow.execution import RESUME_BOUND_TOOLS
+        snapshot = {"plan_id": plan["id"], "tool": tool, "arguments": copy.deepcopy(arguments),
+                    "resume_stamp": plan["resume_stamp"] if tool in RESUME_BOUND_TOOLS else None,
+                    "evidence_task_id": producer.get("task_id")}
+        return step_id, snapshot, bool(step.get("user_requested", (step.get("authority_binding") or {}).get("user_requested", False)))
+
+    def authorize_action(self, run_id: str, tool: str, arguments: dict, risk: str, always: bool) -> dict:
+        run = self.store.get(run_id)
+        step_id, snapshot, requested = self.action_snapshot(run_id, tool, arguments)
+        record = self.store.ensure_approval(run_id, run["session_id"], step_id, snapshot,
+                                           requested=requested and risk != "UNKNOWN" and not always)
+        if record["status"] == "pending":
+            # Persist wait BEFORE returning to the caller, including tool-loop callers.
+            current = self.store.get(run_id)
+            plan = copy.deepcopy(current["checkpoint"]["plan"])
+            step = next(step for step in plan["steps"] if step["id"] == step_id)
+            step.update(status="waiting_approval", approval_id=record["id"],
+                        detail="请核对本动作范围后确认；已有步骤和独立分支保留")
+            self.store.update(run_id, checkpoint={**current["checkpoint"], "plan": plan}, status="waiting_confirmation")
+            if not self.store.has_event(run_id, "approval:" + record["id"]):
+                self.store.event(run_id, "approval:" + record["id"], {"approval_id": record["id"]})
+                self.store.event(run_id, "action_approval", {"approval_id": record["id"], "step_id": step_id,
+                    "tool": tool, "risk": risk, "status": "pending", "detail": step["detail"]})
+        return {key: record[key] for key in ("id", "status", "source")} | {"scope": snapshot}
+
+    async def decide_approval(self, run_id: str, approval_id: str, session_id: str, approve: bool) -> dict:
+        lock = self.sessions.setdefault(session_id, asyncio.Lock())
+        async with lock:
+            return self._decide_approval(run_id, approval_id, session_id, approve)
+
+    def _decide_approval(self, run_id: str, approval_id: str, session_id: str, approve: bool) -> dict:
+        from ..growth.requests import resume_stamp
+        run = self.store.get(run_id)
+        record = self.store.approval(approval_id)
+        if record["run_id"] != run_id or record["session_id"] != session_id or run["session_id"] != session_id:
+            raise ValueError("确认记录不属于此任务和会话")
+        plan = (run["checkpoint"] or {}).get("plan") or {}
+        step = next((step for step in plan.get("steps", []) if step["id"] == record["step_id"]), None)
+        if not step or step.get("approval_id") != approval_id:
+            raise ValueError("动作已修订，请核对当前待确认范围")
+        producer = next((item for item in plan["steps"] if item["id"] == step.get("evidence_step")), {})
+        from ..workflow.execution import RESUME_BOUND_TOOLS
+        snapshot = {"plan_id": plan["id"], "tool": step["tool"], "arguments": step["arguments"],
+                    "resume_stamp": plan["resume_stamp"] if step["tool"] in RESUME_BOUND_TOOLS else None,
+                    "evidence_task_id": producer.get("task_id")}
+        if step.get("withdrawn") or step["tool"] in plan.get("revoked_tools", []):
+            raise ValueError("动作已撤回")
+        if snapshot["resume_stamp"] is not None and snapshot["resume_stamp"] != resume_stamp(self.resume_workspace.read_document(), self.agent.candidate_state):
+            self.store.invalidate_approvals(run_id, [step["id"]])
+            raise ValueError("简历已变化，请核对新的简历及动作范围")
+        settled = self.store.settle_approval(approval_id, run_id=run_id, session_id=session_id, approve=approve, snapshot=snapshot)
+        self.store.event(run_id, "action_approval", {"approval_id": approval_id, "status": settled["status"],
+            "step_id": step["id"], "detail": "范围已确认，接续此步骤" if approve else "已取消此动作"})
+        # Watcher observes the persisted decision; the API never executes a tool.
+        return self.store.get(run_id)
+
+    async def resolve_approval(self, session_id: str, message: str):
+        from ..core.models import ChatResponse, AgentLane
+        text = message.strip().rstrip("。！!")
+        accepted = {"确认", "同意", "可以", "好", "好的", "行", "执行", "确认执行", "确认投递", "就这样", "照这个执行", "按这个执行"}
+        rejected = {"拒绝", "不同意", "取消", "不执行", "不用了"}
+        if text not in accepted | rejected:
+            return None
+        records = [record for record in self.store.approvals(session_id=session_id, pending=True)
+                   if self.store.get(record["run_id"])["status"] not in TERMINAL]
+        if not records:
+            return None
+        other_confirmations = any((run.get("result") or {}).get("resume_proposal") or
+            any(step["status"] == "waiting_confirmation" for step in ((run.get("checkpoint") or {}).get("plan") or {}).get("steps", []))
+            for run in self.store.list(session_id, active=True, limit=None))
+        if len(records) != 1 or other_confirmations and text != "确认投递":
+            return ChatResponse(message="有多个动作等待确认，请在任务记录中选择对应动作；没有扩大任何范围。", lane=AgentLane.APPLICATION)
+        record = records[0]
+        # Called under this session's foreground lock, so do not acquire it again.
+        try:
+            self._decide_approval(record["run_id"], record["id"], session_id, text in accepted)
+        except ValueError as exc:
+            return ChatResponse(message=str(exc), lane=AgentLane.APPLICATION)
+        return ChatResponse(message="已确认此动作范围，将从原步骤继续。" if text in accepted else "已取消此动作，其他分支继续。", lane=AgentLane.APPLICATION)
 
     async def wait_response(self, run_id: str) -> dict:
         while True:
@@ -235,6 +347,8 @@ class AgentRuntime:
                                          plan_lookup=lambda plan_id: self.plan_for_revision(run["session_id"], plan_id),
                                          revise_task=lambda revision, message: self.revise_plan(run_id, revision, message),
                                          cancellation_requested=lambda: bool(self.store.get(run_id)["cancel_requested"]),
+                                         authorize_action=lambda *args: self.authorize_action(run_id, *args),
+                                         resolve_approval=lambda message: self.resolve_approval(run["session_id"], message),
                                          enforce_task_scope=True)
                     token = current_run.set(context)
                     started = time.monotonic()
@@ -476,6 +590,18 @@ class AgentRuntime:
                         step.update(status="completed" if proposal.status in {"approved", "partially_approved"} else "blocked",
                             detail="简历提案已处理；不重新执行提案")
                         changed = True
+                elif step["status"] == "waiting_approval":
+                    record = self.store.approval(step["approval_id"])
+                    if record["status"] == "pending":
+                        self.store.update(run_id, status="waiting_confirmation")
+                        waiting = True
+                    elif record["status"] == "approved":
+                        step.update(status="pending")
+                        changed = True
+                    else:
+                        step.update(status="skipped", withdrawn=True, detail="此动作已拒绝或范围已变化",
+                            failure={"code": "user_withdrawn", "effect_started": False, "uncertain": False})
+                        changed = True
             if changed or not waiting:
                 lock = self.sessions.setdefault(run["session_id"], asyncio.Lock())
                 async with lock:
@@ -495,6 +621,7 @@ class AgentRuntime:
                             request_records=lambda: self.store.request_records(run["session_id"]),
                             enforce_task_scope=True, user_message=plan["original"],
                             cancellation_requested=lambda: bool(self.store.get(run_id)["cancel_requested"]))
+                        context.authorize_action = lambda *args: self.authorize_action(run_id, *args)
                         token = current_run.set(context)
                         try:
                             self.store.update(run_id, status="running")
@@ -503,7 +630,7 @@ class AgentRuntime:
                         finally:
                             current_run.reset(token)
             if all(step["status"] in DONE for step in plan["steps"]):
-                if not self.store.has_event(run_id, "workflow_summary") and any(step.get("task_id") or step.get("proposal_id") for step in plan["steps"]):
+                if not self.store.has_event(run_id, "workflow_summary") and any(step.get("task_id") or step.get("proposal_id") or step.get("approval_id") for step in plan["steps"]):
                     lock = self.sessions.setdefault(run["session_id"], asyncio.Lock())
                     async with lock:
                         latest = (self.store.get(run_id)["checkpoint"] or {}).get("plan") or {}
@@ -835,6 +962,7 @@ class AgentRuntime:
                     "uncertain_outcomes": uncertain}
 
     async def _stop_bound_tasks(self, run_id: str):
+        self.store.invalidate_approvals(run_id)
         task = self.tasks.get(run_id)
         if task:
             task.cancel()
@@ -859,7 +987,7 @@ class AgentRuntime:
                     unknown = step.get("effect") in {"write", "external"}
                     uncertain |= unknown
                     step.update(status="outcome_indeterminate" if unknown else "skipped", detail="执行期间中断，结果需核对" if unknown else "已中断")
-                elif step["status"] in {"pending", "waiting_external", "waiting_confirmation"}:
+                elif step["status"] in {"pending", "waiting_external", "waiting_confirmation", "waiting_approval"}:
                     step.update(status="skipped", detail="用户已停止，后续步骤不再执行；已产生的结果/提案保留")
             self.store.update(run_id, checkpoint=checkpoint)
             active = self.store.dialogue_state(current["session_id"]).get("instruction_request") or {}
@@ -900,6 +1028,7 @@ class AgentRuntime:
         sources = [run for run in self.store.list(session_id, limit=None)
                    if ((run.get("checkpoint") or {}).get("plan") or {}).get("id") == target["id"]]
         owner = next((run for run in sources if run["status"] not in TERMINAL), None)
+        existing_owner = owner is not None
         if owner is None:
             # Search may finish while the model is preparing an addition. Keep
             # that run immutable and continue only the new steps in this turn.
@@ -913,8 +1042,14 @@ class AgentRuntime:
                 if event["kind"] in {"browser_summary", "report_reference"}:
                     self.store.event(run_id, "report_reference", {"task_id": event["data"].get("task_id"),
                         "report_rendered": event["data"].get("report_rendered", True), "source_run_id": source["id"]})
-        self.store.update(owner["id"], checkpoint={**(owner["checkpoint"] or {}), "phase": "action_plan", "plan": updated},
-                          status="waiting_user" if paused else "running")
+        if not self.store.save_plan(owner["id"], updated,
+                expected_revision=target.get("revision", 0) if existing_owner else None):
+            raise ValueError("任务已结束，请重新读取执行记录")
+        self.store.update(owner["id"], status="waiting_user" if paused else "running")
+        changed_ids = [step["id"] for step in updated["steps"] if step.get("withdrawn") or
+            any(old["id"] == step["id"] and old["arguments"] != step["arguments"] for old in target["steps"])]
+        if changed_ids:
+            self.store.invalidate_approvals(owner["id"], changed_ids)
         # A compact instruction is memory; the complete plan above remains the checkpoint.
         dialogue_change("instruction", request=updated)
         dialogue_change("task", kind="plan_id", id=updated["id"], status=updated["status"], bind=True)
@@ -1021,6 +1156,8 @@ class AgentRuntime:
             if browser_id and self.browser.current().id == browser_id and self.browser.current().status in {"paused", "waiting_for_user"}:
                 await self.browser.resume()
                 return ChatResponse(message="已继续原任务的浏览器执行器，正在核验登录和页面；没有重新规划或重复执行。", lane=AgentLane.APPLICATION)
+            if any(step["status"] == "waiting_approval" for step in active_plan.get("steps", [])):
+                return ChatResponse(message="原任务有动作等待范围确认，请在运行记录中确认或修改；接续不会重复执行已完成步骤。", lane=AgentLane.APPLICATION)
             return ChatResponse(message="原任务仍在执行或等待招聘方回复；没有启动重复任务。", lane=AgentLane.APPLICATION)
         stamp = resume_stamp(self.resume_workspace.read_document(), self.agent.candidate_state)
         decision = recover_plan(source, session_id=run["session_id"], stamp=stamp,
@@ -1032,6 +1169,14 @@ class AgentRuntime:
         if decision.action != "resume":
             return ChatResponse(message=decision.message, lane=AgentLane.APPLICATION)
         plan = decision.plan
+        for step in plan["steps"]:
+            if step.get("approval_id"):
+                old = self.store.approval(step["approval_id"])
+                if old["run_id"] != run_id and old["status"] in {"pending", "approved"}:
+                    transferred = self.store.ensure_approval(run_id, run["session_id"], step["id"], old["snapshot"],
+                        requested=old["status"] == "approved")
+                    step["approval_id"] = transferred["id"]
+                    self.store.invalidate_approvals(source["id"], [step["id"]])
         # Uncertain external searches can be attached by their durable task ID. Dead
         # search workers are restarted only by the explicitly authorized search step.
         for step in plan["steps"]:

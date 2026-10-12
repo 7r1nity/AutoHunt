@@ -21,6 +21,8 @@ from ..runtime.search_state import merge_search_state, prepare_search_state
 from .search_contract import missing_search_message
 from .job_filters import filter_schema
 from ..runtime.resilience import PreflightRefused, classify_failure, safe_retry
+from ..security.decisions import ActionPolicy, ActionDecision, Decision
+from ..security.risk import AlwaysConfirm, ConfirmRisky, SecurityRisk
 
 
 class MissingSearchInput(ValueError):
@@ -77,6 +79,7 @@ class AgentToolOutcome:
     action: str | None = None
     resume_proposal: Any | None = None
     failure: dict | None = None
+    approval: dict | None = None
 
     def observation(self) -> str:
         return bounded_data({
@@ -121,6 +124,8 @@ class AgentToolRegistry:
         learning_plans: LearningPlanService | None = None,
         mock_workflow=None,
         response_llm=None,
+        confirmation_policy="risk",
+        confirmation_threshold="HIGH",
     ) -> None:
         self.jobs = jobs
         self.browser = browser
@@ -131,7 +136,37 @@ class AgentToolRegistry:
         self.mock_workflow = mock_workflow
         self.response_llm = response_llm
         self.call_guard = ToolCallGuard()
+        if confirmation_policy not in {"risk", "always"}:
+            raise ValueError("AUTOHUNT_APPROVAL_POLICY must be risk or always")
+        threshold = SecurityRisk(confirmation_threshold)
+        if threshold == SecurityRisk.UNKNOWN:
+            raise ValueError("UNKNOWN is not an approval threshold")
+        self.action_policy = ActionPolicy(AlwaysConfirm() if confirmation_policy == "always" else ConfirmRisky(threshold=threshold))
         self._tools = {spec.name: spec for spec in self._build_specs()}
+
+    def authorize(self, name: str, arguments: dict) -> ActionDecision:
+        spec = self._tools.get(name)
+        if spec is None:
+            return ActionDecision(Decision.DENY, "unknown_tool", SecurityRisk.UNKNOWN, "工具不存在")
+        self.validate_arguments(spec.parameters, arguments)
+        decision = self.action_policy.evaluate(name, arguments, spec.effect)
+        context = active_run()
+        if context and context.cancellation_requested and context.cancellation_requested():
+            from ..security.decisions import CONTROL_TOOLS
+            if name not in CONTROL_TOOLS:
+                return ActionDecision(Decision.DENY, "task_cancelled", decision.risk, "任务已停止")
+        if decision.decision == Decision.REQUIRE_APPROVAL:
+            if not context or not context.authorize_action:
+                return decision
+            record = context.authorize_action(name, arguments, decision.risk.value,
+                isinstance(self.action_policy.confirmation, AlwaysConfirm))
+            status = record["status"]
+            if status == "approved":
+                return ActionDecision(Decision.ALLOW, "scoped_authority", decision.risk, "本动作范围已获授权", record)
+            if status in {"rejected", "invalidated"}:
+                return ActionDecision(Decision.DENY, "authority_revoked", decision.risk, "此动作已撤回或范围已变化", record)
+            return ActionDecision(Decision.REQUIRE_APPROVAL, decision.code, decision.risk, decision.detail, record)
+        return decision
 
     @staticmethod
     def _object_schema(properties: dict[str, Any], required: list[str] | None = None) -> dict[str, Any]:
@@ -331,7 +366,6 @@ class AgentToolRegistry:
                 failure={"code": state.denial_code, "retryable": False, "effect_started": False, "uncertain": False})
         receipt = {"plan_id": (context.action_authority or {}).get("plan_id"),
                    "step_id": (context.action_authority or {}).get("step_id")} if context else {}
-        emit("tool_started", tool=name, effect=spec.effect, arguments=arguments, **receipt)
         executor_started = False
         started_at, attempts = time.monotonic(), 1
         def record_retry(data: dict) -> None:
@@ -340,12 +374,21 @@ class AgentToolRegistry:
             emit("tool_retry", tool=name, effect=spec.effect, **data)
         try:
             self.validate_arguments(spec.parameters, arguments)
+            decision = self.authorize(name, arguments)
+            emit("action_decision", tool=name, decision=decision.decision.value,
+                 code=decision.code, risk=decision.risk.value, **receipt)
+            if decision.decision != Decision.ALLOW:
+                return AgentToolOutcome(name, "awaiting_approval" if decision.decision == Decision.REQUIRE_APPROVAL else "denied",
+                    "请在任务记录中核对并确认此动作的范围。" if decision.approval and decision.decision == Decision.REQUIRE_APPROVAL else decision.detail,
+                    spec.effect, approval=decision.approval,
+                    failure={"code": decision.code, "retryable": False, "effect_started": False, "uncertain": False})
             if name == "job_search_start":
                 baseline = (context.search_state or {}).get("queries") if context else None
                 supplied = arguments.get("queries") or ([arguments["query"]] if arguments.get("query") else [])
                 if not supplied and not baseline and not prepare_search_state(
                         {}, self.candidate_state.read(), self.resume_workspace.read_document().version).get("queries"):
                     raise MissingSearchInput(missing_search_message(bool(self.candidate_state.read().profile.resume_id)))
+            emit("tool_started", tool=name, effect=spec.effect, arguments=arguments, **receipt)
             executor_started = True
             context = active_run()
             request = (context.dialogue or {}).get("task_request") if context else None
@@ -632,8 +675,6 @@ class AgentToolRegistry:
         context = active_run()
         if context is None:
             raise PreflightRefused("自动投递需要当前会话")
-        if not (context.action_authority or {}).get("requested"):
-            raise PreflightRefused("自动投递需要已确认的投递范围；请核对要投递的岗位")
         # Remember the user's own instruction as the boundary of what this batch is
         # authorised to cover. Measurement only for now: queue_deliveries records what
         # falls inside it without filtering anything yet.

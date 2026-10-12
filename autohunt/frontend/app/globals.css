@@ -679,6 +679,8 @@ nav { display: grid; gap: 5px; }
 .runtime-run details { margin-top: 10px; color: var(--muted); }
 .runtime-run details summary { cursor: pointer; }
 .runtime-run li { margin-top: 6px; overflow-wrap: anywhere; }
+.runtime-approval { margin: 12px 0; padding: 12px; border: 1px solid var(--border); border-radius: 10px; }
+.runtime-approval pre { max-width: 100%; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }
 
 /* Conversation-first layout: the inspector never takes vertical space from messages. */
 @media screen {

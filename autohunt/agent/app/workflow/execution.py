@@ -13,6 +13,8 @@ from ..core.replies import tool_reply, tool_label, public_reply
 from ..runtime.resilience import classify_failure
 
 DONE = {"completed", "failed", "skipped", "blocked", "outcome_indeterminate"}
+RESUME_BOUND_TOOLS = {"job_search_start", "job_results_refilter", "mock_delivery_start",
+                      "learning_plan_generate", "resume_propose_patch", "job_review_selection"}
 
 
 def persist(plan: dict, *, activate: bool = False) -> None:
@@ -80,6 +82,7 @@ async def advance(plan: dict, registry) -> list[dict]:
     context = active_run()
     if plan.get("paused"):
         return []
+    persist(plan)  # Make the exact action snapshot authoritative before decisions.
     observed = []
     steps = {step["id"]: step for step in plan["steps"]}
     for step in plan["steps"]:
@@ -112,7 +115,7 @@ async def advance(plan: dict, registry) -> list[dict]:
                             failure={"code": "task_cancelled_or_foreign", "effect_started": False, "uncertain": False})
                 observed.append(step); changed = True
                 continue
-            if step["effect"] != "read" and plan["resume_stamp"] != current_stamp:
+            if step["tool"] in RESUME_BOUND_TOOLS and plan["resume_stamp"] != current_stamp:
                 step.update(status="blocked", detail="任务绑定的简历已变化，请确认新的简历范围")
                 step["failure"] = {"code": "authority_stale", "effect_started": False, "uncertain": False}
                 observed.append(step); changed = True
@@ -126,11 +129,31 @@ async def advance(plan: dict, registry) -> list[dict]:
             authority["requested"] = step.get("user_requested", (step.get("authority_binding") or {}).get("user_requested", False))
             authority["binding"] = step.get("authority_binding")
             authority["resume_search_task_id"] = step.get("resume_search_task_id")
+            previous_message, previous_authority = context.user_message, context.action_authority
+            context.user_message, context.action_authority = step["command_quote"], authority
+            # Decisions precede claims. Waiting for consent is not an uncertain write.
+            try:
+                decision = registry.authorize(step["tool"], step["arguments"]) if hasattr(registry, "authorize") else None
+            except ValueError as exc:
+                step.update(status="blocked", detail=str(exc),
+                    failure={"code": "action_state_conflict", "effect_started": False, "uncertain": False})
+                observed.append(step); changed = True
+                context.user_message, context.action_authority = previous_message, previous_authority
+                persist(plan)
+                continue
+            if decision and decision.decision != "ALLOW":
+                emit("action_decision", tool=step["tool"], step_id=step["id"], plan_id=plan["id"],
+                     decision=decision.decision.value, code=decision.code, risk=decision.risk.value)
+                step.update(status="waiting_approval" if decision.decision == "REQUIRE_APPROVAL" and decision.approval else "blocked",
+                    detail=decision.detail, approval_id=(decision.approval or {}).get("id"),
+                    failure={"code": decision.code, "effect_started": False, "uncertain": False})
+                observed.append(step); changed = True
+                context.user_message, context.action_authority = previous_message, previous_authority
+                persist(plan)
+                continue
             step.update(status="claimed")
             persist(plan)  # Durable claim BEFORE the executor or any write.
             emit("plan_step", step_id=step["id"], tool=step["tool"], status="claimed", depends_on=step["depends_on"])
-            previous_message, previous_authority = context.user_message, context.action_authority
-            context.user_message, context.action_authority = step["command_quote"], authority
             try:
                 # A plan over 20 JDs needs the full analysis budget; a 100s cap cut
                 # it off mid-write and reported "结果未确认" instead of a plan.
@@ -149,6 +172,8 @@ async def advance(plan: dict, registry) -> list[dict]:
                     step.update(status="waiting_confirmation", result={"proposal": outcome.resume_proposal.model_dump(mode="json")},
                         proposal_id=outcome.resume_proposal.id)
                     step["wait_started_at"] = time.time()
+                elif outcome.status == "awaiting_approval" and outcome.approval:
+                    step.update(status="waiting_approval", approval_id=outcome.approval["id"], detail=str(outcome.content))
                 else:
                     step.update(status="outcome_indeterminate" if outcome.status == "outcome_indeterminate" else "blocked",
                         detail=str(outcome.content)[:1000], failure=outcome.failure)

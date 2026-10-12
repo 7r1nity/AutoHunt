@@ -79,7 +79,7 @@ def recover_plan(run: dict, *, session_id: str, stamp: str,
         if step["tool"] == "job_search_start" and step.get("task_id") and step.get("arguments", {}).get("dry_run"):
             verify.append(step["id"])
             continue  # A dead dry-run executor may have already communicated.
-        if status in {"waiting_external", "waiting_confirmation", "pending"}:
+        if status in {"waiting_external", "waiting_confirmation", "waiting_approval", "pending"}:
             retry.append(step["id"])
             continue
         failure = step.get("failure") or {}
@@ -95,7 +95,7 @@ def recover_plan(run: dict, *, session_id: str, stamp: str,
         if not safe:
             verify.append(step["id"])
             continue
-        if failure.get("code") in {"invalid_arguments", "unknown_tool", "unknown_risk", "confirmation_required", "authority_revoked", "arguments_changed"}:
+        if failure.get("code") in {"invalid_arguments", "unknown_tool", "authority_revoked", "arguments_changed"}:
             verify.append(step["id"])
             continue
         step.setdefault("attempt_history", []).append({"status": status,
@@ -126,8 +126,6 @@ def recover_plan(run: dict, *, session_id: str, stamp: str,
             if "[REDACTED_" in str(step.get("arguments", {})):
                 return RecoveryDecision("clarify", "旧任务的业务参数已被改写，无法可靠接续，请重新确认原条件。")
             binding = step.get("authority_binding") or {}
-            if step["tool"] == "mock_delivery_start" and not step.get("user_requested", binding.get("user_requested", False)):
-                return RecoveryDecision("clarify", "模拟投递尚待具体范围确认；继续任务不会补出未确认的投递要求。")
             step["authority_binding"] = action_binding(step["tool"], step["arguments"],
                 session_id=session_id, requested=bool(binding.get("user_requested", step.get("user_requested", False))))
     return RecoveryDecision("resume", "已按执行记录接续原任务；已完成步骤不重放，结果不确定的动作仍待核验。", plan)

@@ -79,6 +79,8 @@ agent_tool_registry = AgentToolRegistry(
     learning_plans=learning_plans,
     mock_workflow=mock_workflow,
     response_llm=llm_manager,
+    confirmation_policy=settings.confirmation_policy,
+    confirmation_threshold=settings.confirmation_threshold,
 )
 
 # --- Three-layer intent routing: rules → small model (API placeholder) → LLM ---

@@ -113,8 +113,8 @@ class Contracts(unittest.IsolatedAsyncioTestCase):
                  step("delivery","mock_delivery_start",{"min_score":85})]
         steps[1]["user_requested"] = False
         plan = self.validate(draft(steps,["delivery"]))
-        self.assertEqual(plan["status"], "clarifying")
-        self.assertTrue(plan["questions"])
+        self.assertEqual(plan["status"], "ready")
+        self.assertFalse(plan["questions"])
         self.assertFalse(next(item for item in plan["steps"] if item["id"] == "delivery")["user_requested"])
 
     async def test_candidate_trace_identifies_graph_not_personal_text(self):
@@ -130,7 +130,7 @@ class Contracts(unittest.IsolatedAsyncioTestCase):
         steps = [step("search","job_search_start"), step("extra_delivery","mock_delivery_start",{"min_score":85})]
         steps[1]["user_requested"] = False
         plan = self.validate(draft(steps,["search"]))
-        self.assertEqual(plan["status"], "clarifying")
+        self.assertEqual(plan["status"], "ready")
         warnings = preflight_warnings()
         self.assertTrue(any(item["code"] == "uncovered_step" and item["severity"] == "warn" for item in warnings))
         self.assertFalse(next(item for item in plan["steps"] if item["id"] == "extra_delivery")["user_requested"])

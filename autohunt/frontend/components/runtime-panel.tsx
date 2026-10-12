@@ -11,6 +11,7 @@ const labels: Record<string, string> = { queued: "排队中", running: "执行�
   waiting_confirmation: "等待审核", cancelling: "正在停止", completed: "完成", cancelled: "已停止",
   waiting_reply: "等待回复", pending: "等待前置步骤", claimed: "已领取，执行中", waiting_external: "等待搜索完成",
   skipped: "前置失败，未执行", blocked: "条件或授权不足",
+  waiting_approval: "等待范围确认",
   interrupted: "已中断", timed_out: "超时", failed: "失败", outcome_indeterminate: "待核验" };
 
 function stepDescription(event: RunEvent): string {
@@ -66,6 +67,20 @@ function Steps({ run }: { run: AgentRun }) {
 }
 
 export function RuntimePanel({ runtime, notice, showSession = true }: { runtime: ReturnType<typeof useAgentRuntime>; notice: (text: string) => void; showSession?: boolean }) {
+  const [deciding, setDeciding] = useState<string | null>(null);
+  async function decide(run: AgentRun, approvalId: string, approve: boolean) {
+    setDeciding(approvalId);
+    try {
+      const response = await fetch(`/api/agent/runs/${run.id}/approval`, { method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ conversation_id: runtime.sessionId, approval_id: approvalId, approve }) });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.detail ?? "确认未完成");
+      runtime.observe(run);
+      notice(approve ? "已确认，将从原步骤继续" : "已取消此动作，其他分支保留");
+    } catch (error) { notice(error instanceof Error ? error.message : "确认未完成"); }
+    finally { setDeciding(null); }
+  }
   return <div className="runtime-panel">
     <div className="runtime-actions"><button className="button secondary compact" disabled={runtime.stopping} onClick={() => {
       if (!window.confirm("停止所有会话的搜索、沟通、投递及队列，并关闭每日任务和自动投递？已发送内容与历史保留。")) return;
@@ -113,6 +128,17 @@ export function RuntimePanel({ runtime, notice, showSession = true }: { runtime:
           {step.tool} · {labels[step.status] ?? step.status}{step.depends_on.length > 0 && ` · 依赖 ${step.depends_on.join("、")}`}
         </li>)}</ol>}
         {typeof run.result?.message === "string" && <details><summary>查看回复</summary><p>{chatDisplay(run.result.message)}</p></details>}
+        {run.approvals?.map((approval) => <div key={approval.id} className="runtime-approval">
+          <p>{approval.detail}</p>
+          <p>{({ mock_delivery_start: "模拟站自动投递", job_search_start: "职位搜索及模拟投递测试" } as Record<string, string>)[approval.tool] ?? approval.tool}</p>
+          {typeof approval.arguments.min_score === "number" && <p>匹配分至少 {approval.arguments.min_score}</p>}
+          {Boolean(approval.arguments.filters) && <p>条件：{filterText(approval.arguments.filters as Parameters<typeof filterText>[0])}</p>}
+          <details><summary>查看具体范围</summary><pre>{JSON.stringify(approval.arguments, null, 2)}</pre></details>
+          <div className="runtime-actions">
+            <button className="button primary compact" disabled={deciding !== null || runtime.stopping} onClick={() => void decide(run, approval.id, true)}>确认此范围并继续</button>
+            <button className="button secondary compact" disabled={deciding !== null || runtime.stopping} onClick={() => void decide(run, approval.id, false)}>取消此动作</button>
+          </div>
+        </div>)}
         <div className="runtime-actions">
           {!terminalRun(run.status) && <button className="button secondary compact" disabled={runtime.stopping} onClick={() => void runtime.interrupt().then(() => notice("已核验当前会话及投递队列停止")).catch((error) => notice(error.message))}>停止当前会话</button>}
           {run.can_resume && <button className="button primary compact" onClick={() => void runtime.control(run, "resume").catch((error) => notice(error.message))}>{run.status === "waiting_user" ? "确认登录，继续" : run.status === "waiting_reply" ? "检查回复" : "恢复执行"}</button>}

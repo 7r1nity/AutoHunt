@@ -259,6 +259,11 @@ class ModelAndExecutionContracts(unittest.IsolatedAsyncioTestCase):
             mutate_dialogue=lambda operation: store.mutate_dialogue("default", operation),
             search_state={"queries": ["金融分析师"]})
         token = current_run.set(context)
+        from app.runtime.manager import AgentRuntime
+        runtime = AgentRuntime(store, NS(tool_registry=registry, candidate_state=candidate_state), NS(), NS(), None, resumes)
+        original_emit = context.emit
+        context.emit = lambda kind,data: (original_emit(kind,data), runtime.emit(run["id"], kind,data))
+        context.authorize_action = lambda *args: runtime.authorize_action(run["id"], *args)
         plan = {}
         try:
             plan = validate_draft(RequestDraft.model_validate(candidate()), registry,

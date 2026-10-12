@@ -50,6 +50,8 @@ class Settings:
     # Temporary, authenticated local maintenance. No path is accepted from UI.
     history_reset_enabled: bool = os.getenv("AUTOHUNT_HISTORY_RESET_ENABLED", "false").lower() == "true"
     mock_history_database: Path | None = mock_history_path(os.getenv("AUTOHUNT_MOCK_HISTORY_DATABASE"))
+    confirmation_policy: str = os.getenv("AUTOHUNT_APPROVAL_POLICY", "risk")
+    confirmation_threshold: str = os.getenv("AUTOHUNT_APPROVAL_THRESHOLD", "HIGH")
 
 
 settings = Settings()

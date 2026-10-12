@@ -3,6 +3,7 @@ export type AgentRun = {
   result: Record<string, unknown> | null; error: string | null; can_resume: boolean;
   browser_id: string | null; created_at: string;
   plan_steps?: Array<{ id: string; tool: string; depends_on: string[]; status: string; detail?: string }>;
+  approvals?: Array<{ id: string; tool: string; arguments: Record<string, unknown>; detail: string }>;
 };
 
 export type RunEvent = { seq: number; kind: string; data: Record<string, unknown> };

@@ -45,7 +45,7 @@ from ..core.dependencies import (
 )
 from ..core.dependencies import router_store
 from ..runtime.history_reset import HistoryResetter, ResetBusy, RESET_PATH
-from ..runtime.models import RunCreate, SessionCreate, public_run
+from ..runtime.models import RunCreate, SessionCreate, ApprovalDecision, public_run
 from ..delivery.automation import UnsupportedDeliverySite
 from ..jobs.analysis import analyze_job
 from ..core.middleware import (
@@ -375,6 +375,16 @@ async def resume_run(run_id: str) -> dict:
         return public_run(await agent_runtime.resume(run_id))
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="运行记录不存在") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/runs/{run_id}/approval")
+async def decide_action_approval(run_id: str, payload: ApprovalDecision) -> dict:
+    try:
+        return public_run(await agent_runtime.decide_approval(run_id, payload.approval_id, payload.conversation_id, payload.approve))
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="任务或确认记录不存在") from exc
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
