@@ -89,6 +89,7 @@ class DialogueState(Strict):
     workflow_request: dict[str, Any] | None = None
     instruction_request: dict[str, Any] | None = None
     task_request: dict[str, Any] | None = None
+    job_target_context: dict[str, Any] | None = None
 
 
 def topic_for(message: str, previous: str = "general") -> str:
@@ -205,6 +206,20 @@ def apply_operation(saved: dict | None, operation: dict, *, clock: float | None 
                 slot_sources=sources)
         if previous.slots != conditions:
             trace(state, "condition_update", source, slots=conditions)
+    elif op == "job_targets":
+        snapshot = next((item for item in state.snapshots if item.id == operation["snapshot_id"]
+                         and item.kind == "job" and item.displayed), None)
+        ids = list(dict.fromkeys(operation["job_ids"]))
+        if not snapshot or not set(ids) <= {item["id"] for item in snapshot.items}:
+            raise ValueError("岗位目标不属于当前会话已展示列表")
+        previous = state.job_target_context or {}
+        removed = previous.get("removed_ids", []) if previous.get("snapshot_id") == snapshot.id else []
+        if operation.get("action") == "removed":
+            removed = list(dict.fromkeys([*removed, *ids]))
+        state.job_target_context = {"snapshot_id": snapshot.id, "selected_ids": ids,
+            "removed_ids": removed, "selector": operation.get("selector", ""), "source": source,
+            "turn": state.turn, "action": operation.get("action", "resolved")}
+        trace(state, "job_targets", source, ids=ids, action=state.job_target_context["action"])
     elif op == "snapshot":
         items = copy.deepcopy(operation["items"])
         if any("id" not in item for item in items):
@@ -443,6 +458,7 @@ def compact_state(saved: dict) -> dict:
                    "read_only": item.expires_at < time.time() or state.turn - item.turn > 6}
                   for item in state.snapshots[-2:] if item.displayed and item.topic == state.active_intent],
         "tasks": state.tasks, "selected_job": state.selected_job.model_dump() if state.selected_job else None,
+        "job_target_context": state.job_target_context,
         "learning_request": state.learning_request,
         "instruction": state.instruction_request,
         "task_request": state.task_request,

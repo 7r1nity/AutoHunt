@@ -117,7 +117,10 @@ def edited_plan(plan: dict, edit: RevisionDraft, registry, *, stamp: str, sessio
         for key, value in list(arguments.items()):
             if value is None and key not in spec.parameters.get("required", []) and "null" not in spec.parameters.get("properties", {}).get(key, {}).get("type", []):
                 arguments.pop(key)
-        registry.validate_arguments(spec.parameters, arguments)
+        try:
+            registry.validate_arguments(spec.parameters, arguments, path=f"steps.{step['id']}.{step['tool']}.arguments")
+        except ValueError as exc:
+            raise PlanValidationError("invalid_argument_schema", str(exc), tool=step["tool"], field="arguments") from exc
         if arguments.get("filters") is not None:
             from ..core.job_filters import validate_filter
             arguments["filters"] = validate_filter(arguments["filters"]).model_dump(mode="json")
@@ -173,7 +176,10 @@ def edited_plan(plan: dict, edit: RevisionDraft, registry, *, stamp: str, sessio
             raise ValueError("该动作已撤回，新增步骤不能恢复原授权")
         spec = registry._tools[step["tool"]]
         step["arguments"] = normalize_encoding(step["arguments"], spec.parameters)
-        registry.validate_arguments(spec.parameters, step["arguments"])
+        try:
+            registry.validate_arguments(spec.parameters, step["arguments"], path=f"steps.{step['id']}.{step['tool']}.arguments")
+        except ValueError as exc:
+            raise PlanValidationError("invalid_argument_schema", str(exc), tool=step["tool"], field="arguments") from exc
         if step["arguments"].get("filters") is not None:
             from ..core.job_filters import validate_filter
             step["arguments"]["filters"] = validate_filter(step["arguments"]["filters"]).model_dump(mode="json")
@@ -188,6 +194,12 @@ def edited_plan(plan: dict, edit: RevisionDraft, registry, *, stamp: str, sessio
                          and step["tool"] == "search_state_update" and step["status"] == "pending"]
     condition_updates.extend(step for step in result["steps"] if step["tool"] == "search_state_update"
                              and step["id"] in added_ids)
+    from .graph import depend_on
+    removals = [step for step in result["steps"] if step["tool"] == "job_remove_selection" and step["id"] in added_ids]
+    for delivery in [step for step in result["steps"] if step["tool"] == "mock_delivery_start"
+                     and step["id"] in added_ids]:
+        for removal in removals:
+            depend_on(result["steps"], delivery, removal)
     fresh_actions = [step for step in result["steps"] if step["tool"] in EVIDENCE_TOOLS and step["status"] == "pending"
                      and (step["id"] in added_ids or step["id"] in seen or step.get("refresh_of"))]
     if condition_updates and fresh_actions:

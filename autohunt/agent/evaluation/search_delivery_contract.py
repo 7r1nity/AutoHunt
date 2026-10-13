@@ -235,7 +235,7 @@ class SelectionAndDispatch(unittest.IsolatedAsyncioTestCase):
         dialogue = apply_operation({}, {"op": "snapshot", "kind": "job", "topic": "applications",
             "items": items, "displayed": True, "source": "synthetic", "version": "synthetic-search"})
         workflow = NS(remember_authorization_scope=lambda *a, **kw: None, queue_deliveries=AsyncMock(return_value={"queued": 1}))
-        registry = AgentToolRegistry(jobs=NS(get_job=lambda _: {}), browser=None, candidate_state=None,
+        registry = AgentToolRegistry(jobs=NS(get_job=lambda ident: {"id": ident}, review_fingerprint=JobStore.review_fingerprint), browser=None, candidate_state=None,
             resume_workspace=None, memory=None, learning_plans=NS(), mock_workflow=workflow)
         ctx = RunContext("synthetic", asyncio.current_task(), lambda *a: None, lambda *a: None,
                          dialogue=dialogue, user_message="自动投递第33个")

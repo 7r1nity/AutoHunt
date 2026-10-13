@@ -173,7 +173,8 @@ async def advance(plan: dict, registry) -> list[dict]:
                 # A plan over 20 JDs needs the full analysis budget; a 100s cap cut
                 # it off mid-write and reported "结果未确认" instead of a plan.
                 timeout = 180 if step["tool"] in {"learning_plan_generate", "job_results_refilter"} or (
-                    step["tool"] == "mock_delivery_start" and step["arguments"].get("filters")) else 20
+                    step["tool"] == "mock_delivery_start" and step["arguments"].get("filters")) else (
+                    45 if step["tool"] in {"mock_delivery_start", "job_remove_selection"} and step["arguments"].get("selector") else 20)
                 async with asyncio.timeout(timeout):
                     outcome = await registry.execute(step["tool"], step["arguments"],
                         user_message=step["command_quote"], state=ToolLoopState())

@@ -165,6 +165,8 @@ async def plan_request(llm, registry, message: str, *, dialogue: dict, condition
             "取消尚未执行的单个分支用remove_steps中的原步骤ID，保留其他分支；已执行步骤只能引用其结果，不能删除或重放。"
             "steps也可提交新增步骤，应用会合并到add_steps；revision省略plan_id/expected_revision时使用当前任务。修改已有条件定位原未执行步骤，不另建同一动作。"
             "先暂停添加条件、先改一下等修订设置pause=true，等待用户继续；纯暂停也可revision updates=[]。独立新任务仍operation=execute。"
+            "待澄清计划不是所有新指令的归属：用户明确单独投递另一个岗位或独立移除时，优先execute，不修订不相关旧任务。"
+            "用户回答旧追问且对象明确时，revision.questions=[]清除已解决的追问，并更新相关waiting_input步骤；不能只追加动作却保留旧阻塞。"
             "仅澄清或更正条件、没有要求执行或继续任务时，只用search_state_update保存条件并简短答复，不启动搜索或投递。"
             "条件澄清不等于新增投递授权；进行中的任务条件修改用revise，已结束计划不是active_plan。"
             "完整理解当前用户请求及有效pending_request，逐目标生成参数和依赖。"
@@ -186,6 +188,10 @@ async def plan_request(llm, registry, message: str, *, dialogue: dict, condition
             "85以上投递、以下的分析不足表示投递min_score=85，计划max_score=84；85以下且25k以上生成计划还需salary_min=25000。"
             "mock_delivery_start.filters是投递分支自己的语义条件树，例如只投正式岗、只投有转正机会的实习岗；不能改变搜索范围或忽略该限制。"
             "指定第几个、前几个、岗位名称投递时必须传mock_delivery_start.selector；序号不是数据库ID，不得用上一轮批量filters替代指定对象。"
+            "岗位公司地点/职责描述也可放selector，由共享目标解析器定位。single要求唯一对象；明确这些/所有符合描述者用selection_mode=matching。"
+            "移除/跳过已展示岗位使用job_remove_selection(selector,snapshot_id可选,selection_mode可选)。它真正移出看板并停止选中岗位的未发送投递，不是search_state_update或job_results_refilter。"
+            "移除这些、其余投递需要两个有序步骤：job_remove_selection后mock_delivery_start(selector=剩余岗位)，后者依赖前者。只排除投递条件不等于岗位移除。"
+            "两个工具不要混传字段：job_results_refilter仅task_id；job_remove_selection无min_score/filters；mock_delivery_start无job_ids，目标通过selector定位。"
             "指定单个岗位投递时，除非本轮同时提出额外筛选，不要复制上一轮的批量投递filters。"
             "正式5份、实习5份等分组请求必须生成result_groups，每组label/count/filters；类别必须require，不可用allow替代，result_limit为各组数量之和。共同城市、薪资、排除条件仍放在搜索filters。只修改总数且不再要求分组时清除旧result_groups。"
             "任意搜索条件使用filters条件树condition/all/any/not；叶text是完整语义，quote仅作审计，不要求机械复制。"
@@ -259,14 +265,20 @@ def _validate_draft(draft: RequestDraft, registry, message: str, *, dialogue: di
         revision = copy.deepcopy(draft.revision or {})
         revision.setdefault("plan_id", target["id"])
         revision.setdefault("expected_revision", target.get("revision", 0))
-        revision.setdefault("questions", draft.questions)
+        if revision.get("questions") is None:
+            revision["questions"] = draft.questions
         if draft.steps:
             revision["add_steps"] = [*revision.get("add_steps", []), *[step.model_dump() for step in draft.steps]]
             emit("plan_normalized", repair="revision_step_envelope", count=len(draft.steps))
         if draft.goals:
             revision["goals"] = [*revision.get("goals", []), *[goal.model_dump() for goal in draft.goals]]
         edit = RevisionDraft.model_validate(revision)
-        edited_plan(target, edit, registry, stamp=stamp, session_id=context.session_id, message=message)
+        try:
+            edited_plan(target, edit, registry, stamp=stamp, session_id=context.session_id, message=message)
+        except PlanValidationError:
+            raise
+        except ValueError as exc:
+            raise PlanValidationError("invalid_revision_contract", str(exc), field="revision") from exc
         from .validation import preflight_warnings
         return {"operation": "revise", "revision": edit.model_dump(), "status": "revision",
                 "validation": {"issues": preflight_warnings()}, "questions": draft.questions, "reply": draft.reply}
@@ -321,6 +333,10 @@ def _validate_draft(draft: RequestDraft, registry, message: str, *, dialogue: di
     questions = list(draft.questions)
     revoked_tools = list(previous.get("revoked_tools", [])) if continued else []
     searches = [step for step in steps if step["tool"] == "job_search_start"]
+    removals = [step for step in steps if step["tool"] == "job_remove_selection"]
+    for delivery in [step for step in steps if step["tool"] == "mock_delivery_start"]:
+        for removal in removals:
+            depend_on(steps, delivery, removal)
     updates = [step for step in steps if step["tool"] == "search_state_update"]
     refreshes = [step for step in steps if step["tool"] == "job_results_refilter"]
     # A condition write invalidates old decisions. This is a data dependency,

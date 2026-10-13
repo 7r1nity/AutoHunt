@@ -30,6 +30,7 @@ ACTION_PATTERNS = {
     "browser_task_pause": r"暂停|先停|停一停",
     "browser_task_resume": r"继续|恢复|接着|确认登录|登录完成|验证完成",
     "job_review_selection": r"(?:通过|同意|接受|批准).{0,10}审核|审核.{0,10}(?:通过|同意|批准)",
+    "job_remove_selection": r"(?:移除|删除|跳过|去掉)(?:这些|这个|第|前|.{0,40}(?:岗位|职位|招聘信息))",
 }
 _READ_GOAL_PATTERNS = {"job_results_read": r"总结|汇总|报告"}
 _QUOTED = re.compile(r'“[^”]*”|‘[^’]*’|"[^"\n]*"|\x27[^\x27\n]*\x27|`[^`]*`|「[^」]*」|『[^』]*』')

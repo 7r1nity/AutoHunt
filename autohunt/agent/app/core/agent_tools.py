@@ -21,6 +21,7 @@ from ..runtime.search_state import merge_search_state, prepare_search_state
 from .search_contract import missing_search_message
 from .result_groups import groups_schema
 from .job_filters import filter_schema
+from .job_targets import TargetClarification, resolve_job_targets
 from ..runtime.resilience import PreflightRefused, classify_failure, safe_retry
 from ..security.decisions import ActionPolicy, ActionDecision, Decision
 from ..security.risk import AlwaysConfirm, ConfirmRisky, SecurityRisk
@@ -199,6 +200,11 @@ class AgentToolRegistry:
             AgentToolSpec("job_detail_read", "按已展示职位简表的稳定序号或名称读取完整 JD 与原始链接；只读，不重新搜索，不投递。",
                 obj({"selector": {"type": "string", "maxLength": 120}, "snapshot_id": {"type": "string"},
                     "view": {"type": "string", "enum": ["brief", "detail", "link"]}}, ["selector"]), "read", self._job_detail_read),
+            AgentToolSpec("job_remove_selection", "按已展示岗位的名称、描述或序号移出申请看板并取消这些岗位尚未发送的自动投递。保留JD、搜索/投递历史及已发送内容；不是修改搜索条件或重新筛选。",
+                obj({"selector": {"type": "string", "minLength": 1, "maxLength": 500},
+                     "snapshot_id": {"type": "string"},
+                     "selection_mode": {"type": "string", "enum": ["single", "matching"], "description": "single定位唯一岗位；matching仅用于明确选择所有符合描述的岗位。"}}, ["selector"]),
+                "write", self._job_remove_selection),
             AgentToolSpec("search_state_read", "读取当前会话搜索条件，包括岗位词、城市、数量、最低月薪及来源；不是长期偏好。",
                           obj({}), "read", self._search_state_read),
             AgentToolSpec("search_state_update", "仅更新用户明确改变的会话搜索字段；不启动搜索，不改主简历或长期偏好。省略字段保持原值。",
@@ -323,7 +329,8 @@ class AgentToolRegistry:
             specs.extend([
                 AgentToolSpec("mock_delivery_start", "将用户要求范围内的已搜索模拟站职位加入有限投递队列。filters为投递独立语义条件，可复用搜索判断；min_score可选，省略不设分数门槛。内部生成逐职位预览与一次性授权，快速逐个沟通、并行等待HR回复、回复后发送简历；不支持真实网站。",
                     obj({"min_score": {"type": "integer", "minimum": 0, "maximum": 100},
-                         "selector": {"type": "string", "minLength": 1, "maxLength": 120, "description": "指定已展示岗位：第33个、前五个、岗位名称、这个。必须原样保留选择，不能退化为批量范围。"},
+                         "selector": {"type": "string", "minLength": 1, "maxLength": 500, "description": "指定已展示岗位的序号、名称、公司地点、职责描述、这些或移除后的剩余岗位。必须保留目标，不能退化为批量范围。"},
+                         "selection_mode": {"type": "string", "enum": ["single", "matching"]},
                          "snapshot_id": {"type": "string"},
                          "filters": {**filter_schema(), "type": ["object", "null"], "description": "投递分支条件树，不改变搜索条件；未知不投递"}}), "external", self._mock_delivery_start),
                 AgentToolSpec("mock_delivery_cancel", "按明确停止命令取消本会话的模拟站投递队列，已发送结果保留。", obj({}), "external", self._mock_delivery_cancel),
@@ -418,6 +425,13 @@ class AgentToolRegistry:
                     resume_proposal=content["proposal"],
                 )
             return AgentToolOutcome(name, "ok", content, spec.effect)
+        except TargetClarification as exc:
+            if exc.candidates:
+                dialogue_change("snapshot", topic="applications", kind="job", version=exc.version,
+                                displayed=True, items=exc.candidates)
+            dialogue_change("question", topic="applications", question=str(exc), missing_slots=["selector"])
+            emit("tool_finished", tool=name, status="awaiting_user", detail=str(exc), **receipt)
+            return AgentToolOutcome(name, "awaiting_user", str(exc), spec.effect)
         except MissingPlanScope as exc:
             dialogue_change("question", topic="learning", question=str(exc), missing_slots=["score_scope"])
             emit("tool_finished", tool=name, status="awaiting_user", detail=str(exc), **receipt)
@@ -700,22 +714,54 @@ class AgentToolRegistry:
         kwargs = {"min_score": args.get("min_score", 0), "session_id": context.session_id, "task_id": task_id}
         selector = args.get("selector")
         explicit_ordinals = re.findall(r"(?:第|前)[一二三四五六七八九十百\d]+(?:个|条|份)", context.user_message)
-        if len(explicit_ordinals) == 1:
+        if not selector and len(explicit_ordinals) == 1 and re.fullmatch(
+                r"(?:请|帮我)?(?:自动|直接|追加)?投递\s*(?:第|前)[一二三四五六七八九十百\d]+(?:个|条|份)[。！! ]*", context.user_message.strip()):
             selector = explicit_ordinals[0]  # Same stable reference contract as detail reads.
-        elif len(explicit_ordinals) > 1:
-            raise PreflightRefused("请逐个指定岗位或使用前几个；不能将多个序号退化为批量投递")
+        elif not selector and explicit_ordinals:
+            raise TargetClarification("这条多目标指令尚未明确投递对象；请说明要投递的岗位，没有退化为批量投递。")
         if selector:
-            resolved = resolve_reference(context.dialogue or {}, kind="job", selector=selector,
-                                         snapshot_id=args.get("snapshot_id"), read_only=True)
-            for item in resolved["items"]:
-                if item.get("content_hash") and item["content_hash"] != self.jobs.review_fingerprint(self.jobs.get_job(item["id"])):
-                    raise PreflightRefused("所选岗位证据已变化，请重新查看该岗位后投递")
+            resolved = await self._resolve_job_targets({**args, "selector": selector})
             kwargs["job_ids"] = [item["id"] for item in resolved["items"]]
             kwargs["selection_evidence"] = {"snapshot_id": resolved["snapshot_id"], "selector": selector,
-                                           "allow_unverified": True}
+                                           "allow_unverified": True,
+                                           "target_fingerprints": {str(item["id"]): item["content_hash"] for item in resolved["items"]}}
         if args.get("filters") is not None:
             kwargs["filters"] = args["filters"]
         return await self.mock_workflow.queue_deliveries(**kwargs)
+
+    async def _resolve_job_targets(self, args):
+        context = active_run()
+        if context is None:
+            raise TargetClarification("岗位操作需要当前会话的已展示列表。")
+        provider = self.response_llm or getattr(self.browser, "llm", None)
+        history = self.jobs.conversation_history(conversation_id=context.session_id, limit=6) if hasattr(self.jobs, "conversation_history") else []
+        result = await resolve_job_targets(args["selector"], dialogue=context.dialogue or {}, jobs=self.jobs,
+            generate=getattr(provider, "generate", None), snapshot_id=args.get("snapshot_id"),
+            selection_mode=args.get("selection_mode", "single"), history=history)
+        if not result["items"]:
+            raise TargetClarification("本次选择没有剩余可操作岗位；没有进行批量操作。")
+        dialogue_change("job_targets", snapshot_id=result["snapshot_id"], selector=args["selector"],
+                        job_ids=[item["id"] for item in result["items"]], action="resolved")
+        emit("job_targets_resolved", snapshot_id=result["snapshot_id"], job_ids=[item["id"] for item in result["items"]],
+             selector=args["selector"], resolution=result["resolution"])
+        return result
+
+    async def _job_remove_selection(self, args):
+        effect_checkpoint("preparing")
+        context = active_run()
+        resolved = await self._resolve_job_targets(args)
+        if context.cancellation_requested and context.cancellation_requested():
+            raise PreflightRefused("任务已停止，未移除岗位")
+        if self.mock_workflow is not None:
+            result = await self.mock_workflow.remove_jobs(resolved["items"], session_id=context.session_id, run_id=context.run_id)
+        else:
+            effect_checkpoint("started")
+            result = self.jobs.remove_selection(resolved["items"], session_id=context.session_id, run_id=context.run_id)
+            effect_checkpoint("committed")
+        dialogue_change("job_targets", snapshot_id=resolved["snapshot_id"], selector=args["selector"],
+                        job_ids=result["removed_ids"], action="removed")
+        note = "部分发送结果仍待核验，不会重复发送。" if result.get("uncertain_ids") else ""
+        return {**result, "message": f"已将 {len(result['removed_ids'])} 个选中岗位移出申请看板，并停止其未完成投递；已发送内容和全部历史保留。{note}"}
 
     async def _mock_delivery_cancel(self, _args: dict) -> dict:
         context = active_run()
@@ -793,7 +839,8 @@ class AgentToolRegistry:
         if isinstance(value, dict):
             props = schema.get("properties", {})
             if schema.get("additionalProperties") is False and not value.keys() <= props.keys():
-                raise ValueError(f"{path} 包含未支持字段")
+                unknown = sorted(value.keys() - props.keys())
+                raise ValueError(f"{path} 包含未支持字段：{', '.join(unknown)}；允许字段：{', '.join(sorted(props))}")
             if not set(schema.get("required", [])) <= value.keys():
                 raise ValueError(f"{path} 缺少必填参数")
             for key in value.keys() & props.keys():

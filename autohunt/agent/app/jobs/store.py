@@ -195,6 +195,8 @@ class JobStore:
             self._ensure_column(db, "jobs", "recruiter_reply", "TEXT")
             self._ensure_column(db, "jobs", "filter_status", "TEXT NOT NULL DEFAULT 'pass'")
             self._ensure_column(db, "jobs", "board_visible", "INTEGER NOT NULL DEFAULT 1")
+            self._ensure_column(db, "jobs", "removed_at", "TEXT")
+            db.execute("CREATE TABLE IF NOT EXISTS job_removals (job_id INTEGER PRIMARY KEY,session_id TEXT NOT NULL,run_id TEXT NOT NULL,content_hash TEXT NOT NULL,removed_at TEXT NOT NULL)")
             self._ensure_column(db, "jobs", "filter_evidence", "TEXT NOT NULL DEFAULT '{}'")
             self._ensure_column(db, "mock_delivery_queue", "scope_json", "TEXT NOT NULL DEFAULT '{}'")
             self._ensure_column(db, "mock_delivery_queue", "scope_evidence_json", "TEXT NOT NULL DEFAULT '{}'")
@@ -711,7 +713,7 @@ class JobStore:
             )
             db.execute("UPDATE jobs SET source=?,filter_status=?,filter_evidence=? WHERE id=?",
                 (job["source"], job.get("filter_status", "pass"), json.dumps(job.get("filter_evidence", {}), ensure_ascii=False), existing["id"]))
-            db.execute("UPDATE jobs SET board_visible=MAX(board_visible,?) WHERE id=?",
+            db.execute("UPDATE jobs SET board_visible=CASE WHEN removed_at IS NOT NULL THEN 0 ELSE MAX(board_visible,?) END WHERE id=?",
                        (int(job.get("board_visible", True)), existing["id"]))
             return int(existing["id"]), False
         cursor = db.execute(
@@ -746,6 +748,8 @@ class JobStore:
             for row in db.execute("SELECT group_index,COUNT(DISTINCT job_id) AS n FROM search_candidates WHERE task_id=? AND status='accepted' GROUP BY group_index", (task_id,)):
                 group_counts[row["group_index"]] = row["n"]
             status = "pending_verification" if job.get("filter_status") != "pass" else "accepted"
+            if existing and existing["removed_at"]:
+                status = "user_removed"
             if job.get("decision") not in {"APPLY", "REVIEW"} or job.get("stage") == "rejected":
                 status = "not_admitted"
             group_index = None
@@ -780,7 +784,7 @@ class JobStore:
         return dict(db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone())
 
     def list_jobs(self, stage: str | None = None, limit: int = 100) -> list[StoredJobView]:
-        query = "SELECT j.*,d.content_hash AS review_hash FROM jobs j LEFT JOIN job_review_decisions d ON d.job_id=j.id WHERE j.board_visible=1 AND (j.filter_status='pass' OR j.stage!='review')"
+        query = "SELECT j.*,d.content_hash AS review_hash FROM jobs j LEFT JOIN job_review_decisions d ON d.job_id=j.id WHERE j.board_visible=1 AND j.removed_at IS NULL AND (j.filter_status='pass' OR j.stage!='review')"
         params: list[Any] = []
         if stage:
             query += " AND j.stage=?"
@@ -865,7 +869,8 @@ class JobStore:
                     group_index = next((item["index"] for item in verdict.get("result_group_evidence", [])
                                         if item["status"] == "pass" and group_counts.get(item["index"], 0) < groups[item["index"]]["count"]), None)
                     admitted = group_index is not None
-                admitted = admitted and (not limit or admitted_count < limit)
+                current_row = db.execute("SELECT removed_at FROM jobs WHERE id=?", (candidate["id"],)).fetchone()
+                admitted = admitted and not current_row["removed_at"] and (not limit or admitted_count < limit)
                 if admitted:
                     admitted_count += 1
                     group_counts[group_index] = group_counts.get(group_index, 0) + 1
@@ -878,7 +883,7 @@ class JobStore:
                 status = "accepted" if admitted else "pending_verification" if verdict["status"] == "unknown" else "not_admitted"
                 sample.update(admission=status, result_group=group_index)
                 db.execute("UPDATE jobs SET board_visible=? WHERE id=?",
-                           (int(admitted or candidate["stage"] != "review"), candidate["id"]))
+                       (int((admitted or candidate["stage"] != "review") and not current_row["removed_at"]), candidate["id"]))
                 db.execute("INSERT OR REPLACE INTO search_candidates VALUES (?,?,?,?,?,?,?)",
                            (task_id, candidate["source_url"], candidate["id"], status, group_index,
                             json.dumps(updated, ensure_ascii=False), utc_now()))
@@ -1258,6 +1263,7 @@ class JobStore:
         by_id = {int(row["id"]): dict(row) for row in rows}
         from ..core.search_contract import monthly_salary_lower_bound
         return [by_id[job_id] for job_id in ids if job_id in by_id
+                and not by_id[job_id].get("removed_at")
                 and by_id[job_id].get("filter_status", "pass") == "pass"
                 and outcomes[job_id].get("filter_status", "pass") == "pass"
                 and (not outcomes[job_id].get("filter_fingerprint") or
@@ -1283,6 +1289,9 @@ class JobStore:
         inserted = []
         with self.lock, self._connect() as db:
             for item in items:
+                current = db.execute("SELECT removed_at FROM jobs WHERE id=?", (item["id"],)).fetchone()
+                if not current or current["removed_at"]:
+                    continue
                 selected_unknown = item.get("filter_status") == "unknown" and (scope_evidence or {}).get(item["id"], {}).get("allow_unverified") is True
                 if item.get("filter_status", "pass") != "pass" and not selected_unknown:
                     continue
@@ -1489,6 +1498,27 @@ class JobStore:
             cursor = db.execute("UPDATE jobs SET stage=?,last_seen_at=? WHERE id=?", (stage, utc_now(), job_id))
             if cursor.rowcount == 0:
                 raise KeyError(job_id)
+
+    def remove_selection(self, items: list[dict], *, session_id: str, run_id: str) -> dict:
+        """Atomic reversible exclusion; retain jobs, facts and all send receipts."""
+        if not items or len(items) > 200 or len({item["id"] for item in items}) != len(items):
+            raise ValueError("移除对象数量无效")
+        ids, now = [item["id"] for item in items], utc_now()
+        with self.lock, self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            for item in items:
+                row = db.execute("SELECT * FROM jobs WHERE id=?", (item["id"],)).fetchone()
+                if not row or self.review_fingerprint(dict(row)) != item.get("content_hash"):
+                    raise ValueError("岗位证据已变化，未移除任何对象，请重新查看列表")
+                queue = db.execute("SELECT session_id,status FROM mock_delivery_queue WHERE job_id=?", (item["id"],)).fetchone()
+                if queue and queue["session_id"] != session_id and queue["status"] in {"queued", "dispatched"}:
+                    raise ValueError("所选岗位由另一个会话执行中，未停止其他会话任务")
+            for item in items:
+                db.execute("UPDATE jobs SET board_visible=0,removed_at=COALESCE(removed_at,?) WHERE id=?", (now, item["id"]))
+                db.execute("INSERT OR REPLACE INTO job_removals VALUES (?,?,?,?,?)", (item["id"], session_id, run_id, item["content_hash"], now))
+                db.execute("UPDATE mock_delivery_queue SET status='cancelled',detail='用户移除岗位；已发送内容保留',updated_at=? WHERE job_id=? AND session_id=? AND status IN ('queued','dispatched','blocked')", (now, item["id"], session_id))
+                db.execute("UPDATE delivery_previews SET status='cancelled' WHERE job_id=? AND consumed_at IS NULL", (item["id"],))
+        return {"removed_ids": ids, "history_preserved": True}
 
     def review_selection(self, items: list[dict], *, session_id: str, run_id: str) -> None:
         if not items or len(items) > 30:
@@ -1697,6 +1727,8 @@ class JobStore:
                 raise KeyError(job_id)
 
     def _check_delivery_filter(self, job: dict, payload: dict | None = None) -> None:
+        if job.get("removed_at"):
+            raise ValueError("岗位已由用户移除，不能继续投递")
         selected_unknown = job and job.get("filter_status") == "unknown" and (payload or {}).get("allow_unverified") is True
         if not job or job.get("filter_status", "pass") != "pass" and not selected_unknown:
             raise ValueError("职位筛选条件未核实通过，不能沟通或投递；请先核对条件并重新搜索")

@@ -25,6 +25,8 @@ def _approval_detail(tool: str, arguments: dict) -> str:
     This text appears directly in the approval card so the user knows what they
     are being asked to confirm without opening the raw arguments JSON.
     """
+    if tool == "job_remove_selection":
+        return f"请确认移除范围：{arguments.get('selector', '尚未指定')}。仅移出申请看板并停止选中岗位未完成的投递；不会删除JD或撤回已发送内容。"
     if tool == "mock_delivery_start":
         parts = []
         count = arguments.get("expected_count")

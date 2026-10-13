@@ -225,8 +225,12 @@ class MockWorkflowCoordinator:
         explicit = job_ids is not None and selection_evidence is not None
         evidence = ([self.jobs.get_job(job_id) for job_id in dict.fromkeys(job_ids)] if explicit else
                     self.jobs.jobs_for_resume_analysis(profile.resume_id, limit=200, min_score=min_score, task_id=task_id))
+        target_hashes = (selection_evidence or {}).get("target_fingerprints", {})
+        if explicit and any(target_hashes.get(str(job["id"])) and target_hashes[str(job["id"])] != self.jobs.review_fingerprint(job) for job in evidence):
+            raise PreflightRefused("定位后岗位内容变化，未加入投递队列，请重新查看")
         eligible = [self.jobs.get_job(item["id"]) for item in evidence
                     if item["stage"] in {"review", "applying"}
+                    and not self.jobs.get_job(item["id"]).get("removed_at")
                     and item.get("score", 0) >= min_score
                     and (item.get("filter_status", "pass") == "pass" or explicit and item.get("filter_status") == "unknown")
                     and self.delivery.supports(item["source_url"])
@@ -311,6 +315,36 @@ class MockWorkflowCoordinator:
         finally:
             self.operations.pop(task, None)
             self.operation_jobs.pop(task, None)
+
+    async def remove_jobs(self, items, *, session_id, run_id):
+        """Revoke selected rows before yielding; leave unrelated workers alone."""
+        from ..runtime.context import effect_checkpoint
+        ids = {item["id"] for item in items}
+        effect_checkpoint("started")
+        result = self.jobs.remove_selection(items, session_id=session_id, run_id=run_id)
+        operations = [task for task, owner in self.operations.items()
+                      if owner == session_id and self.operation_jobs.get(task) in ids]
+        for task in operations:
+            task.cancel()
+        if operations:
+            await asyncio.gather(*operations, return_exceptions=True)
+        current = self.delivery.current()
+        if current.job_id in ids:
+            await self.delivery.stop()  # Existing uncertain-click protection remains.
+        uncertain_ids = []
+        for item in self.jobs.mock_delivery_queue(session_id=session_id, active_only=False):
+            if item["job_id"] not in ids or not item.get("run_id"):
+                continue
+            run = self.jobs.get_delivery_run(item["run_id"])
+            if run.status == DeliveryTaskStatus.OUTCOME_INDETERMINATE:
+                uncertain_ids.append(item["job_id"])
+            if not run.submitted and run.status not in {DeliveryTaskStatus.COMPLETED, DeliveryTaskStatus.FAILED,
+                    DeliveryTaskStatus.OUTCOME_INDETERMINATE, DeliveryTaskStatus.CANCELLED}:
+                self.jobs.update_delivery_run(run.id, status=DeliveryTaskStatus.CANCELLED,
+                                               detail="用户移除本岗位，未完成发送已停止；沟通历史保留")
+        effect_checkpoint("committed")
+        self.wakeup.set()
+        return {**result, "uncertain_ids": uncertain_ids}
 
     async def cancel_delivery_queue(self, session_id: str | None) -> dict:
         key = session_id if session_id is not None else "*"
@@ -466,6 +500,9 @@ class MockWorkflowCoordinator:
             stamp = resume_stamp(self.resume.read_document(), self.candidate)
             for item in self.jobs.mock_delivery_queue():
                 job = self.jobs.get_job(item["job_id"])
+                if job.get("removed_at"):
+                    self.jobs.update_mock_delivery(job["id"], "cancelled", "岗位已移除，未继续发送")
+                    continue
                 if (item["resume_stamp"] != stamp or job["score"] < item["min_score"]
                         or (job.get("filter_status", "pass") != "pass" and not (
                             job.get("filter_status") == "unknown" and item.get("scope_evidence", {}).get("allow_unverified")))

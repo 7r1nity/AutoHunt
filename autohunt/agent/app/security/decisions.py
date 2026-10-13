@@ -19,7 +19,7 @@ class Decision(StrEnum):
 
 CONTROL_TOOLS = frozenset({"browser_task_pause", "browser_task_stop", "mock_delivery_cancel"})
 LOCAL_TOOLS = frozenset({"task_continue", "context_action_propose", "context_question_ask",
-    "job_review_selection", "search_state_update", "job_results_refilter", "preference_update",
+    "job_review_selection", "job_remove_selection", "search_state_update", "job_results_refilter", "preference_update",
     "resume_propose_patch", "learning_plan_generate"})
 
 
