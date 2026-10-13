@@ -320,7 +320,7 @@ class AgentToolRegistry:
         ]
         if self.mock_workflow is not None:
             specs.extend([
-                AgentToolSpec("mock_delivery_start", "将用户要求范围内的已搜索模拟站职位加入有限投递队列。filters为投递独立语义条件，可复用搜索判断；min_score可选，省略不设分数门槛。内部生成逐职位预览与一次性授权，逐个直接发送简历再等待回复；不支持真实网站。",
+                AgentToolSpec("mock_delivery_start", "将用户要求范围内的已搜索模拟站职位加入有限投递队列。filters为投递独立语义条件，可复用搜索判断；min_score可选，省略不设分数门槛。内部生成逐职位预览与一次性授权，快速逐个沟通、并行等待HR回复、回复后发送简历；不支持真实网站。",
                     obj({"min_score": {"type": "integer", "minimum": 0, "maximum": 100},
                          "selector": {"type": "string", "minLength": 1, "maxLength": 120, "description": "指定已展示岗位：第33个、前五个、岗位名称、这个。必须原样保留选择，不能退化为批量范围。"},
                          "snapshot_id": {"type": "string"},

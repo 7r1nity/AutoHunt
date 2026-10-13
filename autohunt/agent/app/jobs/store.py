@@ -603,7 +603,7 @@ class JobStore:
             if changed.rowcount != 1:
                 raise ValueError("投递预览已被其他执行器消费")
             db.execute(
-                "UPDATE jobs SET stage='applying',mode='人工已授权',last_seen_at=? WHERE id=?",
+                "UPDATE jobs SET mode='人工已授权',last_seen_at=? WHERE id=?",
                 (now.isoformat(), row["job_id"]),
             )
             db.execute(
@@ -1423,8 +1423,9 @@ class JobStore:
         """
         with self.lock, self._connect() as db:
             rows = db.execute(
-                "SELECT * FROM delivery_runs WHERE status='waiting_for_reply' "
-                "AND submitted=0 ORDER BY COALESCE(last_checked_at,''),started_at" +
+                "SELECT r.*,j.recruiter_reply AS observed_reply FROM delivery_runs r JOIN jobs j ON j.id=r.job_id "
+                "WHERE r.status='waiting_for_reply' AND r.submitted=0 "
+                "ORDER BY CASE WHEN COALESCE(j.recruiter_reply,'')='' THEN 1 ELSE 0 END,COALESCE(r.last_checked_at,''),r.started_at" +
                 (" LIMIT ?" if limit is not None else ""), (limit,) if limit is not None else ()).fetchall()
         return [dict(row) for row in rows]
 
@@ -1532,10 +1533,12 @@ class JobStore:
         self, job_id: int, resume_label: str = "候选人默认简历", *,
         resume_document_id: str = "master", resume_version: int = 0,
         resume_digest: str = "unavailable", action: str = "submit_resume",
-        allow_unverified: bool = False, delivery_flow: str = "gated",
+        allow_unverified: bool = False, delivery_flow: str = "native",
     ) -> DeliveryPreviewView:
         if action != "submit_resume":
             raise ValueError("不支持的投递动作")
+        if delivery_flow not in {"native", "gated", "direct"}:
+            raise ValueError("不支持的模拟投递流程")
         job = self.get_job(job_id)
         now = datetime.now(UTC)
         self._check_delivery_filter(job, {"allow_unverified": allow_unverified})
@@ -1554,14 +1557,17 @@ class JobStore:
             "action_summary": "填写申请表并上传所选简历；遇到验证码、MFA 或未知问题立即暂停",
             "allow_unverified": allow_unverified,
         }
-        if delivery_flow == "direct":
+        if delivery_flow in {"direct", "gated"}:
             from ..delivery.mock_site_adapter import MockJobSiteAdapter
             from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
             target = MockJobSiteAdapter.normalize_job_url(job["source_url"])
             if not target:
-                raise ValueError("直接投递仅支持本地模拟招聘站")
+                raise ValueError("投递流程切换仅支持本地模拟招聘站")
             parsed = urlparse(target)
-            payload["target_url"] = urlunparse(parsed._replace(query=urlencode({"id": parse_qs(parsed.query)["id"][0], "flow": "direct"})))
+            query = {"id": parse_qs(parsed.query)["id"][0]}
+            if delivery_flow == "direct":
+                query["flow"] = "direct"
+            payload["target_url"] = urlunparse(parsed._replace(query=urlencode(query)))
         canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         digest = hashlib.sha256(canonical.encode()).hexdigest()
         preview_id = f"dpv_{secrets.token_hex(12)}"
@@ -1653,7 +1659,7 @@ class JobStore:
                 (authorization_id, token_hash, now.isoformat(), preview_id),
             )
             db.execute(
-                "UPDATE jobs SET stage='applying',mode='人工已授权',last_seen_at=? WHERE id=?",
+                "UPDATE jobs SET mode='人工已授权',last_seen_at=? WHERE id=?",
                 (now.isoformat(), row["job_id"]),
             )
         return authorization_id, token, int(row["job_id"]), expires

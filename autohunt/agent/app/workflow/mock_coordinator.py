@@ -252,7 +252,7 @@ class MockWorkflowCoordinator:
             unknown = sum(item["status"] == "unknown" for item in scope_evidence.values())
             eligible = [job for job in eligible if scope_evidence[job["id"]]["status"] == "pass"]
         for job in eligible:
-            scope_evidence.setdefault(job["id"], {}).update(delivery_flow="direct")
+            scope_evidence.setdefault(job["id"], {}).update(delivery_flow="gated")
             if explicit:
                 scope_evidence[job["id"]].update(selection_evidence)
         if stop_epoch != (self.stop_epochs.get(session_id, 0), self.stop_epochs.get("*", 0)):
@@ -288,7 +288,7 @@ class MockWorkflowCoordinator:
                 "excluded": excluded, "unknown": unknown,
                 "message": f"已将 {len(ids)} 个{('指定' if explicit else '符合本次投递范围的')}模拟站职位加入队列（不是已投递）。范围：{scope_label}。"
                 + (f"未入队：不符合{excluded}个，信息不足{unknown}个。" if filters else "") +
-                "逐个直接发送当前简历，核实成功后等待招聘方回复；无需先等待HR。验证需人工接管，结果不确定不会重放。"
+                "逐个快速发起沟通，各岗位同时等待HR回复；收到回复并核实按钮解锁后自动发送已授权简历。验证需人工接管，结果不确定不会重放。"
                 "仅处理当前简历的已搜索职位，不启用每日任务，也不自动添加未来职位。可说「停止自动投递」。"}
 
     async def _operation(self, session_id: str, factory, *, job_id: int | None = None, queued: bool = True):
@@ -426,10 +426,12 @@ class MockWorkflowCoordinator:
             if (not owner or not run.get("preview_id") or run.get("action") != "submit_resume"
                     or any(value is None for value in binding.values())):
                 continue
-            if run.get("last_checked_at") and not wait_expired(run["last_checked_at"], self.poll_seconds):
-                continue
-            if not str(self.jobs.get_job(run["job_id"]).get("recruiter_reply") or "").strip():
+            job = self.jobs.get_job(run["job_id"])
+            if not str(job.get("recruiter_reply") or "").strip():
                 continue  # Waiting is an HTTP read, not a browser navigation.
+            fresh_reply = _utc_naive(job.get("recruiter_reply_at")) > _utc_naive(run.get("last_checked_at"))
+            if run.get("last_checked_at") and not fresh_reply and not wait_expired(run["last_checked_at"], self.poll_seconds):
+                continue
             attempted += 1
             try:
                 # Record the attempt even if the browser check fails before its
@@ -449,6 +451,7 @@ class MockWorkflowCoordinator:
                     view = self.jobs.get_delivery_run(run["id"])
                 if view.submitted:
                     submitted += 1
+                    self.wakeup.set()  # Give another already-replied job its turn now.
                     if item:
                         self._finish_queue_item(item, "completed", "已核实简历投递完成")
             except Exception as exc:  # noqa: BLE001 - one job must not stop the rest
@@ -479,7 +482,7 @@ class MockWorkflowCoordinator:
                     try:
                         preview = self.jobs.create_delivery_preview(job["id"], resume_label="候选人主简历",
                             allow_unverified=bool(item.get("scope_evidence", {}).get("allow_unverified")),
-                            delivery_flow=item.get("scope_evidence", {}).get("delivery_flow", "gated"), **item["binding"])
+                            delivery_flow="gated", **item["binding"])
                         result = await self._operation(item["session_id"],
                             lambda: self.delivery.authorize_and_start(preview.id, monitor_reply=False, **item["binding"]), job_id=job["id"])
                         if result is None:
@@ -592,6 +595,7 @@ class MockWorkflowCoordinator:
                     if reply:
                         if reply != job.get("recruiter_reply"):
                             self.jobs.mark_recruiter_reply(job_id, reply)
+                            self.wakeup.set()  # New evidence, not another 30s dispatch delay.
                         counters["replied"] += 1
                         authorized_after_reply = bool(
                             settings["auto_submit"] and job["score"] >= settings["min_score"] and settings["auto_submit_enabled_at"]

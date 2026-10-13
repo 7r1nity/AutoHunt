@@ -375,7 +375,7 @@ class DeliveryAutomationService:
                     self.jobs.mark_delivery_waiting_reply(job_id, detail)
                     self._update(DeliveryTaskStatus.WAITING_FOR_REPLY, detail, url=page.url, checkpoint="waiting_for_reply", submitted=observation.application_submitted)
                     return
-                if require_reply and not observation.direct_apply and not observation.hr_reply_text and not observation.application_submitted:
+                if require_reply and not observation.hr_reply_text and not observation.application_submitted:
                     raise RuntimeError("本次批量授权要求先收到招聘方回复；此页面尚无明确回复，不会直接发送简历，请人工核对")
                 if observation.hr_reply_text:
                     reply_at = self.jobs.mark_recruiter_reply(job_id, observation.hr_reply_text)

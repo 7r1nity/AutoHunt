@@ -13,12 +13,16 @@ import { shortJobDate } from "@/lib/job-display";
 import type { AgentStatus, AutomationStats, BrowserTask, CandidateMaterial, CandidateState, ClarifyOption, DeliveryPreview, DeliveryTask, Insights, Job, JobStage, LearningPlan, Material, MaterialIngestResult, DocumentIngestResult, Message, MockWorkflowSettings, ResumeDocumentMeta, ResumeIngestResult, ResumeProfile, ResumeProposal, SearchReport } from "@/lib/types";
 
 const stageMeta: Record<JobStage, { title: string; hint: string }> = {
-  review: { title: "待审核", hint: "找到但尚未申请" },
-  applying: { title: "等待回复 / 正在申请", hint: "已沟通，等待 HR 回复或准备发简历" },
+  review: { title: "待审核", hint: "待人工核验或确认；结果不确定时禁止重发" },
+  applying: { title: "等待回复", hint: "已发起沟通；HR 回复后自动发送已授权简历" },
   waiting: { title: "已投递", hint: "简历已发送，等待后续进展" },
   interview: { title: "面试进展", hint: "需要你的关注" },
-  outcome_indeterminate: { title: "待人工核验", hint: "结果不确定，禁止重试" },
+  outcome_indeterminate: { title: "待审核 · 结果待核验", hint: "结果不确定，禁止直接重试" },
 };
+const boardStages = ["review", "applying", "waiting", "interview"] as const;
+function inBoardStage(job: Job, stage: JobStage) {
+  return job.stage === stage || stage === "review" && job.stage === "outcome_indeterminate";
+}
 
 const navItems = [
   ["overview", "⌁", "工作台"],
@@ -664,7 +668,7 @@ export default function Home() {
   }, [browserTask?.status]);
 
   const counts = useMemo(() => ({
-    review: jobs.filter((job) => job.stage === "review").length,
+    review: jobs.filter((job) => inBoardStage(job, "review")).length,
     applying: jobs.filter((job) => job.stage === "applying").length,
     waiting: jobs.filter((job) => job.stage === "waiting").length,
     interview: jobs.filter((job) => job.stage === "interview").length,
@@ -954,17 +958,17 @@ export default function Home() {
     const response = await fetch("/api/agent/jobs", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "import_mock", external_id: 696, flow: "direct" }),
+      body: JSON.stringify({ action: "import_mock", external_id: 696, flow: "gated" }),
     });
     const payload = await response.json();
     if (!response.ok) { setNotice(payload.detail ?? "导入模拟职位失败"); return; }
-    setNotice("已把直接投递模拟职位导入待审核列，可测试授权、MFA 接管、投递后会话与状态同步");
+    setNotice("已把模拟职位导入待审核列；投递将先发起沟通，收到HR回复后发送已授权简历");
     await refreshAutomation();
   }
   async function advanceJob(id: number) {
     const currentJob = jobs.find((job) => job.id === id);
     if (!currentJob) return;
-    if (currentJob.stage === "review") {
+    if (currentJob.stage === "review" || currentJob.stage === "applying") {
       try {
         const response = await fetch("/api/agent/jobs", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "deliver", id, conversation_id: runtime.sessionId }) });
         const payload = await response.json();
@@ -1960,25 +1964,25 @@ export default function Home() {
             </section>}
 
             {activeView === "board" && <section className="board-section panel standalone-board">
-              <div className="section-heading"><div><h2>每一份申请，都有下一步</h2><div className="board-actions"><button className="button secondary compact" onClick={() => void importMockJob()}>导入直接投递职位</button><button className="button secondary compact" disabled={workflowBusy} onClick={() => void syncMockWorkflow()}>同步模拟站会话</button></div></div><div className="legend"><span><i className="auto" />允许自动投递</span><span><i />需要人工确认</span><span className="click-hint">点击卡片查看详情</span></div></div>
+              <div className="section-heading"><div><h2>每一份申请，都有下一步</h2><div className="board-actions"><button className="button secondary compact" onClick={() => void importMockJob()}>导入模拟职位</button><button className="button secondary compact" disabled={workflowBusy} onClick={() => void syncMockWorkflow()}>同步模拟站会话</button></div></div><div className="legend"><span><i className="auto" />允许自动投递</span><span><i />需要人工确认</span><span className="click-hint">点击卡片查看详情</span></div></div>
               {workflowNotice && <p className="workflow-feedback">{workflowNotice}</p>}
               <div className="kanban">
-                {(Object.keys(stageMeta) as JobStage[]).map((stage) => (
+                {boardStages.map((stage) => (
                   <div className="kanban-column" key={stage}>
                     <header><div><h3>{stageMeta[stage].title}<b>{counts[stage]}</b></h3><p>{stageMeta[stage].hint}</p></div><button aria-label="更多">•••</button></header>
                     <div className="card-stack">
-                      {jobs.filter((job) => job.stage === stage).map((job) => (
+                      {jobs.filter((job) => inBoardStage(job, stage)).map((job) => (
                         <article className="job-card" key={job.id} role="button" tabIndex={0} aria-label={`查看 ${job.role}，${job.company}，匹配分 ${job.score}`} onClick={() => setDetailJobId(job.id)} onKeyDown={(event) => { if (event.target === event.currentTarget && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); setDetailJobId(job.id); } }} title="点击查看职位详情">
                           <div className="job-top"><span className={scoreClass(job.score)}>{job.score}</span><span className={job.mode === "自动投递" ? "mode auto" : "mode"}>{job.review_approved && job.stage === "review" ? "审核通过 · 待授权" : job.mode}</span></div>
                           <h4>{job.role}</h4><p className="company">{job.company} · {job.location}</p><strong className="salary">{job.salary}</strong>
                           <div className="tags">{job.tags.slice(0, 2).map((tag) => <span key={tag}>{tag}</span>)}</div>
                           <p className="reason">{job.filter_status === "unknown" && <span>条件待核实 · 不自动投递<br /></span>}{job.filter_status === "fail" && <span>本轮筛选不符 · 不自动投递<br /></span>}{job.reason}</p>
                           {job.recruiter_reply && <p className="confirm-result ok">HR 回复：{job.recruiter_reply}</p>}
-                          <footer><small>{job.source} · <time dateTime={job.posted} title={job.posted}>{shortJobDate(job.posted)}</time></small>{(stage === "review" || stage === "waiting") && <button onClick={(event) => { event.stopPropagation(); advanceJob(job.id); }}>{stage === "review" ? "审阅投递" : "记录面试"} →</button>}</footer>
-                          {stage === "review" && <button className="reject" onClick={(event) => { event.stopPropagation(); rejectJob(job.id); }}>跳过这个职位</button>}
+                          <footer><small>{job.source} · <time dateTime={job.posted} title={job.posted}>{shortJobDate(job.posted)}</time></small>{(job.stage === "review" || job.stage === "waiting") && <button onClick={(event) => { event.stopPropagation(); advanceJob(job.id); }}>{job.stage === "review" ? "投递" : "记录面试"} →</button>}{job.stage === "outcome_indeterminate" && <button onClick={(event) => { event.stopPropagation(); setDetailJobId(job.id); }}>核验记录 →</button>}</footer>
+                          {job.stage === "review" && <button className="reject" onClick={(event) => { event.stopPropagation(); rejectJob(job.id); }}>跳过这个职位</button>}
                         </article>
                       ))}
-                      {jobs.filter((job) => job.stage === stage).length === 0 && <div className="empty-state board-empty"><WorkspaceIcon name={stage === "review" ? "search" : stage === "interview" ? "plans" : "board"} /><strong>{stage === "review" ? "等待发现好机会" : "还没有申请到这一步"}</strong><p>{stage === "review" ? "搜索后的待审核职位会显示在这里。" : stageMeta[stage].hint}</p></div>}
+                      {jobs.filter((job) => inBoardStage(job, stage)).length === 0 && <div className="empty-state board-empty"><WorkspaceIcon name={stage === "review" ? "search" : stage === "interview" ? "plans" : "board"} /><strong>{stage === "review" ? "等待发现好机会" : "还没有申请到这一步"}</strong><p>{stage === "review" ? "搜索后的待审核职位及结果待核验的申请会显示在这里。" : stageMeta[stage].hint}</p></div>}
                     </div>
                   </div>
                 ))}
@@ -2236,9 +2240,10 @@ export default function Home() {
                 {detailJob.sourceUrl && <div><dt>职位链接</dt><dd><a href={detailJob.sourceUrl} target="_blank" rel="noreferrer">打开职位原文 ↗</a></dd></div>}
               </dl>
               <div className="modal-actions">
+                {detailJob.stage === "outcome_indeterminate" && <p>请先核验模拟站的沟通与投递记录；结果不确定，不会再次发送。</p>}
                 {detailJob.stage === "review" && <button className="button secondary" onClick={() => { rejectJob(detailJob.id); setDetailJobId(null); }}>跳过这个职位</button>}
                 {(detailJob.stage === "review" || detailJob.stage === "waiting") && <button className="button primary" onClick={() => { const id = detailJob.id; setDetailJobId(null); advanceJob(id); }}>{detailJob.stage === "review" ? "投递" : "记录面试"}</button>}
-                {detailJob.stage === "applying" && <button className="button primary" onClick={() => { setDetailJobId(null); void resumeDelivery(); }}>继续投递</button>}
+                {detailJob.stage === "applying" && <button className="button primary" onClick={() => { const id = detailJob.id; setDetailJobId(null); void advanceJob(id); }}>{detailJob.recruiter_reply ? "开启自动发送简历" : "开启自动投递"}</button>}
                 <button className="button secondary" onClick={() => setDetailJobId(null)}>关闭</button>
               </div>
             </div>

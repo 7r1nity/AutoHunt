@@ -112,6 +112,24 @@ class Admission(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.store.authorize_delivery_run(preview.id, **{**args, "run_id": "second"})
 
+    def test_gated_queue_removes_direct_source_mode_and_preserves_stages(self):
+        value = job(1)
+        value["source_url"] += "&flow=direct"
+        ident, _ = self.store.upsert_job(value)
+        preview = self.store.create_delivery_preview(ident, delivery_flow="gated",
+            resume_document_id="synthetic", resume_version=1, resume_digest="synthetic-digest")
+        _, _, _, run = self.store.authorize_delivery_run(preview.id, run_id="synthetic-run",
+            resume_document_id="synthetic", resume_version=1, resume_digest="synthetic-digest")
+        self.assertNotIn("flow=direct", run.target_url)
+        self.assertEqual(self.store.get_job(ident)["source_url"], value["source_url"])
+        self.assertEqual(self.store.get_job(ident)["stage"], "review")
+        self.store.mark_delivery_waiting_reply(ident, "合成沟通确认")
+        self.assertEqual(self.store.get_job(ident)["stage"], "applying")
+        self.store.mark_recruiter_reply(ident, "合成HR回复")
+        self.assertEqual(self.store.get_job(ident)["stage"], "applying")
+        self.store.mark_delivery_completed(ident, "合成投递记录确认")
+        self.assertEqual(self.store.get_job(ident)["stage"], "waiting")
+
     def test_private_direct_preview_rejects_changed_resume(self):
         ident, _ = self.store.upsert_job(job(1))
         preview = self.store.create_delivery_preview(ident, delivery_flow="direct",
@@ -247,10 +265,10 @@ class SelectionAndDispatch(unittest.IsolatedAsyncioTestCase):
             sync_once=AsyncMock(return_value={}), run_daily_if_due=AsyncMock(return_value={}))
         engine = RuleEngine(build_rules(coordinator), clock=lambda: 0)
         facts = Observation(facts={"queue_depth": 5, "delivery_idle": True, "browser_idle": True,
-                                   "reply_candidates": [{"id": "no-reply"}]})
+                                   "reply_candidates": [{"id": "no-reply", "observed_reply": ""}]})
         for _ in range(6):
             await engine.step(facts)
-        self.assertEqual(len(calls), 5)
+        self.assertEqual(len(calls), 6)
 
 
 if __name__ == "__main__":
@@ -259,7 +277,7 @@ if __name__ == "__main__":
     suite = unittest.defaultTestLoader.loadTestsFromModule(__import__(__name__, fromlist=["*"]))
     if "--regression" in sys.argv:
         for module in ("delivery_scheduling_contract", "condition_refresh_contract", "command_recovery_contract",
-                       "approval_contract", "reporting_contract", "presentation_contract", "history_path_contract"):
+                       "approval_contract", "reporting_contract", "presentation_contract", "history_path_contract", "background_polling_contract"):
             suite.addTests(unittest.defaultTestLoader.loadTestsFromName(f"evaluation.{module}"))
     result = unittest.TextTestRunner(stream=buffer, verbosity=2).run(suite)
     output = Path(__file__).parent / "results" / "search-delivery" / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")

@@ -91,7 +91,7 @@ nav { display: grid; gap: 5px; }
 
 .section-heading { display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 11px; }.section-heading h2 { font-size: 22px; }.legend { display: flex; gap: 15px; color: var(--muted); font-size: 12px; }.legend span { display: flex; gap: 5px; align-items: center; }.legend i { width: 7px; height: 7px; border-radius: 50%; background: #e2a575; }.legend i.auto { background: #4db480; }
 .standalone-board { padding: 22px; }.standalone-board .section-heading { margin-bottom: 16px; }
-.kanban { display: grid; grid-template-columns: repeat(5, minmax(272px, 1fr)); gap: 12px; overflow-x: auto; padding-bottom: 10px; }
+.kanban { display: grid; grid-template-columns: repeat(4, minmax(272px, 1fr)); gap: 12px; overflow-x: auto; padding-bottom: 10px; }
 .kanban-column { min-width: 0; padding: 11px; border-radius: 13px; background: #f1f4f1; border: 1px solid #e5ebe7; }.kanban-column > header { display: flex; align-items: flex-start; justify-content: space-between; padding: 2px 3px 11px; }.kanban-column h3 { margin: 0; font-size: 15px; }.kanban-column h3 b { margin-left: 6px; padding: 2px 6px; border-radius: 12px; background: #dfe7e2; font-size: 12px; }.kanban-column header p { margin: 3px 0 0; color: #89968f; font-size: 12px; }
 .card-stack { display: grid; gap: 9px; }.job-card { padding: 13px; background: white; border: 1px solid #dce3de; border-radius: 11px; box-shadow: 0 5px 13px rgba(33,53,43,.04); }.job-top { display: flex; justify-content: space-between; align-items: center; }.score { width: 29px; height: 29px; display: grid; place-items: center; border-radius: 50%; background: #f6eee6; color: #ae6d3e; font-size: 12px; font-weight: 700; border: 2px solid #edc7a8; }.score-good { background: #edf5e9; color: #507c42; border-color: #b7d6ad; }.score-high { background: #e4f5ec; color: #1c744f; border-color: #91d0b2; }.mode { font-size: 12px; padding: 4px 6px; border-radius: 8px; background: #fff0e4; color: #a85b31; }.mode.auto { background: #e5f5ec; color: #21724f; }.job-card h4 { margin: 10px 0 3px; font-size: 15px; }.company { margin: 0; color: var(--muted); font-size: 12px; }.salary { display: block; margin-top: 7px; color: #405c4e; font-size: 12px; }.tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; }.tags span { padding: 3px 6px; border-radius: 6px; background: #f0f3f1; color: #64736b; font-size: 12px; }.reason { padding: 8px 0; margin: 5px 0 0; color: #66766e; font-size: 12px; line-height: 1.5; border-bottom: 1px solid #edf0ee; }.job-card footer { display: flex; align-items: center; justify-content: space-between; padding-top: 8px; }.job-card footer small { color: #93a098; font-size: 12px; }.job-card footer button { border: 0; background: transparent; color: var(--green); font-size: 12px; font-weight: 700; cursor: pointer; }.reject { width: 100%; margin-top: 7px; border: 0; background: transparent; color: #9a7770; font-size: 12px; cursor: pointer; }.empty-state { padding: 28px 10px; color: #96a39c; text-align: center; border: 1px dashed #d2dbd5; border-radius: 10px; font-size: 12px; }
 
@@ -147,7 +147,7 @@ nav { display: grid; gap: 5px; }
 
 @media (max-width: 1100px) {
   .stats-grid { grid-template-columns: repeat(2, 1fr); }
-  .kanban { grid-template-columns: repeat(5, 230px); }
+  .kanban { grid-template-columns: repeat(4, 230px); }
 }
 @media (max-width: 820px) {
   .app-shell { display: block; }.sidebar { position: static; width: 100%; height: auto; padding: 12px 16px; flex-direction: row; align-items: center; }.brand { padding: 0; }.brand small, .sidebar-card, .profile-mini { display: none; }.sidebar nav { display: flex; margin-left: auto; }.nav-item { padding: 8px; }.nav-item span { display: none; }.workspace { padding: 22px 16px 50px; }.main-grid, .two-columns, .insight-grid { grid-template-columns: 1fr; }.main-grid.chat-only { margin: -4px -16px -50px; }.chat-page { height: calc(100vh - 169px); }.agent-control { min-width: 0; }.agent-control div { display: none; }
@@ -797,7 +797,7 @@ nav { display: grid; gap: 5px; }
 .standalone-board .section-heading { flex-wrap: wrap; gap: 20px; align-items: flex-start; }
 .board-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
 .standalone-board .legend { flex-wrap: wrap; row-gap: 8px; }
-.standalone-board .kanban { grid-template-columns: repeat(5, minmax(272px, 1fr)); max-width: 100%; overscroll-behavior-x: contain; }
+.standalone-board .kanban { grid-template-columns: repeat(4, minmax(272px, 1fr)); max-width: 100%; overscroll-behavior-x: contain; }
 .standalone-board .kanban-column { min-width: 0; }
 .standalone-board .kanban-column header { gap: 8px; }
 .standalone-board .kanban-column header > div { min-width: 0; }

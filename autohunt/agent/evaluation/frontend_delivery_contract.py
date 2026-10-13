@@ -20,6 +20,8 @@ async def run():
     job = {"id": 133, "role": "合成单岗位投递测试", "company": "合成雇主", "location": "深圳", "salary": "15-20K",
            "source": "MockJobSite", "source_url": "http://127.0.0.1:8080/job.html?id=133", "score": 88,
            "stage": "review", "mode": "人工确认", "tags": [], "reason": "合成匹配", "posted": "合成时间", "filter_status": "pass"}
+    uncertain = {**job, "id": 134, "role": "合成待核验岗位", "stage": "outcome_indeterminate",
+                 "mode": "需要人工核验", "reason": "发送结果不确定，不可重试"}
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch(headless=True)
         try:
@@ -36,7 +38,7 @@ async def run():
                         posts.append(route.request.post_data_json)
                         payload = {"queued": 1, "job_ids": [133], "message": "合成岗位已入队"}
                     else:
-                        payload = [job]
+                        payload = [job, uncertain]
                 elif target.path == "/api/agent/conversations":
                     payload = [{"id": "default", "title": "合成会话", "created_at": "2026-01-01T00:00:00Z"}]
                 elif target.path.startswith("/api/agent/runs") or target.path in {"/api/agent/chat", "/api/agent/resumes", "/api/agent/documents", "/api/agent/materials"}:
@@ -54,13 +56,22 @@ async def run():
             await page.goto("http://127.0.0.1:3000/", wait_until="domcontentloaded", timeout=60000)
             # The SSR shell is already clickable before React has attached handlers.
             # Await a synthetic API-driven render, not an arbitrary sleep.
-            await page.get_by_text("已保存 1 个职位", exact=True).wait_for()
+            await page.get_by_text("已保存 2 个职位", exact=True).wait_for()
             await page.get_by_role("button", name=re.compile(r"^申请看板")).click()
+            assert await page.locator(".kanban-column").count() == 4
+            tracks = await page.locator(".kanban").evaluate("el => getComputedStyle(el).gridTemplateColumns.split(' ').length")
+            assert tracks == 4, tracks
+            review = page.locator(".kanban-column").first
+            assert await review.locator(".job-card").count() == 2
             await page.get_by_role("heading", name=job["role"], exact=True).click()
             await page.get_by_role("button", name="投递", exact=True).click()
             await page.get_by_text("合成岗位已入队").wait_for()
             assert posts == [{"action": "deliver", "id": 133, "conversation_id": "default"}], posts
             assert await page.get_by_role("dialog", name="投递预览").count() == 0
+            await page.get_by_role("heading", name=uncertain["role"], exact=True).click()
+            modal = page.get_by_role("dialog", name="职位详情")
+            assert await modal.get_by_role("button", name="投递", exact=True).count() == 0
+            assert "结果不确定" in await modal.inner_text()
             assert not errors, errors
             result = {"passed": True, "posts": posts, "preview_dialogs": 0, "page_errors": errors}
         except Exception:

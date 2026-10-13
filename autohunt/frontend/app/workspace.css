@@ -212,7 +212,7 @@
   .legend { color: var(--muted); font-size: 10px; }
   .legend i { background: #bf8b35; }
   .legend i.auto { background: #388561; }
-  .standalone-board .kanban { grid-template-columns: repeat(5, minmax(265px, 1fr)); gap: 16px; padding-bottom: 15px; scrollbar-width: thin; scrollbar-color: #bdcde3 transparent; }
+  .standalone-board .kanban { grid-template-columns: repeat(4, minmax(265px, 1fr)); gap: 16px; padding-bottom: 15px; scrollbar-width: thin; scrollbar-color: #bdcde3 transparent; }
   .kanban-column { min-width: 0; padding: 15px 12px; border: 1px solid #e1e8f2; border-radius: 10px; background: #f4f7fb; }
   .kanban-column header { min-height: 76px; padding: 0 3px 14px; align-items: flex-start; }
   .kanban-column h3 { font-size: 13px; line-height: 1.5; color: #3b516f; }
@@ -404,7 +404,7 @@
     .composer textarea { font-size: 16px; min-height: 44px; }
     .standalone-board { padding: 19px 15px; }
     .standalone-board .section-heading h2 { font-size: 17px; }
-    .standalone-board .kanban { grid-template-columns: repeat(5, 270px); }
+    .standalone-board .kanban { grid-template-columns: repeat(4, 270px); }
     .profile-hero, .report-hero, .plan-header, .settings-hero { padding: 22px; }
     .profile-hero .avatar.large { width: 48px; height: 48px; font-size: 18px; }
     .profile-hero h2 { font-size: 21px; }
