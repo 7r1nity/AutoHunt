@@ -104,7 +104,9 @@ def render_search_report(browser, report: dict) -> str:
         from ..core.job_filters import filter_summary
         lines.append("本轮筛选条件：" + filter_summary(conditions["filters"]))
     if report.get("pending_verification"):
-        lines.append(f"另有 {report['pending_verification']} 个岗位条件证据不足，待核实；不计入目标数量，不自动投递。")
+        lines.append(f"候选池另有 {report['pending_verification']} 个岗位条件证据不足；不进入本轮结果看板、不计入目标，不自动投递。")
+    for group in report.get("result_groups", []):
+        lines.append(f"分组：{group['label']} {group['matched']}/{group['target']} 个；尚差 {max(0, group['target'] - group['matched'])} 个。")
     lines += ["", "### 整体薪资与 JD 总结", "以下统计本轮条件已核实通过的岗位；待核实条件及未读取的候选不计入分析。"]
     def distribution(key):
         values = report.get(key, {})
@@ -122,7 +124,7 @@ def render_search_report(browser, report: dict) -> str:
     if not report["covered_jobs"]:
         lines.append("本次没有符合条件且完成记录的职位；不能据此断言网站没有相关岗位。")
     else:
-        lines += ["", f"### 本轮职位简表（全部 {report['covered_jobs']} 个）"]
+        lines += ["", f"### 本轮职位简表（核实通过 {len(report.get('jobs', report.get('highlights', [])))} 个）"]
         for number, item in enumerate(report.get("jobs", report.get("highlights", [])), 1):
             pending = " · 条件待核实" if item.get("filter_status") == "unknown" else ""
             lines.append(f"{number}. **{item['title']}** · {item['company']} · {item['location']} · {item['salary']} · {item['employment_type']}{pending}；{item['jd_summary']}")

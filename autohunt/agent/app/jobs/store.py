@@ -89,6 +89,11 @@ class JobStore:
                     event_type TEXT NOT NULL, detail TEXT NOT NULL, created_at TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_jobs_stage ON jobs(stage);
+                CREATE TABLE IF NOT EXISTS search_candidates (
+                    task_id TEXT NOT NULL, source_url TEXT NOT NULL, job_id INTEGER NOT NULL,
+                    status TEXT NOT NULL, group_index INTEGER, candidate_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL, PRIMARY KEY(task_id,source_url)
+                );
                 CREATE TABLE IF NOT EXISTS job_review_decisions (
                     job_id INTEGER PRIMARY KEY REFERENCES jobs(id), session_id TEXT NOT NULL,
                     run_id TEXT NOT NULL, content_hash TEXT NOT NULL, decided_at TEXT NOT NULL
@@ -189,6 +194,7 @@ class JobStore:
             self._ensure_column(db, "browser_events", "sample_json", "TEXT")
             self._ensure_column(db, "jobs", "recruiter_reply", "TEXT")
             self._ensure_column(db, "jobs", "filter_status", "TEXT NOT NULL DEFAULT 'pass'")
+            self._ensure_column(db, "jobs", "board_visible", "INTEGER NOT NULL DEFAULT 1")
             self._ensure_column(db, "jobs", "filter_evidence", "TEXT NOT NULL DEFAULT '{}'")
             self._ensure_column(db, "mock_delivery_queue", "scope_json", "TEXT NOT NULL DEFAULT '{}'")
             self._ensure_column(db, "mock_delivery_queue", "scope_evidence_json", "TEXT NOT NULL DEFAULT '{}'")
@@ -605,7 +611,7 @@ class JobStore:
                 (id,preview_id,job_id,target_url,resume_document_id,resume_version,resume_digest,action,
                  status,checkpoint,detail,submitted,started_at,updated_at)
                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (run_id, preview_id, row["job_id"], payload["source_url"], payload["resume_document_id"], payload["resume_version"],
+                (run_id, preview_id, row["job_id"], payload.get("target_url", payload["source_url"]), payload["resume_document_id"], payload["resume_version"],
                  payload["resume_digest"], payload["action"], DeliveryTaskStatus.STARTING.value, "authorized",
                  "一次性授权已消费，正在打开职位投递页", 0, now.isoformat(), now.isoformat()),
             )
@@ -683,6 +689,10 @@ class JobStore:
         return {"search_runs": len(search_rows), "delivery_runs": reconciled_delivery}
 
     def upsert_job(self, job: dict[str, Any]) -> tuple[int, bool]:
+        with self.lock, self._connect() as db:
+            return self._upsert_job(db, job)
+
+    def _upsert_job(self, db, job: dict[str, Any]) -> tuple[int, bool]:
         is_mock = job.get("source") == "MockJobSite" and job.get("external_id")
         dedupe = (
             normalized_key("MockJobSite", str(job["external_id"])) if is_mock
@@ -691,33 +701,89 @@ class JobStore:
         description = re.sub(r"\s+", " ", job.get("description", "")).strip()
         content_hash = hashlib.sha256(description.encode()).hexdigest()
         now = utc_now()
-        with self.lock, self._connect() as db:
-            existing = db.execute("SELECT id FROM jobs WHERE source_url=?", (job["source_url"],)).fetchone() if is_mock else None
-            if existing is None:
-                existing = db.execute("SELECT id FROM jobs WHERE dedupe_key=?", (dedupe,)).fetchone()
-            if existing:
-                db.execute(
-                    "UPDATE jobs SET source_url=?,salary=?,description=?,tags=?,score=?,decision=?,reasoning=?,stage=CASE WHEN stage='review' THEN ? ELSE stage END,content_hash=?,last_seen_at=? WHERE id=?",
-                    (job["source_url"], job.get("salary", "未注明"), description, json.dumps(job.get("tags", []), ensure_ascii=False), job["score"], job["decision"], job["reasoning"], job.get("stage", "review"), content_hash, now, existing["id"]),
-                )
-                db.execute("UPDATE jobs SET source=?,filter_status=?,filter_evidence=? WHERE id=?",
-                    (job["source"], job.get("filter_status", "pass"), json.dumps(job.get("filter_evidence", {}), ensure_ascii=False), existing["id"]))
-                return int(existing["id"]), False
-            cursor = db.execute(
-                """INSERT INTO jobs
-                (dedupe_key,source,source_url,external_id,title,company,location,salary,description,tags,score,decision,reasoning,stage,content_hash,first_seen_at,last_seen_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (dedupe, job["source"], job["source_url"], job.get("external_id"), job["title"], job["company"], job["location"], job.get("salary", "未注明"), description, json.dumps(job.get("tags", []), ensure_ascii=False), job["score"], job["decision"], job["reasoning"], job.get("stage", "review"), content_hash, now, now),
+        existing = db.execute("SELECT id FROM jobs WHERE source_url=?", (job["source_url"],)).fetchone() if is_mock else None
+        if existing is None:
+            existing = db.execute("SELECT id FROM jobs WHERE dedupe_key=?", (dedupe,)).fetchone()
+        if existing:
+            db.execute(
+                "UPDATE jobs SET source_url=?,salary=?,description=?,tags=?,score=?,decision=?,reasoning=?,stage=CASE WHEN stage='review' THEN ? ELSE stage END,content_hash=?,last_seen_at=? WHERE id=?",
+                (job["source_url"], job.get("salary", "未注明"), description, json.dumps(job.get("tags", []), ensure_ascii=False), job["score"], job["decision"], job["reasoning"], job.get("stage", "review"), content_hash, now, existing["id"]),
             )
-            db.execute("UPDATE jobs SET filter_status=?,filter_evidence=? WHERE id=?",
-                (job.get("filter_status", "pass"), json.dumps(job.get("filter_evidence", {}), ensure_ascii=False), cursor.lastrowid))
-            return int(cursor.lastrowid), True
+            db.execute("UPDATE jobs SET source=?,filter_status=?,filter_evidence=? WHERE id=?",
+                (job["source"], job.get("filter_status", "pass"), json.dumps(job.get("filter_evidence", {}), ensure_ascii=False), existing["id"]))
+            db.execute("UPDATE jobs SET board_visible=MAX(board_visible,?) WHERE id=?",
+                       (int(job.get("board_visible", True)), existing["id"]))
+            return int(existing["id"]), False
+        cursor = db.execute(
+            """INSERT INTO jobs
+            (dedupe_key,source,source_url,external_id,title,company,location,salary,description,tags,score,decision,reasoning,stage,content_hash,first_seen_at,last_seen_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (dedupe, job["source"], job["source_url"], job.get("external_id"), job["title"], job["company"], job["location"], job.get("salary", "未注明"), description, json.dumps(job.get("tags", []), ensure_ascii=False), job["score"], job["decision"], job["reasoning"], job.get("stage", "review"), content_hash, now, now),
+        )
+        db.execute("UPDATE jobs SET filter_status=?,filter_evidence=? WHERE id=?",
+            (job.get("filter_status", "pass"), json.dumps(job.get("filter_evidence", {}), ensure_ascii=False), cursor.lastrowid))
+        db.execute("UPDATE jobs SET board_visible=? WHERE id=?", (int(job.get("board_visible", True)), cursor.lastrowid))
+        return int(cursor.lastrowid), True
+
+    def admit_search_result(self, task_id: str, job: dict, *, limit: int | None, groups: list[dict] | None) -> dict:
+        """Atomically budget, publish and receipt a result; other candidates stay off board."""
+        with self.lock, self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            old = db.execute("SELECT * FROM search_candidates WHERE task_id=? AND source_url=?",
+                             (task_id, job["source_url"])).fetchone()
+            if old and old["status"] == "accepted":
+                return {"counts": (0, 0, 0), "status": "already_recorded", "job_id": old["job_id"]}
+            existing = db.execute("SELECT * FROM jobs WHERE source_url=?", (job["source_url"],)).fetchone()
+            if existing is None:
+                dedupe = normalized_key("MockJobSite", str(job["external_id"])) if job.get("source") == "MockJobSite" and job.get("external_id") else normalized_key(job["company"], job["title"], job["location"])
+                existing = db.execute("SELECT * FROM jobs WHERE dedupe_key=?", (dedupe,)).fetchone()
+            # Legacy receipts also occupy slots, so resumed pre-upgrade searches cannot overflow.
+            receipts = db.execute("SELECT sample_json FROM browser_events WHERE task_id=? AND event_type IN ('job_stored','job_duplicate')",
+                                  (task_id,)).fetchall()
+            admitted = {int(item.get("job_id", 0)) for row in receipts
+                        if (item := json.loads(row[0] or "{}")).get("filter_status", "pass") == "pass"}
+            group_counts = {}
+            for row in db.execute("SELECT group_index,COUNT(DISTINCT job_id) AS n FROM search_candidates WHERE task_id=? AND status='accepted' GROUP BY group_index", (task_id,)):
+                group_counts[row["group_index"]] = row["n"]
+            status = "pending_verification" if job.get("filter_status") != "pass" else "accepted"
+            if job.get("decision") not in {"APPLY", "REVIEW"} or job.get("stage") == "rejected":
+                status = "not_admitted"
+            group_index = None
+            if status == "accepted" and groups:
+                group_index = next((item["index"] for item in job.get("result_group_evidence", [])
+                                    if item["status"] == "pass" and group_counts.get(item["index"], 0) < groups[item["index"]]["count"]), None)
+                if group_index is None:
+                    status = "quota_full"
+            if status == "accepted" and limit and len(admitted) >= limit:
+                status = "target_full"
+            if existing and existing["id"] in admitted:
+                return {"counts": (0, 0, 0), "status": "already_recorded", "job_id": existing["id"]}
+            newly_visible = existing is None or not existing["board_visible"]
+            if status == "accepted" or existing is None:
+                job_id, _ = self._upsert_job(db, {**job, "board_visible": status == "accepted"})
+            else:
+                job_id = int(existing["id"])  # Preserve an older admitted/active job's facts.
+            db.execute("INSERT OR REPLACE INTO search_candidates VALUES (?,?,?,?,?,?,?)",
+                       (task_id, job["source_url"], job_id, status, group_index, json.dumps(job, ensure_ascii=False), utc_now()))
+            event = ("job_stored" if newly_visible else "job_duplicate") if status == "accepted" else "candidate_recorded"
+            sample = {"job_id": job_id, "title": job["title"], "company": job["company"],
+                      "filter_status": job.get("filter_status", "pass"), "filter_evidence": job.get("filter_evidence", {}),
+                      "result_group": group_index, "admission": status,
+                      "filter_fingerprint": self.review_fingerprint(self.get_job_from_connection(db, job_id))}
+            db.execute("INSERT INTO browser_events(task_id,event_type,detail,sample_json,created_at) VALUES (?,?,?,?,?)",
+                       (task_id, event, f"{job['company']} / {job['title']}：{status}", json.dumps(sample, ensure_ascii=False), utc_now()))
+            return {"counts": (int(newly_visible), int(not newly_visible), 1) if status == "accepted" else (0, 0, 0),
+                    "status": status, "job_id": job_id}
+
+    @staticmethod
+    def get_job_from_connection(db, job_id):
+        return dict(db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone())
 
     def list_jobs(self, stage: str | None = None, limit: int = 100) -> list[StoredJobView]:
-        query = "SELECT j.*,d.content_hash AS review_hash FROM jobs j LEFT JOIN job_review_decisions d ON d.job_id=j.id"
+        query = "SELECT j.*,d.content_hash AS review_hash FROM jobs j LEFT JOIN job_review_decisions d ON d.job_id=j.id WHERE j.board_visible=1 AND (j.filter_status='pass' OR j.stage!='review')"
         params: list[Any] = []
         if stage:
-            query += " WHERE j.stage=?"
+            query += " AND j.stage=?"
             params.append(stage)
         query += " ORDER BY j.score DESC,j.last_seen_at DESC LIMIT ?"
         params.append(limit)
@@ -755,7 +821,7 @@ class JobStore:
                 raise ValueError("搜索不属于当前会话，不能修改其筛选结果")
             rows = db.execute("SELECT DISTINCT j.* FROM jobs j JOIN browser_events e "
                 "ON j.id=json_extract(e.sample_json,'$.job_id') WHERE e.task_id=? "
-                "AND e.event_type IN ('job_stored','job_duplicate') ORDER BY j.id LIMIT ?",
+                "AND e.event_type IN ('job_stored','job_duplicate','candidate_recorded') ORDER BY j.id LIMIT ?",
                 (task_id, min(limit, 30))).fetchall()
         return [dict(row) for row in rows]
 
@@ -765,17 +831,57 @@ class JobStore:
             raise ValueError("重新筛选结果不完整")
         with self.lock, self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
+            from ..core.result_groups import normalize_groups
+            groups = normalize_groups(constraints.get("result_groups"))
+            group_counts, admitted_count = {}, 0
+            limit = sum(item["count"] for item in groups) if groups else constraints.get("result_limit")
             for candidate in candidates:
                 row = db.execute("SELECT * FROM jobs WHERE id=?", (candidate["id"],)).fetchone()
                 if not row or self.review_fingerprint(dict(row)) != self.review_fingerprint(candidate):
                     raise ValueError("职位证据已变化，请重新读取再筛选")
+            checked_ids = {item["id"] for item in candidates}
+            recorded = db.execute("SELECT DISTINCT j.* FROM jobs j JOIN browser_events e "
+                "ON j.id=json_extract(e.sample_json,'$.job_id') WHERE e.task_id=? "
+                "AND e.event_type IN ('job_stored','job_duplicate','candidate_recorded','job_refiltered')", (task_id,)).fetchall()
+            # Even an unchanged filter digest cannot preserve old slots when the
+            # count/quota changes. A bounded refresh admits only what it checked.
+            for row in recorded:
+                if row["id"] in checked_ids:
+                    continue
+                sample = {"job_id": row["id"], "filter_status": "unknown", "admission": "pending_verification",
+                          "filter_evidence": {"status": "unknown", "reason": "未纳入本次有界重新核对"}}
+                db.execute("INSERT OR REPLACE INTO search_candidates VALUES (?,?,?,?,?,?,?)",
+                    (task_id, row["source_url"], row["id"], "pending_verification", None,
+                     json.dumps(dict(row), ensure_ascii=False), utc_now()))
+                db.execute("UPDATE jobs SET board_visible=0 WHERE id=? AND stage='review' AND NOT EXISTS "
+                    "(SELECT 1 FROM search_candidates WHERE job_id=? AND task_id!=? AND status='accepted')",
+                    (row["id"], row["id"], task_id))
+                db.execute("INSERT INTO browser_events(task_id,event_type,detail,sample_json,created_at) VALUES (?,?,?,?,?)",
+                    (task_id, "job_refiltered", "旧准入未沿用到新配额", json.dumps(sample, ensure_ascii=False), utc_now()))
             for candidate, verdict in zip(candidates, verdicts):
+                group_index = None
+                admitted = verdict["status"] == "pass"
+                if admitted and groups:
+                    group_index = next((item["index"] for item in verdict.get("result_group_evidence", [])
+                                        if item["status"] == "pass" and group_counts.get(item["index"], 0) < groups[item["index"]]["count"]), None)
+                    admitted = group_index is not None
+                admitted = admitted and (not limit or admitted_count < limit)
+                if admitted:
+                    admitted_count += 1
+                    group_counts[group_index] = group_counts.get(group_index, 0) + 1
                 encoded = json.dumps(verdict, ensure_ascii=False)
                 db.execute("UPDATE jobs SET filter_status=?,filter_evidence=? WHERE id=?",
                     (verdict["status"], encoded, candidate["id"]))
                 updated = {**candidate, "filter_status": verdict["status"], "filter_evidence": encoded}
                 sample = {"job_id": candidate["id"], "filter_status": verdict["status"],
                     "filter_evidence": verdict, "filter_fingerprint": self.review_fingerprint(updated)}
+                status = "accepted" if admitted else "pending_verification" if verdict["status"] == "unknown" else "not_admitted"
+                sample.update(admission=status, result_group=group_index)
+                db.execute("UPDATE jobs SET board_visible=? WHERE id=?",
+                           (int(admitted or candidate["stage"] != "review"), candidate["id"]))
+                db.execute("INSERT OR REPLACE INTO search_candidates VALUES (?,?,?,?,?,?,?)",
+                           (task_id, candidate["source_url"], candidate["id"], status, group_index,
+                            json.dumps(updated, ensure_ascii=False), utc_now()))
                 db.execute("INSERT INTO browser_events(task_id,event_type,detail,sample_json,created_at) VALUES (?,?,?,?,?)",
                     (task_id, "job_refiltered", "按新条件重新筛选已有JD", json.dumps(sample, ensure_ascii=False), utc_now()))
             db.execute("INSERT INTO browser_events(task_id,event_type,detail,sample_json,created_at) VALUES (?,?,?,?,?)",
@@ -793,7 +899,7 @@ class JobStore:
             row = db.execute("SELECT * FROM search_recovery WHERE task_id=?", (task_id,)).fetchone()
             touched = db.execute("SELECT DISTINCT jobs.source_url FROM jobs JOIN browser_events e ON "
                 "jobs.id=json_extract(e.sample_json,'$.job_id') WHERE e.task_id=? "
-                "AND e.event_type IN ('job_stored','job_duplicate')", (task_id,)).fetchall()
+                "AND e.event_type IN ('job_stored','job_duplicate','candidate_recorded')", (task_id,)).fetchall()
         return {"request": json.loads(row["request_json"]) if row else None,
                 "processed_urls": set(json.loads(row["processed_urls_json"]) if row else []) |
                                   {item["source_url"] for item in touched}}
@@ -827,6 +933,7 @@ class JobStore:
         """Summarize only jobs touched by this run, including deduplicated jobs."""
         task = self.get_task(task_id)
         with self.lock, self._connect() as db:
+            candidates = db.execute("SELECT job_id,status,group_index,candidate_json FROM search_candidates WHERE task_id=?", (task_id,)).fetchall()
             events = db.execute(
                 "SELECT sample_json FROM browser_events WHERE task_id=? "
                 "AND event_type IN ('job_stored','job_duplicate','job_refiltered') ORDER BY id",
@@ -863,7 +970,8 @@ class JobStore:
                 job_ids,
             ).fetchall()
 
-        rows = [{**dict(row), "filter_status": outcomes.get(row["id"], {}).get("filter_status", row["filter_status"]),
+        rows = [{**dict(row), "admitted": outcomes.get(row["id"], {}).get("admission", "accepted") == "accepted",
+                 "filter_status": outcomes.get(row["id"], {}).get("filter_status", row["filter_status"]),
                  "filter_evidence": json.dumps(outcomes.get(row["id"], {}).get("filter_evidence",
                     json.loads(row["filter_evidence"])), ensure_ascii=False)} for row in rows]
 
@@ -885,7 +993,7 @@ class JobStore:
                     salary_bucket = "按时计薪"
                 elif "面议" in salary:
                     salary_bucket = "面议"
-            qualified = row["filter_status"] == "pass" and row["stage"] != "rejected"
+            qualified = row["admitted"] and row["filter_status"] == "pass" and row["stage"] != "rejected"
             if qualified:
                 salaries[salary_bucket] = salaries.get(salary_bucket, 0) + 1
             characteristics = job_characteristics(title, description)
@@ -899,6 +1007,8 @@ class JobStore:
             if qualified:
                 evidence.append(jd)
             jd_excerpt = "" if "初筛阶段未打开详情页" in description else jd["brief"]
+            if not qualified:
+                continue
             summaries.append({
                 "id": int(row["id"]), "title": title, "company": str(row["company"] or ""),
                 "location": str(row["location"] or ""), "salary": salary,
@@ -909,13 +1019,18 @@ class JobStore:
                 "source_url": str(row["source_url"] or ""), "content_hash": self.review_fingerprint(dict(row)),
             })
         summaries.sort(key=lambda item: (item["stage"] != "rejected", item["score"]), reverse=True)
-        # Pending rows stay visible and numbered, but never dilute qualified
-        # salary/JD statistics or downstream plan evidence.
-        qualified_rows = [row for row in rows if row["filter_status"] == "pass" and row["stage"] != "rejected"]
+        pending_ids = {item["id"] for item in rows if item["filter_status"] == "unknown"}
+        pending_ids.update(row["job_id"] for row in candidates if row["status"] == "pending_verification")
+        covered_count = len({item["id"] for item in rows} | {row["job_id"] for row in candidates})
+        summaries = [item for item in summaries if item["filter_status"] == "pass" and item["stage"] != "rejected"]
+        qualified_rows = [row for row in rows if row["admitted"] and row["filter_status"] == "pass" and row["stage"] != "rejected"]
         report = {
-            "covered_jobs": len(summaries),
+            "covered_jobs": covered_count,
             "qualified_jobs": sum(item["stage"] != "rejected" and item["filter_status"] == "pass" for item in summaries),
-            "pending_verification": sum(item["filter_status"] == "unknown" for item in summaries),
+            "pending_verification": len(pending_ids),
+            "result_groups": [{"label": group["label"], "target": group["count"],
+                               "matched": sum(row["status"] == "accepted" and row["group_index"] == index for row in candidates)}
+                              for index, group in enumerate(constraints.get("result_groups") or [])],
             "constraints": constraints,
             "salary_distribution": salaries,
             "employment_distribution": employment,
@@ -932,7 +1047,7 @@ class JobStore:
     def stats(self) -> AutomationStats:
         task = self.latest_task()
         with self.lock, self._connect() as db:
-            stages = {row["stage"]: row["count"] for row in db.execute("SELECT stage,COUNT(*) AS count FROM jobs GROUP BY stage")}
+            stages = {row["stage"]: row["count"] for row in db.execute("SELECT stage,COUNT(*) AS count FROM jobs WHERE board_visible=1 AND (filter_status='pass' OR stage!='review') GROUP BY stage")}
         return AutomationStats(
             discovered=task.discovered, stored=task.stored, duplicates=task.duplicates, matched=task.matched,
             review=stages.get("review", 0), applying=stages.get("applying", 0),
@@ -1132,7 +1247,7 @@ class JobStore:
                     seen_ids.add(job_id)
                     outcomes[job_id] = sample
                     fresh = event["task_id"] not in updated_digests or sample.get("filter_evidence", {}).get("digest") == updated_digests[event["task_id"]]
-                    if fresh and sample.get("filter_status", "pass") == "pass":
+                    if fresh and sample.get("filter_status", "pass") == "pass" and sample.get("admission", "accepted") == "accepted":
                         ids.append(job_id)
             if not ids:
                 return []
@@ -1168,7 +1283,8 @@ class JobStore:
         inserted = []
         with self.lock, self._connect() as db:
             for item in items:
-                if item.get("filter_status", "pass") != "pass":
+                selected_unknown = item.get("filter_status") == "unknown" and (scope_evidence or {}).get(item["id"], {}).get("allow_unverified") is True
+                if item.get("filter_status", "pass") != "pass" and not selected_unknown:
                     continue
                 cursor = db.execute(
                     "INSERT OR IGNORE INTO mock_delivery_queue "
@@ -1322,7 +1438,9 @@ class JobStore:
             values.append(session_id)
         with self.lock, self._connect() as db:
             rows = db.execute(query + " ORDER BY updated_at,job_id", values).fetchall()
-        return [{**dict(row), "binding": json.loads(row["binding_json"])} for row in rows]
+        return [{**dict(row), "binding": json.loads(row["binding_json"]),
+                 "scope": json.loads(row["scope_json"] or "{}"),
+                 "scope_evidence": json.loads(row["scope_evidence_json"] or "{}")} for row in rows]
 
     def claim_mock_delivery(self, job_id: int) -> bool:
         with self.lock, self._connect() as db:
@@ -1414,12 +1532,13 @@ class JobStore:
         self, job_id: int, resume_label: str = "候选人默认简历", *,
         resume_document_id: str = "master", resume_version: int = 0,
         resume_digest: str = "unavailable", action: str = "submit_resume",
+        allow_unverified: bool = False, delivery_flow: str = "gated",
     ) -> DeliveryPreviewView:
         if action != "submit_resume":
             raise ValueError("不支持的投递动作")
         job = self.get_job(job_id)
         now = datetime.now(UTC)
-        self._check_delivery_filter(job)
+        self._check_delivery_filter(job, {"allow_unverified": allow_unverified})
         expires = now + timedelta(minutes=30)
         payload = {
             "job_id": job_id,
@@ -1433,7 +1552,16 @@ class JobStore:
             "resume_digest": resume_digest,
             "action": action,
             "action_summary": "填写申请表并上传所选简历；遇到验证码、MFA 或未知问题立即暂停",
+            "allow_unverified": allow_unverified,
         }
+        if delivery_flow == "direct":
+            from ..delivery.mock_site_adapter import MockJobSiteAdapter
+            from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
+            target = MockJobSiteAdapter.normalize_job_url(job["source_url"])
+            if not target:
+                raise ValueError("直接投递仅支持本地模拟招聘站")
+            parsed = urlparse(target)
+            payload["target_url"] = urlunparse(parsed._replace(query=urlencode({"id": parse_qs(parsed.query)["id"][0], "flow": "direct"})))
         canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         digest = hashlib.sha256(canonical.encode()).hexdigest()
         preview_id = f"dpv_{secrets.token_hex(12)}"
@@ -1563,9 +1691,10 @@ class JobStore:
                 raise KeyError(job_id)
 
     def _check_delivery_filter(self, job: dict, payload: dict | None = None) -> None:
-        if not job or job.get("filter_status", "pass") != "pass":
+        selected_unknown = job and job.get("filter_status") == "unknown" and (payload or {}).get("allow_unverified") is True
+        if not job or job.get("filter_status", "pass") != "pass" and not selected_unknown:
             raise ValueError("职位筛选条件未核实通过，不能沟通或投递；请先核对条件并重新搜索")
-        if payload and payload.get("filter_fingerprint") != self.review_fingerprint(job):
+        if payload and "filter_fingerprint" in payload and payload["filter_fingerprint"] != self.review_fingerprint(job):
             raise ValueError("筛选条件或职位证据已变化，请重新生成预览并授权")
 
     def assert_delivery_facts(self, job_id: int, preview_id: str | None) -> None:

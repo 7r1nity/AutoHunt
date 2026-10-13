@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import hashlib
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from typing import Literal
 from ..core.job_filters import validate_filter
 
@@ -12,6 +12,7 @@ class SearchState(BaseModel):
     queries: list[str] = Field(default_factory=list, max_length=5)
     locations: list[str] = Field(default_factory=list, max_length=5)
     result_limit: int | None = Field(default=None, ge=1, le=100)
+    result_groups: list[dict] | None = None
     salary_min: int | None = Field(default=None, ge=0, le=10_000_000)
     max_jobs: int | None = Field(default=None, ge=1, le=200)
     source: Literal["mock", "boss", "zhaopin"] = "mock"
@@ -19,6 +20,14 @@ class SearchState(BaseModel):
     query_source: str = "resume"
     resume_stamp: str = ""
     revision: int = Field(default=0, ge=0)
+
+    @model_validator(mode="after")
+    def group_total(self):
+        from ..core.result_groups import normalize_groups
+        self.result_groups = normalize_groups(self.result_groups) or None
+        if self.result_groups:
+            self.result_limit = sum(item["count"] for item in self.result_groups)
+        return self
 
     @field_validator("filters")
     @classmethod
@@ -38,11 +47,18 @@ class SearchPatch(BaseModel):
     queries: list[str] | None = Field(default=None, max_length=5)
     locations: list[str] | None = Field(default=None, max_length=5)
     result_limit: int | None = Field(default=None, ge=1, le=100)
+    result_groups: list[dict] | None = None
     salary_min: int | None = Field(default=None, ge=0, le=10_000_000)
     max_jobs: int | None = Field(default=None, ge=1, le=200)
     use_resume_profile: bool = False
     source: Literal["mock", "boss", "zhaopin"] | None = None
     filters: dict | None = None
+
+    @field_validator("result_groups")
+    @classmethod
+    def clean_groups(cls, value):
+        from ..core.result_groups import normalize_groups
+        return normalize_groups(value) or None
 
 
 def prepare_search_state(saved: dict | None, candidate=None, resume_version=None) -> dict:
@@ -80,6 +96,9 @@ def prepare_search_state(saved: dict | None, candidate=None, resume_version=None
 def merge_search_state(saved: dict, patch: dict, candidate=None, resume_version=None) -> dict:
     validated = SearchPatch.model_validate(patch)
     values = validated.model_dump(exclude_unset=True)
+    # A new total replaces old quotas unless the model explicitly supplies them.
+    if "result_limit" in values and "result_groups" not in values:
+        values["result_groups"] = None
     state = SearchState.model_validate(saved)
     if values.pop("use_resume_profile", False):
         state.queries, state.query_source, state.resume_stamp = [], "resume", ""

@@ -93,7 +93,7 @@ def build_rules(coordinator) -> list[Rule]:
         Rule("submit_authorised_resume", 80, has_authorised_waiting, submit_authorised,
              reason="已授权投递等待招聘方回复；回复到达后按钮解锁即发送简历", cooldown=25),
         Rule("dispatch_delivery_queue", 60, queue_has_work, dispatch_queue,
-             reason="队列中有已授权的投递，且浏览器空闲", cooldown=10),
+             reason="队列中有已授权的投递，且浏览器空闲", cooldown=0),
         Rule("sync_with_site", 40, has_bound_account, sync_site,
              reason="站点是唯一能看见人工操作与招聘方回复的来源", cooldown=30),
         Rule("daily_report", 20, daily_enabled, run_daily,

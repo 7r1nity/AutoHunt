@@ -916,6 +916,28 @@ async def update_job_stage(job_id: int, update: JobStageUpdate) -> None:
         raise HTTPException(status_code=404, detail="Job not found") from exc
 
 
+class JobDeliveryRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    conversation_id: str = Field(default="default", pattern=r"^[a-zA-Z0-9_-]{1,80}$")
+
+
+@app.post("/api/v1/jobs/{job_id}/deliver")
+async def deliver_selected_job(job_id: int, request: JobDeliveryRequest):
+    """One explicit UI click; private preview/capability remains inside the queue."""
+    try:
+        if not any(session["id"] == request.conversation_id for session in run_store.sessions()):
+            raise ValueError("会话不存在")
+        job = job_store.get_job(job_id)
+        if not delivery_service.supports(job["source_url"]):
+            raise UnsupportedDeliverySite("真实招聘站投递尚未开放")
+        return await mock_workflow.queue_deliveries(session_id=request.conversation_id, job_ids=[job_id],
+            selection_evidence={"source": "ui_click", "job_id": job_id, "allow_unverified": True})
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="职位不存在") from exc
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 @app.post("/api/v1/jobs/{job_id}/delivery-preview", response_model=DeliveryPreviewView)
 async def create_delivery_preview(job_id: int) -> DeliveryPreviewView:
     try:

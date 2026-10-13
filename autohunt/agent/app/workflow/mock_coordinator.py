@@ -88,7 +88,8 @@ class MockWorkflowCoordinator:
             # cycle can be replayed from the recorded observation, and the reason a
             # cycle did nothing is visible instead of inferred from a branch order.
             try:
-                observation = await self.observe(settings)
+                fast_dispatch = any(item["status"] == "queued" for item in self.jobs.mock_delivery_queue())
+                observation = await self.observe(settings, with_site=not fast_dispatch)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001
@@ -108,17 +109,19 @@ class MockWorkflowCoordinator:
             try:
                 # Waiting for a human reply is not active browser work. Keep polling
                 # bounded and quiet rather than looping every two seconds for days.
-                await asyncio.wait_for(self.wakeup.wait(), timeout=self.poll_seconds)
+                delay = 0.25 if any(item["status"] == "queued" for item in self.jobs.mock_delivery_queue()) else self.poll_seconds
+                await asyncio.wait_for(self.wakeup.wait(), timeout=delay)
             except TimeoutError:
                 pass
             self.wakeup.clear()
 
-    async def observe(self, settings: dict | None = None):
+    async def observe(self, settings: dict | None = None, *, with_site: bool = True):
         """Capture board and site facts for one cycle."""
         from .observations import observe as collect
         settings = self.settings() if settings is None else settings
-        observation = await collect(self.jobs, settings)
+        observation = await collect(self.jobs, settings, with_site=with_site)
         facts = dict(observation.facts)
+        facts["applicant_id"] = settings.get("applicant_id")
         facts["delivery_idle"] = not (self.delivery.worker and not self.delivery.worker.done())
         facts["browser_idle"] = not (self.browser.worker and not self.browser.worker.done())
         return type(observation)(at=observation.at, facts=facts)
@@ -170,7 +173,8 @@ class MockWorkflowCoordinator:
             return BrowserSearchRequest(
                 conversation_id=session_id, query=query, queries=saved.get("queries"),
                 result_limit=saved.get("result_limit"), salary_min=saved.get("salary_min"),
-                locations=saved.get("locations") or None, filters=saved.get("filters"))
+                locations=saved.get("locations") or None, filters=saved.get("filters"),
+                result_groups=saved.get("result_groups"))
         except Exception:  # noqa: BLE001 - malformed saved state must not break delivery
             return None
 
@@ -196,7 +200,8 @@ class MockWorkflowCoordinator:
             requirements=requirements)
 
     async def queue_deliveries(self, *, min_score: int = 0, session_id: str, task_id: str | None = None,
-                               filters: dict | None = None) -> dict:
+                               filters: dict | None = None, job_ids: list[int] | None = None,
+                               selection_evidence: dict | None = None) -> dict:
         """One explicit bounded batch, not a persistent rule for unseen future jobs."""
         if session_id in self.stopping_sessions or "*" in self.stopping_sessions:
             raise PreflightRefused("当前正在停止任务，未加入投递队列")
@@ -217,10 +222,13 @@ class MockWorkflowCoordinator:
                                "正在等待共享浏览器空闲；未接管另一会话的任务，资源释放后继续账号绑定。"}
         document = self.resume.read_document()
         document_digest = resume_document_digest(document)
-        evidence = self.jobs.jobs_for_resume_analysis(profile.resume_id, limit=200, min_score=min_score, task_id=task_id)
+        explicit = job_ids is not None and selection_evidence is not None
+        evidence = ([self.jobs.get_job(job_id) for job_id in dict.fromkeys(job_ids)] if explicit else
+                    self.jobs.jobs_for_resume_analysis(profile.resume_id, limit=200, min_score=min_score, task_id=task_id))
         eligible = [self.jobs.get_job(item["id"]) for item in evidence
                     if item["stage"] in {"review", "applying"}
-                    and item.get("filter_status", "pass") == "pass"
+                    and item.get("score", 0) >= min_score
+                    and (item.get("filter_status", "pass") == "pass" or explicit and item.get("filter_status") == "unknown")
                     and self.delivery.supports(item["source_url"])
                     and self.jobs.latest_delivery_status_for_job(item["id"]) is None]
         scope_evidence, excluded, unknown = {}, 0, 0
@@ -243,6 +251,10 @@ class MockWorkflowCoordinator:
             excluded = sum(item["status"] == "fail" for item in scope_evidence.values())
             unknown = sum(item["status"] == "unknown" for item in scope_evidence.values())
             eligible = [job for job in eligible if scope_evidence[job["id"]]["status"] == "pass"]
+        for job in eligible:
+            scope_evidence.setdefault(job["id"], {}).update(delivery_flow="direct")
+            if explicit:
+                scope_evidence[job["id"]].update(selection_evidence)
         if stop_epoch != (self.stop_epochs.get(session_id, 0), self.stop_epochs.get("*", 0)):
             raise PreflightRefused("筛选期间用户已停止投递，未加入队列")
         if (resume_document_digest(self.resume.read_document()) != document_digest
@@ -263,7 +275,7 @@ class MockWorkflowCoordinator:
                 f"授权度量未记录（不影响投递）：{type(exc).__name__}：{exc}")
         queue_kwargs = {"session_id": session_id, "resume_stamp": resume_stamp(document, self.candidate),
                         "binding": binding, "min_score": min_score}
-        if filters is not None:
+        if filters is not None or scope_evidence:
             queue_kwargs.update(scope={"filters": filters, "min_score": min_score}, scope_evidence=scope_evidence)
         from ..runtime.context import effect_checkpoint
         effect_checkpoint("started")
@@ -274,9 +286,9 @@ class MockWorkflowCoordinator:
         scope_label = (f"匹配分≥{min_score}" if min_score else "不设额外分数门槛") + ("；" + filter_summary(filters) if filters else "")
         return {"queued": len(ids), "job_ids": ids, "min_score": min_score, "filters": filters,
                 "excluded": excluded, "unknown": unknown,
-                "message": f"已将 {len(ids)} 个符合本次投递范围的模拟站职位加入队列（不是已投递）。范围：{scope_label}。"
+                "message": f"已将 {len(ids)} 个{('指定' if explicit else '符合本次投递范围的')}模拟站职位加入队列（不是已投递）。范围：{scope_label}。"
                 + (f"未入队：不符合{excluded}个，信息不足{unknown}个。" if filters else "") +
-                "先沟通，收到招聘方回复且投递按钮解锁后才发送已授权简历；验证需人工接管，失败或不确定不会重试。"
+                "逐个直接发送当前简历，核实成功后等待招聘方回复；无需先等待HR。验证需人工接管，结果不确定不会重放。"
                 "仅处理当前简历的已搜索职位，不启用每日任务，也不自动添加未来职位。可说「停止自动投递」。"}
 
     async def _operation(self, session_id: str, factory, *, job_id: int | None = None, queued: bool = True):
@@ -452,7 +464,8 @@ class MockWorkflowCoordinator:
             for item in self.jobs.mock_delivery_queue():
                 job = self.jobs.get_job(item["job_id"])
                 if (item["resume_stamp"] != stamp or job["score"] < item["min_score"]
-                        or job.get("filter_status", "pass") != "pass"
+                        or (job.get("filter_status", "pass") != "pass" and not (
+                            job.get("filter_status") == "unknown" and item.get("scope_evidence", {}).get("allow_unverified")))
                         or self.jobs.review_fingerprint(job) != item["job_hash"]
                         or not self.delivery.supports(job["source_url"])):
                     self._finish_queue_item(item, "stale", "简历、职位或分数已变化，旧授权失效，请重新核对")
@@ -464,7 +477,9 @@ class MockWorkflowCoordinator:
                     if not self.jobs.claim_mock_delivery(job["id"]):
                         continue
                     try:
-                        preview = self.jobs.create_delivery_preview(job["id"], resume_label="候选人主简历", **item["binding"])
+                        preview = self.jobs.create_delivery_preview(job["id"], resume_label="候选人主简历",
+                            allow_unverified=bool(item.get("scope_evidence", {}).get("allow_unverified")),
+                            delivery_flow=item.get("scope_evidence", {}).get("delivery_flow", "gated"), **item["binding"])
                         result = await self._operation(item["session_id"],
                             lambda: self.delivery.authorize_and_start(preview.id, monitor_reply=False, **item["binding"]), job_id=job["id"])
                         if result is None:
@@ -472,6 +487,8 @@ class MockWorkflowCoordinator:
                         self.jobs.update_mock_delivery(job["id"], "dispatched", "已启动浏览器沟通/投递", run_id=result[3].id)
                         if self.on_delivery_started:
                             self.on_delivery_started(result[3].id, item["session_id"])
+                        if self.delivery.worker is not None:
+                            self.delivery.worker.add_done_callback(lambda _: self.wakeup.set())
                     except Exception as exc:
                         self._finish_queue_item(item, "blocked", f"启动失败，不会自动重试：{exc}")
                     return

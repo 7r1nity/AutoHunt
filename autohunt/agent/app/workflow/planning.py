@@ -185,6 +185,9 @@ async def plan_request(llm, registry, message: str, *, dialogue: dict, condition
             "搜索薪资属于job_search_start；各投递/计划分支的薪资和分数条件独立，不能搬到另一个动作。"
             "85以上投递、以下的分析不足表示投递min_score=85，计划max_score=84；85以下且25k以上生成计划还需salary_min=25000。"
             "mock_delivery_start.filters是投递分支自己的语义条件树，例如只投正式岗、只投有转正机会的实习岗；不能改变搜索范围或忽略该限制。"
+            "指定第几个、前几个、岗位名称投递时必须传mock_delivery_start.selector；序号不是数据库ID，不得用上一轮批量filters替代指定对象。"
+            "指定单个岗位投递时，除非本轮同时提出额外筛选，不要复制上一轮的批量投递filters。"
+            "正式5份、实习5份等分组请求必须生成result_groups，每组label/count/filters；类别必须require，不可用allow替代，result_limit为各组数量之和。共同城市、薪资、排除条件仍放在搜索filters。只修改总数且不再要求分组时清除旧result_groups。"
             "任意搜索条件使用filters条件树condition/all/any/not；叶text是完整语义，quote仅作审计，不要求机械复制。"
             "先区分准入范围、每个备选方案的硬条件和排序偏好。叶mode=require表示岗位必须满足的事实，prefer仅排序，allow只是允许包含，不需要JD证明接受。"
             "也可以/也接受是在扩大范围，不得放在all中作为新增require。A或B分别有条件时用any(all(A,A的条件),all(B,B的条件))，共同条件才放在外层all。"
@@ -389,8 +392,10 @@ def _validate_draft(draft: RequestDraft, registry, message: str, *, dialogue: di
                 if len(value.strip()) > 80 or any(ord(char) < 32 for char in value):
                     raise PlanValidationError("invalid_keyword_shape", "岗位词需简短且不含控制字符，请由模型重新提取", tool=name, field="queries")
             if name == "job_search_start":
+                if "result_limit" in args and "result_groups" not in args:
+                    args["result_groups"] = None
                 # Inheritance is data reuse, not another semantic extractor.
-                for key in ("locations", "salary_min", "result_limit", "max_jobs", "source", "filters"):
+                for key in ("locations", "salary_min", "result_limit", "result_groups", "max_jobs", "source", "filters"):
                     if key not in args and conditions.get(key) is not None:
                         args[key] = copy.deepcopy(conditions[key])
                 if not args.get("queries"):

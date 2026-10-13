@@ -108,6 +108,7 @@ class BrowserAutomationService:
             self.store.event(task_id, "search_constraints", "本次搜索条件（不修改持久化偏好）", sample={
                 "queries": request.queries or [request.query], "locations": request.locations or [],
                 "result_limit": request.result_limit, "salary_min": request.salary_min, "max_jobs": request.max_jobs,
+                "result_groups": request.result_groups,
                 "conversation_id": request.conversation_id, "revision": request.search_state_revision,
                 "source": request.source, "filters": request.filters,
             })
@@ -1267,13 +1268,16 @@ class BrowserAutomationService:
         return matching.result()
 
     async def _check_filters(self, task_id: str, detail: dict, request: BrowserSearchRequest):
+        from ..core.result_groups import grouped_filter, group_verdicts
         detail["description"] = re.sub(r"\s+", " ", str(detail.get("description") or "")).strip()
         if request.locations and not any(city in str(detail.get("location", "")) for city in request.locations):
             verdict = {"status": "unknown" if detail.get("location") in {None, "", "未注明", "未知"} else "fail", "conditions": [], "reason": "工作地点无法满足本轮城市条件"}
         else:
-            verdict = await evaluate_filter(self.llm.generate, request.filters, detail)
+            verdict = await evaluate_filter(self.llm.generate, grouped_filter(request.filters, request.result_groups), detail)
+        if request.result_groups:
+            detail["result_group_evidence"] = group_verdicts(request.filters, request.result_groups, verdict)
         detail["filter_status"], detail["filter_evidence"] = verdict["status"], verdict
-        if request.filters or verdict["status"] != "pass":
+        if request.filters or request.result_groups or verdict["status"] != "pass":
             self.store.event(task_id, "filter_evaluated", f"{detail.get('title', '')}：{verdict['status']}",
                 reason_code="semantic_filter_" + verdict["status"], sample=verdict)
 
@@ -1288,7 +1292,7 @@ class BrowserAutomationService:
             self.store.increment_funnel(task_id, filtered=1)
             self.store.mark_search_processed(task_id, url)
             return (0, 0, 0)
-        if request and request.filters and "filter_status" not in detail:
+        if request and (request.filters or request.result_groups) and "filter_status" not in detail:
             # An unread card is never proof of a semantic hard condition.
             detail["filter_status"] = "unknown"
         if detail.get("filter_status") == "unknown":
@@ -1316,6 +1320,12 @@ class BrowserAutomationService:
             "reasoning": analysis.reasoning,
             "tags": sorted(set(detail["tags"] + analysis.matched_skills + analysis.missing_skills))[:10],
         })
+        if request is not None:
+            admitted = self.store.admit_search_result(task_id, detail, limit=request.result_limit, groups=request.result_groups)
+            self.store.mark_search_processed(task_id, url)
+            if admitted["status"] in {"quota_full", "target_full"}:
+                self.store.increment_funnel(task_id, limited=1)
+            return admitted["counts"]
         job_id, inserted = self.store.upsert_job(detail)
         if request is not None and request.result_limit and self.store.job_touched_by_task(task_id, job_id):
             return (0, 0, 0)

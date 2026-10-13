@@ -19,6 +19,7 @@ from ..runtime.context import active_run, emit, effect_checkpoint, save_search_s
 from ..runtime.dialogue import bounded_data, compact_state, resolve_reference, ACTION_TOOLS
 from ..runtime.search_state import merge_search_state, prepare_search_state
 from .search_contract import missing_search_message
+from .result_groups import groups_schema
 from .job_filters import filter_schema
 from ..runtime.resilience import PreflightRefused, classify_failure, safe_retry
 from ..security.decisions import ActionPolicy, ActionDecision, Decision
@@ -204,6 +205,7 @@ class AgentToolRegistry:
                               "queries": {"type": "array", "items": {"type": "string", "maxLength": 120}, "maxItems": 5},
                               "locations": {"type": "array", "items": {"type": "string"}, "maxItems": 5},
                               "result_limit": {"type": ["integer", "null"], "minimum": 1, "maximum": 100},
+                              "result_groups": groups_schema(),
                               "salary_min": {"type": ["integer", "null"], "minimum": 0, "maximum": 10000000},
                               "max_jobs": {"type": ["integer", "null"], "minimum": 1, "maximum": 200},
                               "use_resume_profile": {"type": "boolean", "description": "明确要求使用当前简历方向时设为 true"},
@@ -240,6 +242,7 @@ class AgentToolRegistry:
                     "locations": {"type": "array", "items": {"type": "string", "maxLength": 40}, "maxItems": 5},
                     "max_jobs": {"type": "integer", "minimum": 1, "maximum": 200, "description": "候选职位读取预算，不是最终结果数量；通常省略，由系统按目标数量估算"},
                     "result_limit": {"type": "integer", "minimum": 1, "maximum": 100, "description": "目标符合条件的去重职位数量，包含已在看板中的结果"},
+                    "result_groups": groups_schema(),
                     "salary_min": {"type": "integer", "minimum": 0, "maximum": 10000000, "description": "最低月薪，单位元；按薪资区间下限筛选，未知或日薪不算符合"},
                     "use_resume_profile": {"type": "boolean", "description": "明确要求按照当前简历重新搜索时使用，其他字段仍继承"},
                     "dry_run": {"type": "boolean", "default": False, "description": "仅在本地模拟招聘网站执行搜索后自动沟通和条件投递测试"},
@@ -317,8 +320,10 @@ class AgentToolRegistry:
         ]
         if self.mock_workflow is not None:
             specs.extend([
-                AgentToolSpec("mock_delivery_start", "将用户要求范围内的已搜索模拟站职位加入有限投递队列。filters为投递独立语义条件，可复用搜索判断；min_score可选，省略不设分数门槛。内部生成逐职位预览与一次性授权，先沟通、回复后发送；不支持真实网站。",
+                AgentToolSpec("mock_delivery_start", "将用户要求范围内的已搜索模拟站职位加入有限投递队列。filters为投递独立语义条件，可复用搜索判断；min_score可选，省略不设分数门槛。内部生成逐职位预览与一次性授权，逐个直接发送简历再等待回复；不支持真实网站。",
                     obj({"min_score": {"type": "integer", "minimum": 0, "maximum": 100},
+                         "selector": {"type": "string", "minLength": 1, "maxLength": 120, "description": "指定已展示岗位：第33个、前五个、岗位名称、这个。必须原样保留选择，不能退化为批量范围。"},
+                         "snapshot_id": {"type": "string"},
                          "filters": {**filter_schema(), "type": ["object", "null"], "description": "投递分支条件树，不改变搜索条件；未知不投递"}}), "external", self._mock_delivery_start),
                 AgentToolSpec("mock_delivery_cancel", "按明确停止命令取消本会话的模拟站投递队列，已发送结果保留。", obj({}), "external", self._mock_delivery_cancel),
                 AgentToolSpec("mock_delivery_status", "读取本会话模拟站自动投递队列状态，不启动或重试。", obj({}), "read", self._mock_delivery_status),
@@ -526,7 +531,7 @@ class AgentToolRegistry:
         if context and context.search_state is None:
             context.search_state = prepare_search_state(None, state, self.resume_workspace.read_document().version)
         if context and context.search_state is not None:
-            patch = {name: args[name] for name in ("queries", "locations", "result_limit", "salary_min", "max_jobs", "use_resume_profile", "source", "filters") if name in args}
+            patch = {name: args[name] for name in ("queries", "locations", "result_limit", "result_groups", "salary_min", "max_jobs", "use_resume_profile", "source", "filters") if name in args}
             if not patch.get("queries") and args.get("query"):
                 patch["queries"] = [args["query"]]
             document = self.resume_workspace.read_document()
@@ -560,6 +565,7 @@ class AgentToolRegistry:
             locations=locations[:5] or None,
             max_jobs=int(args.get("max_jobs", min(200, max(30, int(args.get("result_limit", 0)) * 5)))),
             result_limit=args.get("result_limit"),
+            result_groups=args.get("result_groups"),
             salary_min=args.get("salary_min"),
             source=args.get("source", "mock"),
             filters=args.get("filters"),
@@ -572,6 +578,7 @@ class AgentToolRegistry:
             updated = merge_search_state(conditions, {
                 "queries": request.queries or [request.query], "locations": request.locations or [],
                 "result_limit": request.result_limit, "salary_min": request.salary_min,
+                "result_groups": request.result_groups,
                 "source": request.source, "filters": request.filters,
             }, state, self.resume_workspace.read_document().version)
             updated["query_source"] = conditions["query_source"]
@@ -580,7 +587,7 @@ class AgentToolRegistry:
         task = await self.browser.start(request)
         return {**task.model_dump(mode="json"), "search_conditions": {
             "query": request.query, "queries": request.queries, "locations": request.locations,
-            "result_limit": request.result_limit, "salary_min": request.salary_min, "max_jobs": request.max_jobs,
+            "result_limit": request.result_limit, "result_groups": request.result_groups, "salary_min": request.salary_min, "max_jobs": request.max_jobs,
             "revision": request.search_state_revision, "conversation_id": request.conversation_id,
             "source": request.source, "filters": request.filters,
         }}
@@ -616,6 +623,8 @@ class AgentToolRegistry:
         candidates = self.jobs.refilter_candidates(task_id, resume_id=profile.resume_id, session_id=context.session_id)
         constraints = dict(context.search_state or {})
         filters = normalized_search_filters(constraints.get("filters"), constraints.get("salary_min"))
+        from .result_groups import grouped_filter, group_verdicts
+        groups = constraints.get("result_groups")
         semaphore = asyncio.Semaphore(4)
         async def judge(job):
             facts = {**job, "tags": json.loads(job.get("tags") or "[]")}
@@ -625,13 +634,16 @@ class AgentToolRegistry:
                     return {"status": "unknown" if not job.get("location") or job["location"] in {"未知", "未注明"} else "fail",
                             "conditions": [], "reason": "工作地点无法满足更新后的城市条件",
                             "digest": filter_digest(validate_filter(filters) if filters else None)}
-                return await evaluate_filter(self.browser.llm.generate, filters, facts)
+                verdict = await evaluate_filter(self.browser.llm.generate, grouped_filter(filters, groups), facts)
+                if groups:
+                    verdict["result_group_evidence"] = group_verdicts(filters, groups, verdict)
+                return verdict
         async with asyncio.TaskGroup() as group:
             workers = [group.create_task(judge(job)) for job in candidates]
         if stamp != resume_stamp(self.resume_workspace.read_document(), self.candidate_state):
             raise PreflightRefused("筛选期间简历已变化，没有保存筛选结果")
         verdicts = [worker.result() for worker in workers]
-        self.jobs.save_refilter_results(task_id, candidates, verdicts, {**constraints, "filters": filters})
+        self.jobs.save_refilter_results(task_id, candidates, verdicts, {**constraints, "filters": grouped_filter(filters, groups)})
         counts = {state: sum(verdict["status"] == state for verdict in verdicts) for state in ("pass", "fail", "unknown")}
         return {"task_id": task_id, "checked": len(candidates), **counts,
                 "message": f"已按新条件重新筛选 {len(candidates)} 个已保存职位：符合 {counts['pass']}、不符合 {counts['fail']}、信息不足 {counts['unknown']}。未启动搜索或投递；仅覆盖本次读取的最多30个职位。"}
@@ -685,6 +697,21 @@ class AgentToolRegistry:
             active_run().user_message if active_run() else "", context.search_state, min_score=args.get("min_score", 0))
         task_id = (context.action_authority or {}).get("evidence_task_id")
         kwargs = {"min_score": args.get("min_score", 0), "session_id": context.session_id, "task_id": task_id}
+        selector = args.get("selector")
+        explicit_ordinals = re.findall(r"(?:第|前)[一二三四五六七八九十百\d]+(?:个|条|份)", context.user_message)
+        if len(explicit_ordinals) == 1:
+            selector = explicit_ordinals[0]  # Same stable reference contract as detail reads.
+        elif len(explicit_ordinals) > 1:
+            raise PreflightRefused("请逐个指定岗位或使用前几个；不能将多个序号退化为批量投递")
+        if selector:
+            resolved = resolve_reference(context.dialogue or {}, kind="job", selector=selector,
+                                         snapshot_id=args.get("snapshot_id"), read_only=True)
+            for item in resolved["items"]:
+                if item.get("content_hash") and item["content_hash"] != self.jobs.review_fingerprint(self.jobs.get_job(item["id"])):
+                    raise PreflightRefused("所选岗位证据已变化，请重新查看该岗位后投递")
+            kwargs["job_ids"] = [item["id"] for item in resolved["items"]]
+            kwargs["selection_evidence"] = {"snapshot_id": resolved["snapshot_id"], "selector": selector,
+                                           "allow_unverified": True}
         if args.get("filters") is not None:
             kwargs["filters"] = args["filters"]
         return await self.mock_workflow.queue_deliveries(**kwargs)

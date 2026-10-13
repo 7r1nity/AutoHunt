@@ -28,6 +28,13 @@ export async function PUT(request: NextRequest) {
 
 export async function POST(request: NextRequest) {
   const body = await request.json();
+  if (body.action === "deliver") {
+    if (!Number.isSafeInteger(body.id) || body.id < 1 || typeof body.conversation_id !== "string") {
+      return NextResponse.json({ detail: "请选择具体职位和会话" }, { status: 422 });
+    }
+    return requestBackend(`/api/v1/jobs/${body.id}/deliver`, { method: "POST",
+      body: JSON.stringify({ conversation_id: body.conversation_id }) });
+  }
   if (body.action === "import_mock") {
     const id = Number(body.external_id ?? 1);
     const flow = body.flow === "direct" ? "direct" : "gated";

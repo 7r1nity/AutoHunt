@@ -415,6 +415,7 @@ class AgentRuntime:
                                         query=response.action_query, queries=response.action_queries or [],
                                         locations=snapshot["locations"], dry_run=response.action_dry_run,
                                         result_limit=snapshot["result_limit"], salary_min=snapshot["salary_min"],
+                                        result_groups=snapshot.get("result_groups"),
                                         conversation_id=run["session_id"], search_state_revision=context.search_state["revision"],
                                         max_jobs=snapshot["max_jobs"] or min(200, max(30, (snapshot["result_limit"] or 0)*5)),
                                     ))

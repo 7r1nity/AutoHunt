@@ -210,6 +210,7 @@ class BrowserSearchRequest(BaseModel):
     query: str = Field(min_length=1, max_length=120)
     max_jobs: int = Field(default=30, ge=1, le=200)
     result_limit: int | None = Field(default=None, ge=1, le=100)
+    result_groups: list[dict] | None = None
     salary_min: int | None = Field(default=None, ge=0, le=10_000_000)
     source: Literal["mock", "boss", "zhaopin"] = "mock"
     filters: dict | None = None
@@ -229,6 +230,10 @@ class BrowserSearchRequest(BaseModel):
 
     @model_validator(mode="after")
     def mock_actions_only(self):
+        from .result_groups import normalize_groups
+        self.result_groups = normalize_groups(self.result_groups) or None
+        if self.result_groups:
+            self.result_limit = sum(item["count"] for item in self.result_groups)
         from .salary_conditions import normalized_search_filters
         self.filters = normalized_search_filters(self.filters, self.salary_min)
         if self.source != "mock" and self.dry_run:

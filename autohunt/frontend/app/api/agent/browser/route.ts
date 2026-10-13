@@ -45,6 +45,7 @@ export async function POST(request: NextRequest) {
     if (Array.isArray(body.locations) && body.locations.length) payload.locations = body.locations;
     if (Array.isArray(body.queries) && body.queries.length) payload.queries = body.queries;
     if (body.result_limit !== undefined) payload.result_limit = body.result_limit;
+    if (body.result_groups !== undefined) payload.result_groups = body.result_groups;
     if (body.salary_min !== undefined) payload.salary_min = body.salary_min;
     if (body.filters !== undefined) payload.filters = body.filters;
     return callBackend("/api/v1/browser/search", "POST", payload);

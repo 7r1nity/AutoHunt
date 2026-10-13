@@ -965,11 +965,15 @@ export default function Home() {
     const currentJob = jobs.find((job) => job.id === id);
     if (!currentJob) return;
     if (currentJob.stage === "review") {
-      const response = await fetch("/api/agent/jobs", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "preview", id }) });
-      const payload = await response.json();
-      if (!response.ok) { setNotice(payload.detail ?? "生成投递预览失败"); return; }
-      setDeliveryPreview(payload);
-      setNotice("投递预览已生成；确认前不会执行任何平台操作");
+      try {
+        const response = await fetch("/api/agent/jobs", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "deliver", id, conversation_id: runtime.sessionId }) });
+        const payload = await response.json();
+        if (!response.ok) { setNotice(payload.detail ?? "投递未启动"); return; }
+        setNotice(payload.message ?? "已加入该岗位投递队列，正在发送当前简历");
+        await refreshAutomation();
+      } catch {
+        setNotice("投递请求结果尚未确认，请查看队列状态；不要反复点击发送");
+      }
       return;
     }
     const next: Record<JobStage, JobStage> = { review: "review", applying: "applying", waiting: "interview", interview: "interview", outcome_indeterminate: "outcome_indeterminate" };
@@ -2233,7 +2237,7 @@ export default function Home() {
               </dl>
               <div className="modal-actions">
                 {detailJob.stage === "review" && <button className="button secondary" onClick={() => { rejectJob(detailJob.id); setDetailJobId(null); }}>跳过这个职位</button>}
-                {(detailJob.stage === "review" || detailJob.stage === "waiting") && <button className="button primary" onClick={() => { const id = detailJob.id; setDetailJobId(null); advanceJob(id); }}>{detailJob.stage === "review" ? "生成投递预览" : "记录面试"}</button>}
+                {(detailJob.stage === "review" || detailJob.stage === "waiting") && <button className="button primary" onClick={() => { const id = detailJob.id; setDetailJobId(null); advanceJob(id); }}>{detailJob.stage === "review" ? "投递" : "记录面试"}</button>}
                 {detailJob.stage === "applying" && <button className="button primary" onClick={() => { setDetailJobId(null); void resumeDelivery(); }}>继续投递</button>}
                 <button className="button secondary" onClick={() => setDetailJobId(null)}>关闭</button>
               </div>
