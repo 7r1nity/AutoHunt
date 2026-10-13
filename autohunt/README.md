@@ -54,6 +54,10 @@ cd agent
 pnpm --dir frontend dev --hostname 127.0.0.1
 ```
 
+开发服务显式使用 Webpack，避免本机 Windows/pnpm 链接依赖在 Turbopack 热更新时出现 `Next.js package not found` 并循环重载。请使用上述 package 脚本，不要绕过它直接运行无参数的 `next dev`；Next.js 16 的默认开发打包器是 Turbopack，`--webpack` 是[官方支持的切换方式](https://nextjs.org/docs/app/api-reference/turbopack)。这不关闭页面数据轮询，也不影响 Agent 任务。
+
+页面重载烟测：在 `agent/` 执行 `.venv/Scripts/python.exe -m evaluation.frontend_reload_contract`。它使用独立 Chromium、拦截所有 Agent API 和外部请求，观察40秒内的实际文档请求及重载；不读取个人历史、不发起搜索/投递，不代表招聘端到端验收。
+
 打开 [AutoHunt](http://127.0.0.1:3000)。前后端的服务 Token 必须相同；`AUTOHUNT_DATA_KEY` 必须跨重启保留。
 
 模拟网站是**独立应用**，位于同仓库的 `../mock-site/`。安装见[模拟站说明](../mock-site/README.md)，在该目录的独立终端：
