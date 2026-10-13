@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import asdict, replace
 
 from ..core.security import redact
 from .base import LLMProvider, LLMRequest, LLMResult, LLMToolResult
@@ -8,6 +8,7 @@ from .deepseek_provider import DeepSeekProvider
 from .mock_provider import MockLLMProvider
 from ..memory.stores import LLMCredentialStore, LLMSettingsStore
 from ..runtime.context import active_run, emit
+from .tracing import traced_call
 
 
 class LLMManager:
@@ -45,14 +46,15 @@ class LLMManager:
         return provider
 
     async def generate(self, request: LLMRequest) -> LLMResult:
-        emit("model", detail="正在调用模型", strategy="fast" if request.fast else "detailed")
+        provider = self._provider()
+        emit("model", detail="正在调用模型", strategy="fast" if request.fast else "detailed", provider=provider.name, model=provider.model)
         safe_request = replace(
             request,
             instructions=redact(request.instructions),
             user_message=redact(request.user_message),
             context=redact(request.context),
         )
-        return await self._provider().generate(safe_request)
+        return await traced_call(provider, "generate", asdict(safe_request), lambda: provider.generate(safe_request))
 
     def provider_for_consent(self, provider: str, model: str) -> LLMProvider:
         pinned = self._provider()
@@ -76,6 +78,8 @@ class LLMManager:
             messages=redact(messages),
             tools=tools,
         )
-        if active_run() and isinstance(provider, DeepSeekProvider):
-            return await provider.generate_with_tools_stream(**arguments, on_delta=lambda text: emit("delta", text=text))
-        return await provider.generate_with_tools(**arguments)
+        async def invoke():
+            if active_run() and isinstance(provider, DeepSeekProvider):
+                return await provider.generate_with_tools_stream(**arguments, on_delta=lambda text: emit("delta", text=text))
+            return await provider.generate_with_tools(**arguments)
+        return await traced_call(provider, "generate_with_tools", arguments, invoke)

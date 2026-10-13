@@ -24,6 +24,8 @@ class LLMResult:
     provider: str
     model: str
     response_id: str | None = None
+    usage: dict[str, Any] = field(default_factory=dict)
+    call_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -41,6 +43,8 @@ class LLMToolResult:
     tool_calls: list[LLMToolCall] = field(default_factory=list)
     assistant_message: dict[str, Any] = field(default_factory=dict)
     response_id: str | None = None
+    usage: dict[str, Any] = field(default_factory=dict)
+    call_id: str | None = None
 
 
 class LLMProvider(ABC):

@@ -69,10 +69,11 @@ class DeepSeekProvider(LLMProvider):
         if not text.strip():
             raise RuntimeError("DeepSeek returned no text output")
         return LLMResult(
-            text=text.strip(),
+            text=text,
             provider=self.name,
-            model=self.model,
+            model=response.model or self.model,
             response_id=response.id,
+            usage=response.usage.model_dump(mode="json") if response.usage else {},
         )
 
     async def generate_with_tools(
@@ -115,12 +116,13 @@ class DeepSeekProvider(LLMProvider):
                 for call in calls
             ]
         return LLMToolResult(
-            text=(message.content or "").strip(),
+            text=message.content or "",
             provider=self.name,
-            model=self.model,
+            model=response.model or self.model,
             tool_calls=calls,
             assistant_message=assistant_message,
             response_id=response.id,
+            usage=response.usage.model_dump(mode="json") if response.usage else {},
         )
 
     async def generate_with_tools_stream(self, *, instructions: str, messages: list[dict], tools: list[dict], on_delta) -> LLMToolResult:
@@ -131,10 +133,13 @@ class DeepSeekProvider(LLMProvider):
         )
         content, reasoning, pending = "", "", ""
         calls: dict[int, dict] = {}
-        response_id = None
+        response_id, usage, response_model = None, {}, self.model
         try:
             async for chunk in stream:
                 response_id = chunk.id
+                response_model = getattr(chunk, "model", None) or response_model
+                if getattr(chunk, "usage", None):
+                    usage = chunk.usage.model_dump(mode="json")
                 if not chunk.choices:
                     continue
                 delta = chunk.choices[0].delta
@@ -166,6 +171,6 @@ class DeepSeekProvider(LLMProvider):
         if tool_calls:
             assistant["tool_calls"] = [{"id": call.id, "type": "function", "function": {
                 "name": call.name, "arguments": call.arguments}} for call in tool_calls]
-        return LLMToolResult(text=content.strip(), provider=self.name, model=self.model,
-                             tool_calls=tool_calls, assistant_message=assistant, response_id=response_id)
+        return LLMToolResult(text=content, provider=self.name, model=response_model,
+                             tool_calls=tool_calls, assistant_message=assistant, response_id=response_id, usage=usage)
 

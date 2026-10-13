@@ -270,6 +270,9 @@ class RunStore:
         return True
 
     def event(self, run_id: str, kind: str, data: dict):
+        from ..llm.tracing import PRIVATE_MODEL_EVENTS, public_model_data
+        if kind in PRIVATE_MODEL_EVENTS and self.cipher is None:
+            data = {**public_model_data(data), "details_omitted": "runtime_encryption_not_configured"}
         with self.lock, self.connect() as db:
             db.execute("INSERT INTO agent_run_events (run_id,kind,data,created_at) VALUES (?,?,?,?)",
                        (run_id, kind, self._encode(data), now()))
@@ -288,7 +291,12 @@ class RunStore:
 
     def public_events(self, run_id: str, after: int = 0) -> list[dict]:
         """Boundary copy for diagnostic HTTP/SSE; internal consumers use events()."""
-        return redact(self.events(run_id, after))
+        from ..llm.tracing import PRIVATE_MODEL_EVENTS, public_model_data
+        events = self.events(run_id, after)
+        for event in events:
+            if event["kind"] in PRIVATE_MODEL_EVENTS:
+                event["data"] = {**public_model_data(event["data"]), "details_internal": True}
+        return redact(events)
 
     def approval(self, approval_id: str) -> dict:
         with self.connect() as db:

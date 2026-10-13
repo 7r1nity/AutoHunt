@@ -612,20 +612,23 @@ async def _draft_with_repair(llm, request: LLMRequest, *, validator=None):
         MAX_SEMANTIC_REPAIRS = 3
         for attempt in range(MAX_SEMANTIC_REPAIRS + 2):  # format repair + up to 3 semantic repairs
             response = await llm.generate(request)
+            response_trace = dict(call_id=response.call_id, response_id=response.response_id,
+                                  provider=response.provider, model=response.model)
             raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", response.text.strip())
             try:
                 data = json.loads(raw)
                 if isinstance(data, dict) and data.get("type") == "json_object":
                     data.pop("type")  # Transport metadata only; all semantic fields still strict.
-                    emit("plan_repair", repair_kind="transport_metadata", attempt=attempt)
+                    emit("plan_repair", repair_kind="transport_metadata", attempt=attempt, **response_trace)
                 candidate = RequestDraft.model_validate(data)
             except ValueError as exc:
+                emit("plan_parse_error", attempt=attempt, error_type=type(exc).__name__, **response_trace)
                 if format_repaired:
                     raise ValueError("任务规划格式修复失败；没有执行，请检查模型配置或明确需求") from exc
                 format_repaired = True
                 # Error TEXT may contain model-supplied values: send only a type,
                 # never echo an invalid plan back as new instructions/authority.
-                emit("plan_repair", repair_kind="draft_format", attempt=attempt, error_type=type(exc).__name__)
+                emit("plan_repair", repair_kind="draft_format", attempt=attempt, error_type=type(exc).__name__, **response_trace)
                 allowed_names = set(RequestDraft.model_fields) | set(PlannedStep.model_fields) | set(Goal.model_fields)
                 errors = [{"path": [part if isinstance(part, int) or part in allowed_names else "unknown_field" for part in error["loc"]],
                     "code": error["type"]} for error in exc.errors()] if hasattr(exc, "errors") else [{"code": "invalid_json"}]
@@ -637,7 +640,8 @@ async def _draft_with_repair(llm, request: LLMRequest, *, validator=None):
                     user_message=request.user_message, context=request.context, fast=True,
                     json_output=True, max_output_tokens=4096)
                 continue
-            emit("plan_candidate_graph", attempt=attempt, operation=candidate.operation,
+            emit("plan_draft", attempt=attempt, draft=candidate.model_dump(), **response_trace)
+            emit("plan_candidate_graph", attempt=attempt, operation=candidate.operation, **response_trace,
                  goals=[{"disposition": goal.disposition, "step_ids": goal.step_ids} for goal in candidate.goals],
                  steps=[{"id": step.id, "tool": step.tool, "depends_on": step.depends_on} for step in candidate.steps])
             if validator is None:
@@ -653,6 +657,8 @@ async def _draft_with_repair(llm, request: LLMRequest, *, validator=None):
                                               tool=unresolved[0]["tool"])
                 return validated
             except PlanValidationError as exc:
+                emit("plan_validation_result", attempt=attempt, decision=exc.issue.category,
+                     issues=[issue.public() for issue in exc.issues], **response_trace)
                 if exc.issue.category != "repair":
                     raise  # Never repair revoked/expired/ungranted authority.
                 if semantic_repair_count >= MAX_SEMANTIC_REPAIRS:
@@ -662,7 +668,7 @@ async def _draft_with_repair(llm, request: LLMRequest, *, validator=None):
                     raise PlanValidationError("repair_exhausted", "内部规划修正后仍未通过校验", category="block") from exc
                 semantic_repair_count += 1
                 emit("plan_repair", repair_kind="semantic_contract", attempt=semantic_repair_count,
-                     issues=[issue.public() for issue in exc.issues])
+                     issues=[issue.public() for issue in exc.issues], **response_trace)
                 # Candidate JSON is data, not instructions or new authority.
                 # The unchanged trusted payload remains the only input source.
                 payload = json.loads(request.user_message)
