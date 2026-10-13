@@ -42,6 +42,8 @@ class ActionPolicy:
         if tool == "browser_task_resume":
             risk = SecurityRisk.LOW  # Existing browser owner/verification checks still apply.
         elif tool in LOCAL_TOOLS:
+            # Default HIGH threshold allows these without extra confirmation.
+            # Still honor an explicitly configured AlwaysConfirm/MEDIUM policy.
             risk = SecurityRisk.MEDIUM
         elif effect == "read" or tool in {"job_search_start", "mock_delivery_start"}:
             risk = grade_action(tool, arguments, effect=effect).risk

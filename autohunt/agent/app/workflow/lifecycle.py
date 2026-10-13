@@ -9,7 +9,11 @@ EDITABLE = {"pending", "waiting_approval", "waiting_input"}
 
 
 def input_waits(plan: dict) -> None:
-    """Scope missing inputs to nodes; never stop independent safe reads."""
+    """Scope missing inputs to nodes; never stop independent safe reads.
+
+    Node-scoped questions pause only their branches. Legacy unscoped ambiguity
+    permits independent reads, not speculative local/external mutations.
+    """
     scoped = any(step.get("missing_slots") or step.get("questions") or step["status"] == "waiting_input"
                  for step in plan["steps"])
     for step in plan["steps"]:
@@ -20,8 +24,6 @@ def input_waits(plan: dict) -> None:
             step.update(status="waiting_input", wait_reason="missing_slots",
                 detail="；".join(questions) or "请补充：" + "、".join(step["missing_slots"]))
         elif plan.get("questions") and not scoped and step.get("effect") != "read":
-            # Legacy unscoped questions cannot authorize a speculative effect.
-            # The planner now provides node questions; old records remain safe.
             step.update(status="waiting_input", wait_reason="unscoped_question",
                 detail="；".join(plan["questions"]), questions=list(plan["questions"]))
 

@@ -17,6 +17,13 @@ from ..llm.base import LLMRequest
 from .task_semantics import condition_mode
 from .salary_conditions import SalaryPredicate, judge_salary
 
+# Model-facing trees reserve two levels for application composition (common
+# scope AND grouped alternatives). All evaluators/persistence use one budget.
+PUBLIC_FILTER_DEPTH = 6
+MAX_FILTER_DEPTH = PUBLIC_FILTER_DEPTH + 2
+MAX_FILTER_NODES = 256
+MAX_FILTER_CHILDREN = 32
+
 
 class FilterExpression(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -25,28 +32,56 @@ class FilterExpression(BaseModel):
     quote: str = Field(default="", max_length=1000)
     mode: Literal["require", "prefer", "allow"] = "require"
     salary: SalaryPredicate | None = None
-    children: list[FilterExpression] = Field(default_factory=list, max_length=16)
+    children: list[FilterExpression] = Field(default_factory=list, max_length=MAX_FILTER_CHILDREN)
 
     @model_validator(mode="after")
     def bounded_tree(self):
         if self.op == "condition":
             if not self.text.strip() or self.children:
                 raise ValueError("筛选叶节点需要用户条件原文，不能包含子节点")
-        elif self.salary is not None or self.mode != "require" or self.text or not self.children or self.op == "not" and len(self.children) != 1:
-            raise ValueError("组合节点仅包含子节点；not 必须有且只有一个子节点")
-        def count(node, depth=1):
-            if depth > 4:
-                raise ValueError("筛选表达式最多四层")
-            return 1 + sum(count(child, depth + 1) for child in node.children)
-        if count(self) > 32:
-            raise ValueError("筛选表达式最多32个节点")
+        elif self.salary is not None or self.mode != "require" or self.text or not self.children:
+            raise ValueError("组合节点仅包含子节点")
+        if self.op == "not" and len(self.children) != 1:
+            raise ValueError("否定节点必须明确一个子表达式")
+        # Budget the losslessly normalized tree at every entry point, including
+        # browser/persistence model_validate calls. Never delete constraints or
+        # flatten heterogeneous Boolean operators to meet an execution budget.
+        normalized = _canonical_expression(self)
+        depth, count = _tree_size(normalized)
+        if depth > MAX_FILTER_DEPTH or count > MAX_FILTER_NODES:
+            raise ValueError(f"筛选表达式规范化后最多{MAX_FILTER_DEPTH}层、{MAX_FILTER_NODES}个节点")
         return self
 
     def leaves(self):
         return [self] if self.op == "condition" else [leaf for child in self.children for leaf in child.leaves()]
 
 
-def filter_schema(depth=4):
+def _canonical_expression(node):
+    """Order-preserving Boolean normalization; never drop/rewrite leaf facts.
+
+    NOT and quoted grouping remain intact. Flatten associative operators only
+    within the child budget; no distribution, reordering or deduplication, since
+    group evidence references the ordered leaves (including repeated criteria).
+    """
+    if node.op == "condition":
+        return node
+    children = [_canonical_expression(child) for child in node.children]
+    if node.op in {"all", "any"} and not node.quote:
+        if len(children) == 1:
+            return children[0]
+        flattened = [item for child in children for item in
+                     (child.children if child.op == node.op and not child.quote else [child])]
+        if len(flattened) <= MAX_FILTER_CHILDREN:
+            children = flattened
+    return node.model_copy(update={"children": children})
+
+
+def _tree_size(node):
+    sizes = [_tree_size(child) for child in node.children]
+    return 1 + max((depth for depth, _ in sizes), default=0), 1 + sum(count for _, count in sizes)
+
+
+def filter_schema(depth=PUBLIC_FILTER_DEPTH):
     properties = {"op": {"type": "string", "enum": ["condition", "all", "any", "not"]},
                   "text": {"type": "string", "maxLength": 400},
                   "quote": {"type": "string", "maxLength": 1000, "description": "用户的连续原文；text可补齐此原文中的语义省略，不得增添要求"}}
@@ -62,7 +97,7 @@ def filter_schema(depth=4):
     properties["salary"]["properties"]["origin"] = {"type": "string", "enum": ["model", "legacy"],
         "description": "模型输出model；legacy仅供应用兼容旧salary_min字段"}
     if depth > 1:
-        properties["children"] = {"type": "array", "maxItems": 16, "items": filter_schema(depth - 1)}
+        properties["children"] = {"type": "array", "maxItems": MAX_FILTER_CHILDREN, "items": filter_schema(depth - 1)}
     else:
         properties["children"] = {"type": "array", "maxItems": 0, "items": {"type": "object"}}
     return {"type": "object", "properties": properties, "required": ["op"], "additionalProperties": False}
@@ -74,9 +109,23 @@ def validate_filter(value, sources=()):
     Sources are retained for API compatibility/audit. Condition strength and
     paraphrases are model interpretation. JD evidence is still verified by
     evaluate_filter before a hard condition can pass.
+
+    Only Boolean-equivalent normalization is allowed. Invalid or over-budget
+    trees need model repair or scoped clarification, not weakened predicates.
     """
-    expression = FilterExpression.model_validate(value)
-    return expression
+    node = FilterExpression.model_validate(value)
+    return _canonical_expression(node)
+
+
+def compose_filters(op, *parts):
+    """Combine validated predicates without inventing a separate runtime AST."""
+    if op not in {"all", "any"}:
+        raise ValueError("筛选组合只支持all或any")
+    children = [validate_filter(part).model_dump(mode="json") for part in parts if part is not None]
+    if not children:
+        return None
+    expression = children[0] if len(children) == 1 else {"op": op, "children": children}
+    return validate_filter(expression).model_dump(mode="json")
 
 
 def combine(expression, verdicts):

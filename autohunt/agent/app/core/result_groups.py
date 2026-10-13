@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from .job_filters import combine, validate_filter
+from .job_filters import combine, compose_filters, filter_schema, validate_filter
 
 
 class ResultGroup(BaseModel):
@@ -19,7 +19,7 @@ class ResultGroup(BaseModel):
         if expression is None:
             raise ValueError("分组必须提供类别条件")
         if any(leaf.mode != "require" for leaf in expression.leaves()):
-            raise ValueError("分组配额必须由岗位事实判断，不能用allow/prefer代替类别")
+            raise ValueError("数量分组需要明确的类别事实，不能把允许或偏好自动升级为硬条件")
         return expression.model_dump(mode="json")
 
 
@@ -33,16 +33,18 @@ def normalize_groups(groups):
 
 
 def groups_schema():
+    item = ResultGroup.model_json_schema()
+    item["properties"]["filters"] = filter_schema()
     return {"type": ["array", "null"], "maxItems": 10,
             "description": "分组数量配额，例如正式5份、实习5份；每组filters是必须核实的类别事实，不是allow。省略继承，null或[]清除。",
-            "items": ResultGroup.model_json_schema()}
+            "items": item}
 
 
 def grouped_filter(base, groups):
     if not groups:
         return base
-    alternatives = {"op": "any", "children": [item["filters"] for item in groups]}
-    return {"op": "all", "children": [base, alternatives]} if base else alternatives
+    alternatives = compose_filters("any", *[item["filters"] for item in groups])
+    return compose_filters("all", base, alternatives)
 
 
 def group_verdicts(base, groups, verdict):

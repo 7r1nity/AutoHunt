@@ -32,7 +32,7 @@ def persist(plan: dict, *, activate: bool = False) -> None:
         ("id", "original", "answers", "questions", "resume_stamp", "turn", "expires_at", "status", "goals")},
         "understanding": plan.get("understanding"),
         "revision": plan.get("revision", 0), "paused": plan.get("paused", False),
-        "steps": [{key: step.get(key) for key in ("id", "tool", "arguments", "staged_arguments", "depends_on", "missing_slots", "questions", "status", "authority_binding")}
+        "steps": [{key: step.get(key) for key in ("id", "tool", "arguments", "unresolved_arguments", "staged_arguments", "depends_on", "missing_slots", "questions", "status", "authority_binding")}
                   for step in plan["steps"]]})
 
 
@@ -201,9 +201,17 @@ async def advance(plan: dict, registry) -> list[dict]:
                 raise
             except TimeoutError:
                 started = context.effect_state["phase"] != "preparing"
-                step["failure"] = classify_failure(TimeoutError(), effect=step["effect"], started=started).metadata()
-                step.update(status="outcome_indeterminate" if step["failure"]["uncertain"] else "failed",
-                    detail="步骤超时；结果未确认，不自动重试")
+                # Read-only tools have no external side effects: a timeout cannot
+                # produce an uncertain outcome. Mark them failed (retryable) instead
+                # of outcome_indeterminate so the user does not need to manually verify.
+                if step.get("effect") == "read":
+                    step["failure"] = classify_failure(TimeoutError(), effect="read", started=started).metadata()
+                    step.update(status="failed",
+                        detail="读取步骤超时；无外部副作用，可以直接说「继续任务」重试")
+                else:
+                    step["failure"] = classify_failure(TimeoutError(), effect=step["effect"], started=started).metadata()
+                    step.update(status="outcome_indeterminate" if step["failure"]["uncertain"] else "failed",
+                        detail="步骤超时；结果未确认，不自动重试")
             except Exception as exc:
                 started = context.effect_state["phase"] != "preparing"
                 step["failure"] = classify_failure(exc, effect=step["effect"], started=started).metadata()

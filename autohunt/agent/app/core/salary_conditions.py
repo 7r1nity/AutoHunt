@@ -93,7 +93,7 @@ def normalized_search_filters(filters: dict | None, salary_min: int | None) -> d
     A supplied hard monthly/negotiable tree owns salary scope (including OR).
     Daily-only restrictions can coexist with an inherited monthly lower bound.
     """
-    from .job_filters import validate_filter
+    from .job_filters import compose_filters, validate_filter
     expression = validate_filter(filters) if filters is not None else None
     def remove_legacy(node):
         if node.op == "condition":
@@ -109,5 +109,4 @@ def normalized_search_filters(filters: dict | None, salary_min: int | None) -> d
         return expression.model_dump(mode="json") if expression else None
     salary = {"op": "condition", "text": f"月薪区间下限至少{salary_min}元",
               "salary": {"unit": "monthly", "minimum": salary_min, "origin": "legacy"}}
-    combined = {"op": "all", "children": [salary, expression.model_dump(mode="json")]} if expression else salary
-    return validate_filter(combined).model_dump(mode="json")
+    return compose_filters("all", salary, expression.model_dump(mode="json") if expression else None)

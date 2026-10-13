@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from ..security.action_grants import action_binding
 from .contracts import PlannedStep, Goal, EVIDENCE_TOOLS, MAX_PLAN_STEPS
 from .validation import normalize_encoding, preflight, dependency_ancestors, resolved_slots, PlanValidationError
+from .graph import bind_evidence, wait_for_scope
 
 
 class StepUpdate(BaseModel):
@@ -38,19 +39,23 @@ def edited_plan(plan: dict, edit: RevisionDraft, registry, *, stamp: str, sessio
     if edit.plan_id != plan["id"] or edit.expected_revision != plan.get("revision", 0):
         raise ValueError("计划已变化，请重新读取当前计划再修改")
     if plan.get("resume_stamp") != stamp:
-        raise ValueError("任务绑定的简历已变化，请确认新的任务范围")
+        raise PlanValidationError("resume_binding_changed", "任务绑定的简历已变化，请核对新简历后重新绑定任务范围", category="clarify")
     if plan.get("status") in {"cancelled", "outcome_indeterminate"} or (
             plan.get("status") in {"finished", "completed"} and not edit.add_steps and not edit.invalidated_steps):
         raise ValueError("原计划已结束或结果不确定，不能修改并重放")
     result = copy.deepcopy(plan)
     steps = {step["id"]: step for step in result["steps"]}
-    invalidated = set(edit.invalidated_steps)
-    if len(invalidated) != len(edit.invalidated_steps) or not invalidated <= steps.keys():
-        raise ValueError("待刷新结果不存在或重复")
+    invalidated = set(edit.invalidated_steps) & steps.keys()
+    revision_questions = []
+    unknown = (set(edit.invalidated_steps) | set(edit.remove_steps) | {item.step_id for item in edit.updates}) - steps.keys()
+    if unknown:
+        revision_questions.append("部分指定步骤不存在，未对这些步骤操作，请确认对象：" + "、".join(sorted(unknown)) + "。")
     replacements = {}
     # Preserve old receipts. Only recomputable evidence/analysis gets a fresh node;
     # external sends/searches and accepted resume changes cannot be replayed here.
-    for old_id in edit.invalidated_steps:
+    for old_id in dict.fromkeys(edit.invalidated_steps):
+        if old_id not in invalidated:
+            continue
         old = steps[old_id]
         if old["status"] != "completed" or old["tool"] not in {
                 "job_results_read", "job_stats_read", "job_results_refilter", "learning_plan_generate"}:
@@ -74,18 +79,32 @@ def edited_plan(plan: dict, edit: RevisionDraft, registry, *, stamp: str, sessio
             if step.get("evidence_step") in replacements:
                 step["evidence_step"] = replacements[step["evidence_step"]]
     removed = set(edit.remove_steps)
-    if len(removed) != len(edit.remove_steps) or not removed <= steps.keys():
-        raise ValueError("待取消步骤不存在或重复")
+    # Auto-filter nonexistent step IDs instead of failing (T-25).
+    removed = {sid for sid in removed if sid in steps}
     for step_id in removed:
         step = steps[step_id]
         if step["status"] not in {"pending", "waiting_approval", "waiting_input"}:
             raise ValueError("只能取消尚未执行的步骤；正在发送的操作请使用停止任务入口")
         step.update(status="skipped", withdrawn=True, detail="已按用户要求取消此后续动作",
                     failure={"code": "user_withdrawn", "effect_started": False, "uncertain": False})
-    seen = set()
+    seen, combined = set(), {}
     for update in edit.updates:
-        if update.step_id in seen or update.step_id not in steps:
-            raise ValueError("修改步骤不存在或重复")
+        if update.step_id not in steps:
+            continue
+        if update.step_id not in combined:
+            combined[update.step_id] = update.model_copy(deep=True)
+            continue
+        previous = combined[update.step_id]
+        if (any(key in previous.arguments and previous.arguments[key] != value for key, value in update.arguments.items())
+                or previous.depends_on is not None and update.depends_on is not None and previous.depends_on != update.depends_on
+                or previous.user_requested is not None and update.user_requested is not None and previous.user_requested != update.user_requested):
+            raise PlanValidationError("conflicting_revision", "同一步骤包含相互冲突的修改，请确认最终条件", category="clarify")
+        previous.arguments.update(update.arguments)
+        if update.depends_on is not None:
+            previous.depends_on = update.depends_on
+        if update.user_requested is not None:
+            previous.user_requested = update.user_requested
+    for update in combined.values():
         seen.add(update.step_id)
         step = steps[update.step_id]
         active_search = step["tool"] == "job_search_start" and step["status"] == "waiting_external" and not step["arguments"].get("dry_run")
@@ -103,7 +122,7 @@ def edited_plan(plan: dict, edit: RevisionDraft, registry, *, stamp: str, sessio
             from ..core.job_filters import validate_filter
             arguments["filters"] = validate_filter(arguments["filters"]).model_dump(mode="json")
         if step["tool"] == "learning_plan_generate" and arguments.get("min_score", 0) > arguments.get("max_score", 100):
-            raise ValueError("分析分数下界不能超过上界")
+            raise PlanValidationError("invalid_score_range", "分析分数下界高于上界，请确认范围，未自动交换条件", category="clarify")
         if active_search:
             if update.depends_on is not None:
                 raise ValueError("正在执行的搜索不能改写已生效依赖；请追加后续步骤")
@@ -122,9 +141,12 @@ def edited_plan(plan: dict, edit: RevisionDraft, registry, *, stamp: str, sessio
             step.pop("wait_reason", None)
             step.pop("detail", None)
             step.pop("failure", None)
-            filled = resolved_slots(step, {})
+            unresolved = step.get("unresolved_arguments", {})
+            for key in update.arguments:
+                unresolved.pop(key, None)
+            filled = resolved_slots(step, {}) - set(unresolved)
             step["missing_slots"] = [slot for slot in step.get("missing_slots", []) if slot not in filled]
-            if not step["missing_slots"] or update.arguments:
+            if not step["missing_slots"] and not unresolved:
                 step["questions"] = []
         step["authority_binding"] = action_binding(step["tool"], arguments, session_id=session_id,
             requested=step.get("user_requested", (step.get("authority_binding") or {}).get("user_requested", False)))
@@ -181,13 +203,13 @@ def edited_plan(plan: dict, edit: RevisionDraft, registry, *, stamp: str, sessio
                        for other in producers if other["id"] != step["id"])]
         else:
             latest = producers
-        if len(latest) > 1:
-            raise ValueError("多个结果来源，请明确刷新哪一轮证据")
         refresh = {"id": key, "tool": "job_results_refilter", "arguments": {}, "status": "pending", "effect": "write",
             "depends_on": [step["id"] for step in condition_updates] + [step["id"] for step in latest],
             "command_quote": message, "scope_quote": "", "missing_slots": [], "user_requested": True,
             "result": None, "task_id": None}
-        if latest and latest[0].get("task_id"):
+        if len(latest) > 1:
+            wait_for_scope(refresh, "请明确刷新哪一轮搜索结果：" + "、".join(item["id"] for item in latest) + "。")
+        if len(latest) == 1 and latest[0].get("task_id"):
             refresh["arguments"]["task_id"] = latest[0]["task_id"]
         result["steps"].append(refresh)
         steps[key] = refresh
@@ -202,16 +224,7 @@ def edited_plan(plan: dict, edit: RevisionDraft, registry, *, stamp: str, sessio
         if step["status"] != "pending" or step["tool"] not in EVIDENCE_TOOLS:
             continue
         producers = [item for item in result["steps"] if item["tool"] in {"job_search_start", "job_results_refilter"}]
-        bound = [item["id"] for item in producers if item["id"] in dependency_ancestors(step["id"], result["steps"])]
-        if not bound and len(producers) == 1:
-            step["depends_on"].append(producers[0]["id"])
-            bound = [producers[0]["id"]]
-        # Resolve sequential search/refilter producers to their newest evidence.
-        bound = [key for key in bound if not any(key in dependency_ancestors(other, result["steps"]) for other in bound if other != key)]
-        if producers and len(bound) != 1:
-            raise ValueError("新增动作需要明确对应哪一轮搜索结果")
-        if bound:
-            step["evidence_step"] = bound[0]
+        bind_evidence(result["steps"], step, producers)
     result["goals"] = [*result.get("goals", []), *[goal.model_dump() for goal in edit.goals]]
     preflight(result["steps"], result["goals"], [plan["original"], message], set(registry._tools))
     paused = result.get("paused", False) if edit.pause is None else edit.pause
@@ -221,8 +234,8 @@ def edited_plan(plan: dict, edit: RevisionDraft, registry, *, stamp: str, sessio
     unscoped = [question for question in plan.get("questions", []) if question not in original_scoped]
     if edit.questions is not None:
         unscoped = edit.questions
-    waits = [step for step in result["steps"] if step["status"] == "waiting_input" or step.get("missing_slots")]
-    result["questions"] = list(dict.fromkeys([*unscoped, *[question for step in waits for question in step.get("questions", [])]]))
+    waits = [step for step in result["steps"] if step["status"] == "waiting_input" or step.get("missing_slots") or step.get("questions")]
+    result["questions"] = list(dict.fromkeys([*unscoped, *revision_questions, *[question for step in waits for question in step.get("questions", [])]]))
     result.update(revision=plan.get("revision", 0) + 1, paused=paused, status="paused" if paused else "running")
     result["answers"] = [*result.get("answers", []), message][-12:]
     result.setdefault("revision_history", []).append({"revision": result["revision"], "message": message,

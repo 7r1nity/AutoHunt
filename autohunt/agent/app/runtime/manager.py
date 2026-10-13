@@ -15,6 +15,49 @@ from ..core.models import BrowserSearchRequest
 from .resilience import WatchLimits, wait_expired
 
 
+# Remind once after five minutes; waiting is not a failed execution.
+_APPROVAL_REMINDER_SECONDS = 300
+
+
+def _approval_detail(tool: str, arguments: dict) -> str:
+    """Generate a human-readable confirmation prompt from action arguments (T-13/T-19).
+
+    This text appears directly in the approval card so the user knows what they
+    are being asked to confirm without opening the raw arguments JSON.
+    """
+    if tool == "mock_delivery_start":
+        parts = []
+        count = arguments.get("expected_count")
+        if isinstance(count, int) and count > 0:
+            parts.append(f"计划投递 {count} 个职位")
+        else:
+            parts.append("投递职位")
+        min_score = arguments.get("min_score")
+        if isinstance(min_score, int):
+            parts.append(f"匹配分 ≥ {min_score}")
+        salary_min = arguments.get("salary_min")
+        if isinstance(salary_min, int) and salary_min > 0:
+            parts.append(f"月薪下限 ≥ {salary_min:,} 元")
+        filters = arguments.get("filters")
+        if filters:
+            try:
+                from ..core.job_filters import filter_summary
+                summary = filter_summary(filters)
+                if summary and summary != "未设置语义限制":
+                    parts.append(f"筛选：{summary}")
+            except Exception:
+                pass
+        selector = arguments.get("selector")
+        if selector:
+            parts.append("指定对象：" + json.dumps(selector, ensure_ascii=False))
+        detail = "；".join(parts) + "。请确认此投递范围。"
+        return detail + "\n\n确认后加入自动队列：先沟通，招聘方回复后发送已授权简历；可随时停止，在任务记录中查看进度。"
+    if tool == "job_search_start" and arguments.get("dry_run"):
+        queries = "、".join(arguments.get("queries") or [])
+        return f"模拟站试运行搜索「{queries}」，可能实际发起沟通并发送已授权简历，请核对范围。"
+    return "请核对本动作范围后确认；已有步骤和独立分支保留。"
+
+
 class AgentRuntime:
     """Durable runs, per-session ordering, bounded concurrency and one deadline."""
     def __init__(self, store: RunStore, agent, jobs, browser, plans, resume_workspace,
@@ -242,14 +285,18 @@ class AgentRuntime:
             current = self.store.get(run_id)
             plan = copy.deepcopy(current["checkpoint"]["plan"])
             step = next(step for step in plan["steps"] if step["id"] == step_id)
-            step.update(status="waiting_approval", approval_id=record["id"],
-                        detail="请核对本动作范围后确认；已有步骤和独立分支保留")
+            # T-13/T-19: Generate a human-readable summary from the step arguments
+            # so the approval card immediately shows what the user is being asked
+            # to confirm, without them needing to open the raw arguments JSON.
+            detail = _approval_detail(tool, arguments)
+            step.update(status="waiting_approval", approval_id=record["id"], detail=detail)
             self.store.update(run_id, checkpoint={**current["checkpoint"], "plan": plan}, status="waiting_confirmation")
             if not self.store.has_event(run_id, "approval:" + record["id"]):
                 self.store.event(run_id, "approval:" + record["id"], {"approval_id": record["id"]})
                 self.store.event(run_id, "action_approval", {"approval_id": record["id"], "step_id": step_id,
-                    "tool": tool, "risk": risk, "status": "pending", "detail": step["detail"]})
-        return {key: record[key] for key in ("id", "status", "source")} | {"scope": snapshot}
+                    "tool": tool, "risk": risk, "status": "pending", "detail": detail})
+        return {key: record[key] for key in ("id", "status", "source")} | {
+            "scope": snapshot, "detail": _approval_detail(tool, arguments)}
 
     async def decide_approval(self, run_id: str, approval_id: str, session_id: str, approve: bool) -> dict:
         lock = self.sessions.setdefault(session_id, asyncio.Lock())
@@ -606,6 +653,12 @@ class AgentRuntime:
                 elif step["status"] == "waiting_approval":
                     record = self.store.approval(step["approval_id"])
                     if record["status"] == "pending":
+                        approval_started = record.get("created_at", 0)
+                        marker = "approval_reminder:" + record["id"]
+                        if (approval_started and wait_expired(approval_started, _APPROVAL_REMINDER_SECONDS)
+                                and not self.store.has_event(run_id, marker)):
+                            self.store.event(run_id, marker, {"step_id": step["id"], "approval_id": record["id"],
+                                "detail": "仍在等待确认；任务记录保留，尚未发送。"})
                         self.store.update(run_id, status="waiting_confirmation")
                         waiting = True
                     elif record["status"] == "approved":

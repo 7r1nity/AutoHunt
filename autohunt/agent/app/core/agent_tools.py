@@ -166,7 +166,8 @@ class AgentToolRegistry:
                 return ActionDecision(Decision.ALLOW, "scoped_authority", decision.risk, "本动作范围已获授权", record)
             if status in {"rejected", "invalidated"}:
                 return ActionDecision(Decision.DENY, "authority_revoked", decision.risk, "此动作已撤回或范围已变化", record)
-            return ActionDecision(Decision.REQUIRE_APPROVAL, decision.code, decision.risk, decision.detail, record)
+            return ActionDecision(Decision.REQUIRE_APPROVAL, decision.code, decision.risk,
+                                  record.get("detail", decision.detail), record)
         return decision
 
     @staticmethod

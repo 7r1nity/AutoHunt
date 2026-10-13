@@ -390,7 +390,12 @@ async def scenario(h, case):
             h.install([step("a", "job_search_start", status="completed"), step("b", "job_search_start", status="completed")])
             try: h.edit({"add_steps": [{"id": "new", "tool": "mock_delivery_start", "user_requested": True}]})
             except ValueError: return
-            raise OracleFailure("ambiguous_evidence_selected", "clarify source", h.plan)
+            # A scoped input wait is preferable to rejecting the entire revision.
+            # Assert the execution outcome, not one particular exception shape.
+            await h.tick()
+            fresh = next(item for item in h.plan["steps"] if item["id"] == "new")
+            check(fresh["status"] == "waiting_input" and fresh.get("questions") and not fresh.get("evidence_step")
+                  and not h.calls, "ambiguous_evidence_selected", "clarify source without executing", h.plan)
         else:
             async def generate(request): return LLMResult(json.dumps({"type": "json_object", "steps": [{"id": "read", "tool": "job_stats_read"}]}), "scripted", "fixture")
             with h.context(): await plan_request(NS(generate=generate), h.registry, "看统计", dialogue={}, conditions={}, stamp=STAMP)

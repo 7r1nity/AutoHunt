@@ -90,6 +90,9 @@ def grade_action(tool: str, arguments: dict[str, Any] | None = None, *,
     if effect == _READ_EFFECT or tool in _READ_TOOLS and not arguments.get("dry_run"):
         return ActionRisk(SecurityRisk.LOW, tool, "只读操作，无外部副作用",
                           authorised_by=explicit_instruction)
+    if tool in _READ_TOOLS and arguments.get("dry_run"):
+        return ActionRisk(SecurityRisk.HIGH, tool, "模拟站试运行可能实际沟通并发送简历，需绑定执行范围",
+                          authorised_by=explicit_instruction)
     if tool in _IRREVERSIBLE_TOOLS:
         size = batch_size if batch_size is not None else arguments.get("expected_count")
         if isinstance(size, int) and size > 0:

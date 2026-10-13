@@ -230,12 +230,13 @@ class BrowserSearchRequest(BaseModel):
 
     @model_validator(mode="after")
     def mock_actions_only(self):
-        from .result_groups import normalize_groups
+        from .result_groups import grouped_filter, normalize_groups
         self.result_groups = normalize_groups(self.result_groups) or None
         if self.result_groups:
             self.result_limit = sum(item["count"] for item in self.result_groups)
         from .salary_conditions import normalized_search_filters
         self.filters = normalized_search_filters(self.filters, self.salary_min)
+        grouped_filter(self.filters, self.result_groups)  # Validate executable scope before starting a browser.
         if self.source != "mock" and self.dry_run:
             raise ValueError("真实网站仅支持读取，不支持沟通或投递试运行")
         return self
