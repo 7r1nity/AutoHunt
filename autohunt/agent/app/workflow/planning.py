@@ -150,9 +150,18 @@ async def plan_request(llm, registry, message: str, *, dialogue: dict, condition
     live_plan = context.plan_reader() if context and context.plan_reader else None
     if live_plan and live_plan.get("status") in {"finished", "completed", "cancelled", "outcome_indeterminate"}:
         live_plan = None  # Historical plans are not editable active work.
+    from .result_sources import result_references
+    sources = result_references(dialogue, live_plan)
+    if hasattr(registry.jobs, "search_source"):
+        owned_sources = []
+        for reference in sources:
+            metadata = registry.jobs.search_source(reference["task_id"])
+            if metadata and metadata["session_id"] == (context.session_id if context else "default"):
+                owned_sources.append({**reference, "search_status": metadata["status"]})
+        sources = owned_sources
     if live_plan:
         live_plan = {key: live_plan.get(key) for key in ("id", "revision", "original", "status", "paused")} | {
-            "steps": [{key: step.get(key) for key in ("id", "tool", "arguments", "staged_arguments", "missing_slots", "questions", "status", "depends_on")}
+            "steps": [{key: step.get(key) for key in ("id", "tool", "arguments", "staged_arguments", "missing_slots", "questions", "status", "depends_on", "task_id", "effect", "execution_phase", "failure")}
                       for step in live_plan["steps"]]}
     from .revision import RevisionDraft
     request = LLMRequest(
@@ -190,6 +199,10 @@ async def plan_request(llm, registry, message: str, *, dialogue: dict, condition
             "指定第几个、前几个、岗位名称投递时必须传mock_delivery_start.selector；序号不是数据库ID，不得用上一轮批量filters替代指定对象。"
             "岗位公司地点/职责描述也可放selector，由共享目标解析器定位。single要求唯一对象；明确这些/所有符合描述者用selection_mode=matching。"
             "移除/跳过已展示岗位使用job_remove_selection(selector,snapshot_id可选,selection_mode可选)。它真正移出看板并停止选中岗位的未发送投递，不是search_state_update或job_results_refilter。"
+            "已保存旧计划不是动作选择的标准答案：按当前请求重新核对每个工具的效果。移除某类岗位也属于岗位移除，selector保留完整描述、selection_mode=matching；不能改成NOT投递过滤或重新筛选。"
+            "回答移除对象的旧追问时，若旧步骤误用了重新筛选/投递，要用remove_steps取消尚未执行的错误步骤，再add_steps添加移除和剩余投递，并questions=[]；仅修改错误工具参数不算实现移除。"
+            "正在执行或结果未知的旧步骤不能改写/重放；可独立execute一个新的明确本地岗位操作，不继承旧失败前置步骤，不擅自恢复旧投递。"
+            "result_sources列出真实搜索回执；task_id只能从这些记录中选择或省略由应用绑定。聊天消息source/run_id、计划id、snapshot_id、步骤id均不是搜索task_id，不能复制到refilter参数。"
             "移除这些、其余投递需要两个有序步骤：job_remove_selection后mock_delivery_start(selector=剩余岗位)，后者依赖前者。只排除投递条件不等于岗位移除。"
             "两个工具不要混传字段：job_results_refilter仅task_id；job_remove_selection无min_score/filters；mock_delivery_start无job_ids，目标通过selector定位。"
             "指定单个岗位投递时，除非本轮同时提出额外筛选，不要复制上一轮的批量投递filters。"
@@ -213,7 +226,7 @@ async def plan_request(llm, registry, message: str, *, dialogue: dict, condition
             "输出schema：" + json.dumps(RequestDraft.model_json_schema(), ensure_ascii=False)
         ),
         user_message=json.dumps({"message": message, "pending_request": previous,
-            "active_plan": live_plan, "revision_schema": RevisionDraft.model_json_schema(),
+            "active_plan": live_plan, "result_sources": sources, "revision_schema": RevisionDraft.model_json_schema(),
             "conditions": conditions, "dialogue": dialogue, "capabilities": schemas},
             ensure_ascii=False),
         context="解释归模型；校验检查结构；审批绑定实际动作范围。", fast=True,

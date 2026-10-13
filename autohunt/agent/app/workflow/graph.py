@@ -34,6 +34,11 @@ def depend_on(steps, consumer, producer):
 
 
 def bind_evidence(steps, consumer, producers):
+    # Cancelled/failed producers are not implicit evidence for newly appended
+    # actions. Keep explicit dependencies intact, but never invent a new edge to
+    # a withdrawn node when a revision has replaced the old work.
+    producers = [item for item in producers if not item.get("withdrawn") and item.get("status") not in
+                 {"skipped", "cancelled", "failed", "blocked", "outcome_indeterminate"}]
     bound = [item for item in producers if item["id"] in dependency_ancestors(consumer["id"], steps)]
     bound = [item for item in bound if not any(item["id"] in dependency_ancestors(other["id"], steps)
              for other in bound if other is not item)]

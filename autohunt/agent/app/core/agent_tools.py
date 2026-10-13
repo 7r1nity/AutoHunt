@@ -22,6 +22,7 @@ from .search_contract import missing_search_message
 from .result_groups import groups_schema
 from .job_filters import filter_schema
 from .job_targets import TargetClarification, resolve_job_targets
+from ..workflow.result_sources import ResultSourceClarification, resolve_search_source
 from ..runtime.resilience import PreflightRefused, classify_failure, safe_retry
 from ..security.decisions import ActionPolicy, ActionDecision, Decision
 from ..security.risk import AlwaysConfirm, ConfirmRisky, SecurityRisk
@@ -219,8 +220,8 @@ class AgentToolRegistry:
                               "source": {"type": "string", "enum": ["mock", "boss", "zhaopin"]},
                               "filters": {**filter_schema(), "type": ["object", "null"], "description": "完整语义条件树；null 显式清除；省略保持"},
                           }), "session", self._search_state_update),
-            AgentToolSpec("job_results_refilter", "用户改变条件后，按本会话新条件重新筛选已完成搜索中保存的JD（含原信息不足结果）。不启动浏览器，不沟通或投递；后续投递/成长计划必须依赖此步骤。最多30个，不会补入未读取职位。",
-                obj({"task_id": {"type": "string", "description": "已有搜索ID；省略使用本会话绑定的搜索，不取其他会话最新任务"}}),
+            AgentToolSpec("job_results_refilter", "仅按已保存的会话条件重算已完成搜索JD的准入证据（含原信息不足结果）。它不改变条件、不移除选中岗位；改变条件用search_state_update，移除岗位用job_remove_selection。不启动浏览器，不沟通或投递；后续使用新证据的投递/成长计划依赖此步骤。最多30个，不补入未读取职位。",
+                obj({"task_id": {"type": "string", "description": "仅允许result_sources中的真实搜索task_id，不是聊天run_id、计划id或步骤id。省略由应用按前置回执/会话绑定选择；歧义时追问。"}}),
                 "write", self._job_results_refilter),
             AgentToolSpec(
                 "job_results_read",
@@ -425,6 +426,11 @@ class AgentToolRegistry:
                     resume_proposal=content["proposal"],
                 )
             return AgentToolOutcome(name, "ok", content, spec.effect)
+        except ResultSourceClarification as exc:
+            dialogue_change("question", topic="applications", question=str(exc), missing_slots=["task_id"])
+            failure = {"code": "result_source_unresolved", "retryable": False, "effect_started": False, "uncertain": False}
+            emit("tool_finished", tool=name, status="awaiting_user", detail=str(exc), failure=failure, **receipt)
+            return AgentToolOutcome(name, "awaiting_user", str(exc), spec.effect, failure=failure)
         except TargetClarification as exc:
             if exc.candidates:
                 dialogue_change("snapshot", topic="applications", kind="job", version=exc.version,
@@ -623,19 +629,21 @@ class AgentToolRegistry:
         return save_search_state(state, user_edit=args)
 
     async def _job_results_refilter(self, args: dict[str, Any]) -> Any:
+        effect_checkpoint("preparing")
         from .job_filters import evaluate_filter, filter_digest, validate_filter
         from .salary_conditions import normalized_search_filters
         from ..growth.requests import resume_stamp
         context = active_run()
         if context is None:
             raise PreflightRefused("重新筛选需要当前会话")
-        task_id = args.get("task_id") or (context.dialogue or {}).get("tasks", {}).get("browser_id")
-        if not task_id:
-            raise PreflightRefused("请先完成一轮搜索；没有本会话的结果可重新筛选")
         profile = self.candidate_state.read().profile
         document = self.resume_workspace.read_document()
         stamp = resume_stamp(document, self.candidate_state)
-        candidates = self.jobs.refilter_candidates(task_id, resume_id=profile.resume_id, session_id=context.session_id)
+        task_id = resolve_search_source(self.jobs, context, resume_id=profile.resume_id, explicit=args.get("task_id"))
+        try:
+            candidates = self.jobs.refilter_candidates(task_id, resume_id=profile.resume_id, session_id=context.session_id)
+        except ValueError as exc:
+            raise ResultSourceClarification(str(exc)) from exc
         constraints = dict(context.search_state or {})
         filters = normalized_search_filters(constraints.get("filters"), constraints.get("salary_min"))
         from .result_groups import grouped_filter, group_verdicts
@@ -755,7 +763,6 @@ class AgentToolRegistry:
         if self.mock_workflow is not None:
             result = await self.mock_workflow.remove_jobs(resolved["items"], session_id=context.session_id, run_id=context.run_id)
         else:
-            effect_checkpoint("started")
             result = self.jobs.remove_selection(resolved["items"], session_id=context.session_id, run_id=context.run_id)
             effect_checkpoint("committed")
         dialogue_change("job_targets", snapshot_id=resolved["snapshot_id"], selector=args["selector"],

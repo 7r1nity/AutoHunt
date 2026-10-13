@@ -320,7 +320,6 @@ class MockWorkflowCoordinator:
         """Revoke selected rows before yielding; leave unrelated workers alone."""
         from ..runtime.context import effect_checkpoint
         ids = {item["id"] for item in items}
-        effect_checkpoint("started")
         result = self.jobs.remove_selection(items, session_id=session_id, run_id=run_id)
         operations = [task for task, owner in self.operations.items()
                       if owner == session_id and self.operation_jobs.get(task) in ids]

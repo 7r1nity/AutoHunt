@@ -813,6 +813,17 @@ class JobStore:
             db.execute("UPDATE jobs SET filter_status=?,filter_evidence=? WHERE id=?",
                 (result["status"], json.dumps(result, ensure_ascii=False), job_id))
 
+    def search_source(self, task_id: str) -> dict | None:
+        """Read-only search identity/ownership; no jobs or application text."""
+        with self.lock, self._connect() as db:
+            row = db.execute("SELECT id,status,resume_id FROM browser_tasks WHERE id=?", (task_id,)).fetchone()
+            if not row:
+                return None
+            saved = db.execute("SELECT request_json FROM search_recovery WHERE task_id=?", (task_id,)).fetchone()
+            request = json.loads(saved[0]) if saved else {}
+        return {"task_id": row["id"], "status": row["status"], "resume_id": row["resume_id"],
+                "session_id": request.get("conversation_id")}
+
     def refilter_candidates(self, task_id: str, *, resume_id: str, session_id: str, limit: int = 30) -> list[dict]:
         """Read this completed search's recorded JDs, including previously unknown ones."""
         with self.lock, self._connect() as db:
@@ -831,8 +842,10 @@ class JobStore:
 
     def save_refilter_results(self, task_id: str, candidates: list[dict], verdicts: list[dict], constraints: dict) -> None:
         """Commit new evidence together; never leave a new status with an old receipt."""
+        from ..runtime.context import effect_checkpoint
+        from ..runtime.resilience import PreflightRefused
         if len(candidates) != len(verdicts):
-            raise ValueError("重新筛选结果不完整")
+            raise PreflightRefused("重新筛选结果不完整，未写入")
         with self.lock, self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             from ..core.result_groups import normalize_groups
@@ -842,11 +855,12 @@ class JobStore:
             for candidate in candidates:
                 row = db.execute("SELECT * FROM jobs WHERE id=?", (candidate["id"],)).fetchone()
                 if not row or self.review_fingerprint(dict(row)) != self.review_fingerprint(candidate):
-                    raise ValueError("职位证据已变化，请重新读取再筛选")
+                    raise PreflightRefused("职位证据已变化，请重新读取再筛选，未写入")
             checked_ids = {item["id"] for item in candidates}
             recorded = db.execute("SELECT DISTINCT j.* FROM jobs j JOIN browser_events e "
                 "ON j.id=json_extract(e.sample_json,'$.job_id') WHERE e.task_id=? "
                 "AND e.event_type IN ('job_stored','job_duplicate','candidate_recorded','job_refiltered')", (task_id,)).fetchall()
+            effect_checkpoint("started")
             # Even an unchanged filter digest cannot preserve old slots when the
             # count/quota changes. A bounded refresh admits only what it checked.
             for row in recorded:
@@ -892,6 +906,7 @@ class JobStore:
             db.execute("INSERT INTO browser_events(task_id,event_type,detail,sample_json,created_at) VALUES (?,?,?,?,?)",
                 (task_id, "refilter_constraints", "更新已有结果的筛选条件；未启动新搜索",
                  json.dumps(constraints, ensure_ascii=False), utc_now()))
+        effect_checkpoint("committed")
 
     def save_search_request(self, task_id: str, request: dict) -> None:
         """Canonical internal checkpoint, never a redacted event projection."""
@@ -1501,23 +1516,27 @@ class JobStore:
 
     def remove_selection(self, items: list[dict], *, session_id: str, run_id: str) -> dict:
         """Atomic reversible exclusion; retain jobs, facts and all send receipts."""
+        from ..runtime.context import effect_checkpoint
+        from ..runtime.resilience import PreflightRefused
         if not items or len(items) > 200 or len({item["id"] for item in items}) != len(items):
-            raise ValueError("移除对象数量无效")
+            raise PreflightRefused("移除对象数量无效，未写入")
         ids, now = [item["id"] for item in items], utc_now()
         with self.lock, self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             for item in items:
                 row = db.execute("SELECT * FROM jobs WHERE id=?", (item["id"],)).fetchone()
                 if not row or self.review_fingerprint(dict(row)) != item.get("content_hash"):
-                    raise ValueError("岗位证据已变化，未移除任何对象，请重新查看列表")
+                    raise PreflightRefused("岗位证据已变化，未移除任何对象，请重新查看列表")
                 queue = db.execute("SELECT session_id,status FROM mock_delivery_queue WHERE job_id=?", (item["id"],)).fetchone()
                 if queue and queue["session_id"] != session_id and queue["status"] in {"queued", "dispatched"}:
-                    raise ValueError("所选岗位由另一个会话执行中，未停止其他会话任务")
+                    raise PreflightRefused("所选岗位由另一个会话执行中，未停止其他会话任务")
+            effect_checkpoint("started")
             for item in items:
                 db.execute("UPDATE jobs SET board_visible=0,removed_at=COALESCE(removed_at,?) WHERE id=?", (now, item["id"]))
                 db.execute("INSERT OR REPLACE INTO job_removals VALUES (?,?,?,?,?)", (item["id"], session_id, run_id, item["content_hash"], now))
                 db.execute("UPDATE mock_delivery_queue SET status='cancelled',detail='用户移除岗位；已发送内容保留',updated_at=? WHERE job_id=? AND session_id=? AND status IN ('queued','dispatched','blocked')", (now, item["id"], session_id))
                 db.execute("UPDATE delivery_previews SET status='cancelled' WHERE job_id=? AND consumed_at IS NULL", (item["id"],))
+        effect_checkpoint("committed")
         return {"removed_ids": ids, "history_preserved": True}
 
     def review_selection(self, items: list[dict], *, session_id: str, run_id: str) -> None:

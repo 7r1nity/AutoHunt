@@ -209,6 +209,39 @@ class Contracts(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rows[self.ids[1]]["status"], "queued")
         self.assertEqual(rows[self.ids[2]]["status"], "queued")
 
+    async def test_remove_category_uses_jd_evidence_and_then_delivers_remaining(self):
+        original = self.provider.generate
+        async def generate(request):
+            payload = json.loads(request.user_message)
+            self.assertEqual(payload["selector"], "第三方或者外包岗位")
+            self.assertEqual(payload["selection_mode"], "matching")
+            return await original(request)
+        self.provider.generate = generate
+        with self.jobs._connect() as db:
+            db.execute("UPDATE jobs SET description=? WHERE id=?", ("由第三方签劳动合同，为客户企业提供外包研发服务。", self.ids[0]))
+        # Display the updated trusted facts, not a stale search snapshot.
+        entries = [{**item, "content_hash": self.jobs.review_fingerprint(self.jobs.get_job(item["id"]))} for item in self.snapshot_items]
+        self.context.dialogue = self.state = apply_operation(self.state, {"op": "snapshot", "topic": "applications", "kind": "job",
+            "source": "synthetic", "items": entries, "displayed": True})
+        self.model_result = {"status": "resolved", "matches": [{"ordinal": 1,
+            "evidence": [{"field": "description", "quote": "由第三方签劳动合同"}]}]}
+        removed = await self.call("job_remove_selection", {"selector": "第三方或者外包岗位", "selection_mode": "matching"})
+        self.assertEqual(removed.status, "ok")
+        self.assertEqual(removed.content["removed_ids"], [self.ids[0]])
+        delivered = await self.call("mock_delivery_start", {"selector": "移除后的剩余岗位", "selection_mode": "matching"})
+        self.assertEqual(delivered.status, "ok")
+        self.assertEqual(delivered.content["job_ids"], [self.ids[1], self.ids[2]])
+
+    async def test_remove_precondition_failure_never_reports_uncertain_effect(self):
+        self.jobs.enqueue_mock_deliveries([self.jobs.get_job(self.ids[0])], session_id="other",
+                                         resume_stamp=STAMP, binding={}, min_score=0)
+        result = await self.call("job_remove_selection", {"selector": "第1个"})
+        self.assertEqual(result.status, "error")
+        self.assertFalse(result.failure["effect_started"])
+        self.assertFalse(result.failure["uncertain"])
+        self.assertEqual(len(self.jobs.list_jobs()), 3)
+        self.assertEqual(self.jobs.mock_delivery_queue(session_id="other")[0]["status"], "queued")
+
     async def test_atomic_remove_on_stale_evidence(self):
         invalid = [{**self.snapshot_items[0]}, {**self.snapshot_items[1], "content_hash": "wrong"}]
         with self.assertRaises(ValueError):
