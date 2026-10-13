@@ -24,6 +24,11 @@ def _brief(job):
     return {key: job.get(key, "") for key in ("id", "title", "company", "location", "salary")}
 
 
+def is_remaining_selector(selector):
+    """Structural remainder reference only; not arbitrary job-filter semantics."""
+    return bool(re.fullmatch(r"(?:移除(?:之后|后)的?)?(?:剩余|其余|剩下)(?:的)?(?:岗位|职位)?", selector.strip()))
+
+
 async def resolve_job_targets(selector, *, dialogue, jobs, generate=None, snapshot_id=None,
                               selection_mode="single", history=()):
     """Return verified items or an explicit clarification; never guess on failure."""
@@ -42,8 +47,7 @@ async def resolve_job_targets(selector, *, dialogue, jobs, generate=None, snapsh
         facts[item["id"]] = job
         items.append({**item, "content_hash": jobs.review_fingerprint(job)})
     scope["items"] = items
-    remaining_words = {"剩余", "其余", "剩余的", "其余的", "剩余岗位", "其余岗位", "剩下的", "剩余的岗位"}
-    if selector in remaining_words:
+    if is_remaining_selector(selector):
         context = dialogue.get("job_target_context") or {}
         if context.get("snapshot_id") != scope["snapshot_id"]:
             raise TargetClarification("已展示列表发生变化，请明确哪一轮移除后剩余的岗位，未扩大投递范围。")
@@ -114,6 +118,8 @@ async def resolve_job_targets(selector, *, dialogue, jobs, generate=None, snapsh
                 "按名称、公司、地点、职责或技术描述辨认；这些/上一轮五个可根据最近助手列出的对象消歧。"
                 "不能仅凭公司名字断定外包；不要改变用户选择或忽略不匹配描述。single模式存在多个可能对象必须ambiguous，"
                 "matching模式才可选择所有符合描述者。不能凭推荐程度挑第一个。证据必须是对应候选字段的连续原文。"
+                "matching表示集合选择：上下文已唯一确定一个集合时，即使集合包含多个岗位也返回resolved；"
+                "ambiguous仅表示无法确定用户指向哪个对象或哪个集合，不表示集合中有多个成员。"
                 "仅输出JSON：{status: resolved|ambiguous|not_found, matches:[{ordinal:整数,evidence:[{field:title|company|location|salary|description|tags,quote:原文}]}]}。"
                 "ambiguity返回可能候选；信息不足不可猜。ordinal仅来自本次列表。",
                 user_message=payload, context="岗位目标解析，不能产生搜索/投递授权。",

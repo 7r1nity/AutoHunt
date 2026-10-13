@@ -18,7 +18,7 @@ from pathlib import Path
 from types import SimpleNamespace as NS
 
 from app.core.agent_tools import AgentToolRegistry, ToolLoopState
-from app.core.job_targets import resolve_job_targets, TargetClarification
+from app.core.job_targets import resolve_job_targets, TargetClarification, is_remaining_selector
 from app.jobs.store import JobStore
 from app.llm.base import LLMResult
 from app.runtime.context import RunContext, current_run
@@ -159,6 +159,26 @@ class Contracts(unittest.IsolatedAsyncioTestCase):
         result = await self.call("mock_delivery_start", {"selector": "剩余岗位"})
         self.assertEqual(result.status, "awaiting_user")
         self.assertFalse(self.calls)
+
+    async def test_model_remainder_wording_uses_recorded_removal_not_another_call(self):
+        await self.call("job_remove_selection", {"selector": "第2个"})
+        for selector in ("移除后的剩余岗位", "移除之后其余的职位", "剩下的岗位", "剩余的"):
+            result = await self.call("mock_delivery_start", {"selector": selector, "selection_mode": "matching"})
+            self.assertEqual(result.status, "ok")
+            self.assertEqual(self.calls[-1]["job_ids"], [self.ids[0], self.ids[2]])
+        self.assertFalse(self.model_calls)
+        self.assertFalse(is_remaining_selector("剩余的杭州岗位"))
+
+    async def test_matching_distinguishes_set_cardinality_from_actual_ambiguity(self):
+        requests = []
+        async def generate(request):
+            requests.append(request)
+            return LLMResult(json.dumps({"status": "ambiguous", "matches": [
+                {"ordinal": i, "evidence": [{"field": "company", "quote": f"合成企业{i}"}]} for i in (1, 3)]}), "scripted", "ambiguous")
+        with self.assertRaises(TargetClarification):
+            await resolve_job_targets("这些", dialogue=self.state, jobs=self.jobs, generate=generate)
+        self.assertIn("不表示集合中有多个成员", requests[0].instructions)
+        self.assertEqual(json.loads(requests[0].user_message)["selection_mode"], "matching")
 
     async def test_single_mode_does_not_accept_multiple_matches(self):
         self.model_result = {"status": "resolved", "matches": [
