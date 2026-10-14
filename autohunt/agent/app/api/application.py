@@ -334,6 +334,18 @@ async def run_steps(run_id: str, after: int = Query(default=0, ge=0)) -> list[di
         raise HTTPException(status_code=404, detail="运行记录不存在") from exc
 
 
+@app.get("/api/v1/runs/{run_id}/ledger")
+async def run_ledger(run_id: str, include_parents: bool = False) -> dict:
+    """Authenticated, read-only accounting; excludes prompts/parameters/text."""
+    from ..core.security import redact
+    try:
+        return redact(run_store.execution_ledger(run_id, include_parents=include_parents))
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="运行记录不存在") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 @app.post("/api/v1/runs/{run_id}/target-choice")
 async def choose_job_target(run_id: str, payload: TargetChoiceDecision) -> dict:
     try:

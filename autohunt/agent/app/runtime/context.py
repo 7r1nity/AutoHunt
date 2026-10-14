@@ -35,9 +35,35 @@ class RunContext:
     authorize_action: Callable | None = None
     resolve_approval: Callable | None = None
     effect_state: dict | None = None
+    # Passive records may be inherited by scoring workers; they cannot mutate a
+    # plan, acquire authority or publish conversation text.
+    diagnose: Callable[[str, dict], None] | None = None
 
 
 current_run: ContextVar[RunContext | None] = ContextVar("autohunt_run", default=None)
+diagnostic_scope: ContextVar[dict | None] = ContextVar("autohunt_diagnostic_scope", default=None)
+model_call_scope: ContextVar[dict | None] = ContextVar("autohunt_model_call_scope", default=None)
+
+
+def diagnostic_metadata() -> dict:
+    context = current_run.get()
+    if context is None:
+        return {}
+    scope = diagnostic_scope.get()
+    if scope is None:
+        authority = context.action_authority or {}
+        scope = {key: authority.get(key) for key in ("plan_id", "step_id", "execution_id", "revision")}
+    return {"run_id": context.run_id, "session_id": context.session_id, **scope, **(model_call_scope.get() or {})}
+
+
+def emit_diagnostic(kind: str, **data: Any) -> None:
+    if kind not in {"model_request", "model_response", "model_retry", "context_budget"}:
+        raise ValueError("仅允许被动模型/上下文诊断事件")
+    context = current_run.get()
+    if context:
+        # Do not route child observations through mutation-aware emit handlers.
+        sink = context.diagnose or context.emit
+        sink(kind, {**diagnostic_metadata(), **data})
 
 
 def active_run() -> RunContext | None:

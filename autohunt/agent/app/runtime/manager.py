@@ -479,6 +479,7 @@ class AgentRuntime:
                                          cancellation_requested=lambda: bool(self.store.get(run_id)["cancel_requested"]),
                                          authorize_action=lambda *args: self.authorize_action(run_id, *args),
                                          resolve_approval=lambda message: self.resolve_approval(run["session_id"], message),
+                                         diagnose=lambda kind, data: self.store.event(run_id, kind, data),
                                          enforce_task_scope=True)
                     token = current_run.set(context)
                     started = time.monotonic()
@@ -781,6 +782,7 @@ class AgentRuntime:
                             mutate_dialogue=lambda op: self.store.mutate_dialogue(run["session_id"], op),
                             retrieve_history=lambda query, limit: self.jobs.search_conversation_history(run["session_id"], query, limit=limit),
                             request_records=lambda: self.store.request_records(run["session_id"]),
+                            diagnose=lambda kind, data: self.store.event(run_id, kind, data),
                             enforce_task_scope=True, user_message=plan["original"],
                             cancellation_requested=lambda: bool(self.store.get(run_id)["cancel_requested"]))
                         context.authorize_action = lambda *args: self.authorize_action(run_id, *args)
@@ -834,7 +836,19 @@ class AgentRuntime:
             started = time.monotonic()
             self.store.event(run_id, "response_synthesis", {"status": "started", "plan_id": plan["id"]})
             async with self.slots:
-                answer = await compose(plan, steps, getattr(self.agent.tool_registry, "response_llm", None))
+                # Background presentation runs outside the action executor.
+                # Give diagnostics an identity, not execution authority.
+                from .context import diagnostic_scope
+                diagnostic = RunContext(run_id, asyncio.current_task(), lambda *_: None, lambda *_: None,
+                    session_id=run["session_id"], diagnose=lambda kind, data: self.store.event(run_id, kind, data))
+                run_token = current_run.set(diagnostic)
+                scope_token = diagnostic_scope.set({"plan_id": plan["id"], "revision": plan.get("revision"),
+                    "step_id": None, "execution_id": None})
+                try:
+                    answer = await compose(plan, steps, getattr(self.agent.tool_registry, "response_llm", None))
+                finally:
+                    diagnostic_scope.reset(scope_token)
+                    current_run.reset(run_token)
             prepared = {"fingerprint": fingerprint, "message": answer.text, "snapshot_ids": answer.snapshot_ids,
                 "mode": answer.mode, "reason": answer.reason, "elapsed_ms": round((time.monotonic()-started)*1000)}
             self.store.event(run_id, "plan_answer_prepared", prepared)

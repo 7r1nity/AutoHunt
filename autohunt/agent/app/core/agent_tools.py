@@ -387,6 +387,7 @@ class AgentToolRegistry:
             return AgentToolOutcome(name, "denied", reason, spec.effect,
                 failure={"code": state.denial_code, "retryable": False, "effect_started": False, "uncertain": False})
         receipt = {"plan_id": (context.action_authority or {}).get("plan_id"),
+                   "revision": (context.action_authority or {}).get("revision"),
                    "step_id": (context.action_authority or {}).get("step_id"),
                    "execution_id": (context.action_authority or {}).get("execution_id")} if context else {}
         executor_started = False

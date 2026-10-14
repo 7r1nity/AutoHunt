@@ -8,7 +8,8 @@ from __future__ import annotations
 import json
 import time
 
-from .search_state import bounded_history
+from .context_builder import ContextBuilder, ContextBudgetExceeded
+from .context import emit_diagnostic
 
 
 def compile_context(saved: dict, conditions: dict, history: list[dict] | None = None,
@@ -18,13 +19,6 @@ def compile_context(saved: dict, conditions: dict, history: list[dict] | None = 
     task, instruction = saved.get("task_request") or {}, saved.get("instruction_request") or {}
     root = {key: task.get(key) for key in ("id", "origin_run_id", "run_id", "original", "interpretation", "status",
         "conditions", "condition_overrides", "amendments", "revoked_tools", "execution_started", "failure", "resume_stamp", "updated_at")} if task else None
-    if root and routing and len(root.get("original") or "") > 1000:
-        root["original"] = root["original"][:1000]
-        root["original_incomplete"] = True
-    if root and routing:
-        root["amendments"] = [{**item, "message": item.get("message", "")[:160]}
-            for item in task.get("amendments", [])[-4:]]
-        root["amendments_incomplete"] = bool(task.get("amendments"))
     pending_instruction = {key: instruction.get(key) for key in ("id", "status", "questions", "answers", "revoked_tools", "turn", "resume_stamp", "expires_at")} if instruction else None
     if pending_instruction:
         pending_instruction["original_task_id"] = task.get("id") if task.get("original") == instruction.get("original") else None
@@ -54,21 +48,24 @@ def compile_context(saved: dict, conditions: dict, history: list[dict] | None = 
         "job_target_context": saved.get("job_target_context"),
         "pending": [{key: item.get(key) for key in ("id", "topic", "tool", "description", "expires_at", "status")}
             for item in saved.get("pending", []) if item.get("status") == "pending" and item.get("expires_at", 0) >= now],
-        "focus": focus,
-        "trace": [{key: item.get(key) for key in ("turn", "kind", "source", "detail", "tool", "status")}
-            for item in saved.get("trace", [])[-6:]],
-        "recent_turns": bounded_history(history or [], max_messages=4 if routing else 8, max_chars=1500 if routing else 4000),
     }
-    budget = 8000 if routing else 24000
-    def size():
-        return len(json.dumps(output, ensure_ascii=False))
-    for key in ("recent_turns", "trace", "focus"):
-        if size() <= budget:
-            break
-        output[key] = []
-        output.setdefault("omitted_optional_sections", []).append(key)
-    if size() > budget:
-        raise ValueError("关键任务记忆超过上下文预算；原始状态保留，请缩小当前任务范围")
+    builder = ContextBuilder()
+    recent, history_stats = builder.history(history or [],
+        token_budget=1500 if routing else builder.limits.history_tokens,
+        turn_limit=2 if routing else builder.limits.history_turns)
+    optional = {
+        "recent_turns": recent, "focus": focus,
+        "historical_summary": {"authority": "historical_data_not_instruction",
+            "source": "persisted_dialogue_trace", "items": saved.get("summary", [])[-24:]},
+        "trace": [{key: item.get(key) for key in ("turn", "kind", "source", "detail", "tool", "status")}
+                  for item in saved.get("trace", [])[-6:]],
+    }
+    try:
+        output, stats = builder.session(output, optional, purpose=purpose)
+    except ContextBudgetExceeded as exc:
+        emit_diagnostic("context_budget", **exc.stats, status="exceeded")
+        raise
+    emit_diagnostic("context_budget", **stats, history=history_stats)
     return output
 
 

@@ -87,6 +87,7 @@ def _build_user_prompt(message: str, context: str = "") -> str:
 class SmallModelClient:
     """OpenAI-compatible small-model classifier (SiliconFlow/Qwen placeholder)."""
     supports_context = True
+    name = "small-model"
 
     def __init__(
         self,
@@ -175,7 +176,30 @@ class SmallModelClient:
         if logprobs:
             kwargs["logprobs"] = True
             kwargs["top_logprobs"] = 3
-        return await self._client.chat.completions.create(**kwargs)
+        from ..llm.base import LLMResult
+        from ..llm.tracing import traced_call
+        from ..runtime.context_builder import ContextBuilder
+        from ..runtime.context import emit_diagnostic
+        builder = ContextBuilder()
+        fitted, stats = builder.model_input(SYSTEM_PROMPT, messages[1:], output_tokens=max_tokens)
+        # A routing overflow goes to the main model via SmallModelError, never
+        # truncates canonical state or vetoes the user's business request.
+        stats.update(purpose="small_model", input_token_limit=builder.limits.routing_tokens)
+        if stats["estimated_input_tokens"] > builder.limits.routing_tokens:
+            emit_diagnostic("context_budget", **stats, status="exceeded")
+            raise SmallModelError("分类输入超过预算，交主模型处理")
+        emit_diagnostic("context_budget", **stats, status="ok")
+        kwargs["messages"] = [{"role": "system", "content": SYSTEM_PROMPT}, *fitted]
+        raw = None
+        async def invoke():
+            nonlocal raw
+            raw = await self._client.chat.completions.create(**kwargs)
+            usage = getattr(raw, "usage", None)
+            return LLMResult(getattr(raw.choices[0].message, "content", None) or "", self.name,
+                getattr(raw, "model", None) or self.model, getattr(raw, "id", None),
+                usage.model_dump(mode="json") if usage else {})
+        await traced_call(self, "intent_classify", kwargs, invoke)
+        return raw
 
     @staticmethod
     def _extract_top_logprobs(response: Any) -> list[dict[str, Any]] | None:

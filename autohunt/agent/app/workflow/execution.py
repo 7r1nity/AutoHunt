@@ -159,6 +159,7 @@ async def advance(plan: dict, registry) -> list[dict]:
                 continue
             task_id = steps.get(step.get("evidence_step"), {}).get("task_id")
             authority = {"tool": step["tool"], "arguments": copy.deepcopy(step["arguments"]),
+                "revision": plan.get("revision"),
                 "command": step["command_quote"], "sources": [plan["original"], *plan["answers"]],
                 "resume_stamp": plan["resume_stamp"], "expires_at": plan["expires_at"],
                 "candidate": registry.candidate_state, "resumes": registry.resume_workspace,
@@ -192,9 +193,12 @@ async def advance(plan: dict, registry) -> list[dict]:
             authority["execution_id"] = step["execution_id"]
             previous_effect_state = context.effect_state
             context.effect_state = {"phase": "unknown"}
+            from ..runtime.context import diagnostic_scope
             claimed += 1
             persist(plan)  # Durable claim BEFORE the executor or any write.
             emit("plan_step", step_id=step["id"], tool=step["tool"], status="claimed", depends_on=step["depends_on"])
+            scope_token = diagnostic_scope.set({"plan_id": plan["id"], "revision": plan.get("revision"),
+                "step_id": step["id"], "execution_id": step["execution_id"]})
             try:
                 # A plan over 20 JDs needs the full analysis budget; a 100s cap cut
                 # it off mid-write and reported "结果未确认" instead of a plan.
@@ -247,6 +251,7 @@ async def advance(plan: dict, registry) -> list[dict]:
                 step.update(status="outcome_indeterminate" if step["failure"]["uncertain"] else "failed",
                     detail=f"步骤异常：{type(exc).__name__}；请查看执行记录，不自动重试")
             finally:
+                diagnostic_scope.reset(scope_token)
                 step["execution_phase"] = context.effect_state["phase"]
                 context.effect_state = previous_effect_state
                 context.user_message, context.action_authority = previous_message, previous_authority

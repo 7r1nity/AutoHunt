@@ -284,6 +284,26 @@ class RunStore:
             cursor = page[-1]["seq"]
         return result
 
+    def execution_ledger(self, run_id: str, *, include_parents: bool = False, model_rates: dict | None = None) -> dict:
+        from .ledger import execution_ledger
+        current = self.get(run_id)
+        runs, seen = [current], {run_id}
+        lineage_truncated = False
+        while include_parents and runs[-1].get("parent_id"):
+            parent_id = runs[-1]["parent_id"]
+            if parent_id in seen or len(runs) >= 32:
+                lineage_truncated = True
+                break
+            parent = self.get(parent_id)
+            if parent["session_id"] != current["session_id"]:
+                raise ValueError("执行账本不能读取其他会话的接续记录")
+            runs.append(parent)
+            seen.add(parent_id)
+        # Read projection only: no checkpoint/authority mutation or event writes.
+        result = execution_ledger(runs, [event for run in reversed(runs) for event in self.all_events(run["id"])],
+                                  model_rates=model_rates)
+        return {**result, "lineage_truncated": lineage_truncated}
+
     def events(self, run_id: str, after: int = 0) -> list[dict]:
         with self.connect() as db:
             rows = db.execute("SELECT * FROM agent_run_events WHERE run_id=? AND seq>? ORDER BY seq LIMIT 200", (run_id, after)).fetchall()

@@ -230,7 +230,8 @@ class ModelAndExecutionContracts(unittest.IsolatedAsyncioTestCase):
                                  f"月薪15000，电话：{PHONE}")
             await manager.generate(request)
             messages = [{"role": "assistant", "tool_calls": [{"id": DIGESTS[0], "function": {
-                "name": "synthetic", "arguments": json.dumps({"email": EMAIL, "salary_min": 15000})}}]}]
+                "name": "synthetic", "arguments": json.dumps({"email": EMAIL, "salary_min": 15000})}}]},
+                {"role": "tool", "tool_call_id": DIGESTS[0], "content": json.dumps({"email": EMAIL, "salary_min": 15000})}]
             original = copy.deepcopy(messages)
             await manager.generate_with_tools(instructions="执行只读", messages=messages, tools=[])
         self.assertNotIn(EMAIL, seen[0].user_message)

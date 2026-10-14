@@ -6,7 +6,7 @@ from openai import AsyncOpenAI
 from .base import LLMProvider, LLMRequest, LLMResult, LLMToolCall, LLMToolResult
 from ..core.security import redact_text
 from ..runtime.resilience import safe_retry
-from ..runtime.context import emit
+from ..runtime.context import emit_diagnostic
 
 
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
@@ -31,7 +31,7 @@ class DeepSeekProvider(LLMProvider):
         # replay received tokens. Outer planner/run deadlines remain authoritative.
         async with asyncio.timeout(60):
             return await safe_retry(lambda: self.client.chat.completions.create(**kwargs), retry_safe=True,
-                on_retry=lambda data: emit("model_retry", provider=self.name, **data))
+                on_retry=lambda data: emit_diagnostic("model_retry", provider=self.name, **data))
 
     async def generate(self, request: LLMRequest) -> LLMResult:
         kwargs: dict = {
@@ -82,6 +82,7 @@ class DeepSeekProvider(LLMProvider):
         instructions: str,
         messages: list[dict],
         tools: list[dict],
+        max_output_tokens: int = 8192,
     ) -> LLMToolResult:
         response = await self._completion(
             model=self.model,
@@ -89,6 +90,7 @@ class DeepSeekProvider(LLMProvider):
             tools=tools,
             tool_choice="auto",
             stream=False,
+            max_tokens=max_output_tokens,
         )
         message = response.choices[0].message
         calls = [
@@ -125,11 +127,14 @@ class DeepSeekProvider(LLMProvider):
             usage=response.usage.model_dump(mode="json") if response.usage else {},
         )
 
-    async def generate_with_tools_stream(self, *, instructions: str, messages: list[dict], tools: list[dict], on_delta) -> LLMToolResult:
+    async def generate_with_tools_stream(self, *, instructions: str, messages: list[dict], tools: list[dict], on_delta,
+                                         max_output_tokens: int = 8192) -> LLMToolResult:
         """Stream display text, assemble native tool calls, never expose reasoning."""
         stream = await self._completion(
             model=self.model, messages=[{"role": "system", "content": instructions}, *messages],
             tools=tools, tool_choice="auto", stream=True,
+            max_tokens=max_output_tokens,
+            stream_options={"include_usage": True},
         )
         content, reasoning, pending = "", "", ""
         calls: dict[int, dict] = {}

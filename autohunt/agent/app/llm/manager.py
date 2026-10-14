@@ -7,7 +7,8 @@ from .base import LLMProvider, LLMRequest, LLMResult, LLMToolResult
 from .deepseek_provider import DeepSeekProvider
 from .mock_provider import MockLLMProvider
 from ..memory.stores import LLMCredentialStore, LLMSettingsStore
-from ..runtime.context import active_run, emit
+from ..runtime.context import active_run, emit, emit_diagnostic
+from ..runtime.context_builder import ContextBuilder, ContextBudgetExceeded
 from .tracing import traced_call
 
 
@@ -25,6 +26,16 @@ class LLMManager:
         # Providers hold network clients; reuse them across concurrent calls instead
         # of constructing an AsyncOpenAI client per request (bulk matching fans out).
         self._providers: dict[tuple, LLMProvider] = {}
+        self.context_builder = ContextBuilder()
+
+    def _fit(self, instructions, messages, tools=None, output_tokens=None):
+        try:
+            fitted, stats = self.context_builder.model_input(instructions, messages, tools, output_tokens=output_tokens)
+        except ContextBudgetExceeded as exc:
+            emit_diagnostic("context_budget", **exc.stats, status="exceeded")
+            raise
+        emit_diagnostic("context_budget", **stats, status="ok")
+        return fitted
 
     def _provider(self) -> LLMProvider:
         config = self.settings_store.read()
@@ -53,7 +64,13 @@ class LLMManager:
             instructions=redact(request.instructions),
             user_message=redact(request.user_message),
             context=redact(request.context),
+            max_output_tokens=(self.context_builder.limits.output_tokens if request.max_output_tokens is None
+                               else request.max_output_tokens),
         )
+        self._fit(safe_request.instructions, [{"role": "user", "content": (
+            f"<trusted_context>\n{safe_request.context}\n</trusted_context>\n\n"
+            f"<user_request>\n{safe_request.user_message}\n</user_request>")}],
+            output_tokens=safe_request.max_output_tokens)
         return await traced_call(provider, "generate", asdict(safe_request), lambda: provider.generate(safe_request))
 
     def provider_for_consent(self, provider: str, model: str) -> LLMProvider:
@@ -75,11 +92,16 @@ class LLMManager:
             instructions=redact(instructions),
             # Include native tool-call argument JSON in the boundary projection.
             # The original messages/checkpoints remain untouched for execution.
-            messages=redact(messages),
+            messages=self._fit(redact(instructions), redact(messages), tools),
             tools=tools,
         )
         async def invoke():
             if active_run() and isinstance(provider, DeepSeekProvider):
-                return await provider.generate_with_tools_stream(**arguments, on_delta=lambda text: emit("delta", text=text))
+                return await provider.generate_with_tools_stream(**arguments,
+                    max_output_tokens=self.context_builder.limits.output_tokens,
+                    on_delta=lambda text: emit("delta", text=text))
+            if isinstance(provider, DeepSeekProvider):
+                return await provider.generate_with_tools(**arguments,
+                    max_output_tokens=self.context_builder.limits.output_tokens)
             return await provider.generate_with_tools(**arguments)
         return await traced_call(provider, "generate_with_tools", arguments, invoke)
