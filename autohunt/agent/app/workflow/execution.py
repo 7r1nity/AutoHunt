@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import hashlib
+import json
 import time
 import uuid
 
@@ -41,6 +43,12 @@ def render_step(step: dict) -> str:
     return public_reply(tool_reply(step["tool"], step["status"], result))
 
 
+def step_receipt(step: dict) -> str:
+    """Identity of an observed outcome, not text similarity or plan revision."""
+    evidence = {key: step.get(key) for key in ("id", "tool", "execution_id", "status", "arguments", "detail", "result", "failure")}
+    return hashlib.sha256(json.dumps(evidence, sort_keys=True, ensure_ascii=False, default=str).encode()).hexdigest()
+
+
 def completion_steps(plan: dict, events: list[dict]) -> list[dict]:
     """Do not republish a search report already delivered by its task watcher.
 
@@ -53,8 +61,26 @@ def completion_steps(plan: dict, events: list[dict]) -> list[dict]:
     rendered = {step_id for event in events if event["kind"] == "response"
                 and event["data"].get("plan_id") == plan["id"]
                 for step_id in event["data"].get("completed_step_ids", [])}
+    receipts = {receipt for event in events if event["kind"] in {"response", "workflow_summary"}
+                and event["data"].get("plan_id") == plan["id"]
+                for receipt in event["data"].get("presented_step_receipts", [])}
+    historical_steps = []
+    for event in events:
+        data = event["data"]
+        if event["kind"] == "plan_state" and data.get("plan", {}).get("id") == plan["id"]:
+            historical_steps = data["plan"]["steps"]
+        if event["kind"] != "response" or data.get("plan_id") != plan["id"] or "presented_step_receipts" in data:
+            continue
+        for outcome in (data.get("result") or {}).get("tool_events", []):
+            candidates = [s for s in historical_steps if s["tool"] == outcome.get("tool")
+                          and s["status"] == outcome.get("status")
+                          and str(s.get("detail") or "")[:300] == outcome.get("detail")]
+            if len(candidates) == 1:
+                receipts.add(step_receipt(candidates[0]))
     selected = []
     for step in plan["steps"]:
+        if step_receipt(step) in receipts:
+            continue
         if step["status"] == "completed" and (step.get("retained_result") or step["id"] in rendered):
             continue
         if step["status"] == "completed":
@@ -266,6 +292,7 @@ async def begin(plan: dict, registry) -> ChatResponse:
     # This selects content, but is not proof that a response was delivered.
     emit("plan_response_selection", plan_id=plan["id"],
          displayed_snapshot_ids=presentation.snapshot_ids,
+        presented_step_receipts=[step_receipt(step) for step in observed],
          completed_step_ids=[step["id"] for step in observed if step["status"] == "completed"])
     return ChatResponse(message=text, lane=AgentLane.APPLICATION,
         action="resume_proposal" if proposal else None, resume_proposal=proposal,

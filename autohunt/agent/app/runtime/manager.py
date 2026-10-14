@@ -823,6 +823,7 @@ class AgentRuntime:
     async def publish_plan_answer(self, run_id: str, plan: dict, steps: list[dict]):
         """Persist presentation before publishing; recovery never reruns tools."""
         from ..workflow.presentation import compose
+        from ..workflow.execution import step_receipt
         run = self.store.get(run_id)
         fingerprint = hashlib.sha256(json.dumps({"id": plan["id"], "revision": plan.get("revision", 0),
             "original": plan.get("original"), "answers": plan.get("answers"), "goals": plan.get("goals"),
@@ -844,7 +845,8 @@ class AgentRuntime:
         message = prepared["message"]
         if message and not self.store.has_event(run_id, "workflow_summary"):
             self.jobs.add_conversation_message("assistant", message, conversation_id=run["session_id"], run_id=f"plan:{run_id}")
-            self.store.event(run_id, "workflow_summary", {"message": message, "statistics_changed": True, "plans_changed": True})
+            self.store.event(run_id, "workflow_summary", {"message": message, "statistics_changed": True, "plans_changed": True,
+                "plan_id": plan["id"], "presented_step_receipts": [step_receipt(step) for step in steps]})
             for snapshot_id in prepared["snapshot_ids"]:
                 self.store.mutate_dialogue(run["session_id"], {"op": "display", "snapshot_id": snapshot_id})
 

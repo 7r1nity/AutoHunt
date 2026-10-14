@@ -12,6 +12,7 @@ import re
 
 from ..llm.base import LLMRequest
 from ..runtime.dialogue import resolve_reference
+from ..runtime.job_references import instruction_reference, job_reference
 
 
 class TargetClarification(ValueError):
@@ -35,6 +36,9 @@ async def resolve_job_targets(selector, *, dialogue, jobs, generate=None, snapsh
     if not selector or not selector.strip():
         raise TargetClarification("请说明要操作的岗位名称、描述或序号。")
     selector = selector.strip()
+    explicit = instruction_reference(instruction)
+    if explicit:
+        selector = explicit
     try:
         scope = resolve_reference(dialogue, kind="job", selector="全部已展示", snapshot_id=snapshot_id, read_only=True)
     except ValueError as exc:
@@ -72,7 +76,7 @@ async def resolve_job_targets(selector, *, dialogue, jobs, generate=None, snapsh
         return {**scope, "items": selected, "selector": selector, "resolution": "exact"}
     except ValueError as exc:
         # A known structural ordinal out of range is not a semantic description.
-        if re.fullmatch(r"(?:第|前)[一二三四五六七八九十百\d]+(?:个|条|份)?", selector):
+        if job_reference(selector):
             raise TargetClarification(str(exc)) from exc
     same_name = [item for item in items if selector in {item.get("title"), item.get("company")}]
     if len(same_name) > 1:

@@ -7,7 +7,7 @@ import re
 def job_followup_request(message: str, dialogue: dict) -> dict | None:
     text = message.strip().strip("。！？! ?")
     # Never let an informational shortcut swallow an action or multi-job analysis.
-    if re.search(r"搜索|检索|找工作|投递|申请|审核|沟通|发简历|修改|对比|比较|除了|不要|别给", text):
+    if re.search(r"搜索|检索|找工作|投递|申请|审核|沟通|发简历|修改|移除|删除|清除|对比|比较|除了|不要|别给", text):
         return None
     ordinal = re.findall(r"第[一二三四五六七八九十百\d]+(?:个|条|份)", text)
     if len(ordinal) > 1:
@@ -16,6 +16,13 @@ def job_followup_request(message: str, dialogue: dict) -> dict | None:
     detail = bool(re.search(r"详细|详情|完整|了解|介绍|JD", text, re.I))
     interest = bool(re.fullmatch(r"(?:我觉得|我看|我选|就选|看看|查看|请)?第[一二三四五六七八九十百\d]+(?:个|条|份)(?:不错|挺好|很好|可以|合适|有兴趣|的信息)?", text))
     view = "link" if link and not detail else "detail" if detail else "brief"
+    from ..runtime.job_references import instruction_reference, job_reference
+    reference = instruction_reference(text)
+    if reference and (link or detail):
+        return {"selector": reference, "view": view}
+    if (link or detail) and job_reference(re.sub(r"(?:的)?(?:链接|网址|详情)$", "", text).strip()):
+        target = re.sub(r"(?:的)?(?:链接|网址|详情)$", "", text).strip()
+        return {"selector": target, "view": view}
     if ordinal and (link or detail or interest):
         return {"selector": ordinal[0], "view": view}
     snapshots = [item for item in dialogue.get("snapshots", []) if item["kind"] == "job" and item.get("displayed", True)]

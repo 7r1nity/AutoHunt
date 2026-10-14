@@ -172,11 +172,13 @@ def _references(step, ids):
     return "来源：" + "、".join(lines) if lines else ""
 
 
-def _fallback(steps, reason=""):
+def _fallback(steps, reason="", supporting=()):
     # An unavailable model must not turn every intermediate read into a list.
     outputs = [step for step in steps if step["tool"] not in READ_TOOLS or step["status"] != "completed"
-               or _result(step).get("search_report")]
-    selected = outputs or steps
+               or _result(step).get("search_report") or step["id"] not in supporting]
+    selected = outputs
+    if not selected:
+        return Presentation("")
     snapshots = [_result(step)["snapshot_id"] for step in selected
                  if step["tool"] in {"job_results_read", "resume_document_read"} and _result(step).get("snapshot_id")]
     text = "\n\n".join(_render(step) + (f"\n分析范围：{_scope(_result(step))}。"
@@ -190,21 +192,21 @@ async def compose(plan: dict, steps: list[dict], llm=None) -> Presentation:
     """Synthesize selected, not-yet-published receipts; never mutate the plan."""
     if not steps:
         return Presentation("")
+    supporting = _supporting_ids(plan)
     content = [step for step in steps if step["status"] == "completed"
                and (step["tool"] in READ_TOOLS or step["tool"] == "learning_plan_generate")]
     if not content:
-        return _fallback(steps)
+        return _fallback(steps, supporting=supporting)
     if llm is None:
-        return _fallback(steps, "model_unavailable")
+        return _fallback(steps, "model_unavailable", supporting)
     try:
-        supporting = _supporting_ids(plan)
         payload = {"request": _clip(plan.get("original", "")), "amendments": _clip(plan.get("answers", [])),
             "goals": _clip(plan.get("goals", [])), "results": [
                 {**_evidence(step), "presentation_role": "background_only" if step["id"] in supporting else "deliverable"}
                 for step in steps]}
         context = json.dumps(payload, ensure_ascii=False)
         if len(context) > 48000:
-            return _fallback(steps, "presentation_budget")
+            return _fallback(steps, "presentation_budget", supporting)
         async with asyncio.timeout(TIMEOUT):
             response = await llm.generate(LLMRequest(instructions=INSTRUCTIONS,
                 user_message="请依据所附任务与执行结果生成最终回答。", context=context,
@@ -219,6 +221,9 @@ async def compose(plan: dict, steps: list[dict], llm=None) -> Presentation:
             step = by_id[section.step_id]
             if set(section.job_ids) - _sources(step).keys():
                 raise ValueError("source_outside_result_scope")
+            if step["tool"] == "job_detail_read":
+                texts.append(_render(step))  # Canonical JD/link cannot be omitted or invented.
+                continue
             if section.kind == "result":
                 if step["tool"] not in READ_TOOLS or section.text or section.job_ids:
                     raise ValueError("invalid_result_reference")
@@ -234,6 +239,8 @@ async def compose(plan: dict, steps: list[dict], llm=None) -> Presentation:
                     texts.append(refs)
         if not texts:
             raise ValueError("missing_answer")
+        texts.extend(_render(step) for step in content if step["id"] not in supporting
+                     and step["tool"] == "job_detail_read" and step["id"] not in seen)
         # Real receipts remain visible even if the model omits a branch or fails
         # to distinguish a queued external action from a confirmed submission.
         texts.extend(_receipt(step) for step in steps
@@ -242,4 +249,4 @@ async def compose(plan: dict, steps: list[dict], llm=None) -> Presentation:
     except asyncio.CancelledError:
         raise
     except Exception as exc:
-        return _fallback(steps, type(exc).__name__)
+        return _fallback(steps, type(exc).__name__, supporting)

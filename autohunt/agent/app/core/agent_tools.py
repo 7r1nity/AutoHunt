@@ -736,10 +736,10 @@ class AgentToolRegistry:
         kwargs = {"min_score": args.get("min_score", 0), "session_id": context.session_id, "task_id": task_id}
         selector = args.get("selector")
         explicit_ordinals = re.findall(r"(?:第|前)[一二三四五六七八九十百\d]+(?:个|条|份)", context.user_message)
-        if not selector and len(explicit_ordinals) == 1 and re.fullmatch(
+        if not selector and not args.get("target_step_id") and len(explicit_ordinals) == 1 and re.fullmatch(
                 r"(?:请|帮我)?(?:自动|直接|追加)?投递\s*(?:第|前)[一二三四五六七八九十百\d]+(?:个|条|份)[。！! ]*", context.user_message.strip()):
             selector = explicit_ordinals[0]  # Same stable reference contract as detail reads.
-        elif not selector and explicit_ordinals:
+        elif not selector and not args.get("target_step_id") and explicit_ordinals:
             raise TargetClarification("这条多目标指令尚未明确投递对象；请说明要投递的岗位，没有退化为批量投递。")
         if selector or args.get("target_step_id"):
             resolved = await self._resolve_job_targets({**args, "selector": selector or "已选岗位"})
@@ -967,16 +967,16 @@ class AgentToolRegistry:
         # user's actual ordinal/focused object.
         query = {key: value for key, value in args.items() if key != "view"}
         if explicit:
-            query = {"selector": explicit["selector"]}
-        ordinals = re.findall(r"第[一二三四五六七八九十百\d]+(?:个|条|份)", context.user_message)
-        if len(ordinals) == 1:
-            query = {"selector": ordinals[0]}
-        elif len(ordinals) > 1:
-            raise ValueError("请一次明确一个职位，不能把多个序号合并成一个对象")
-        if query["selector"].isdigit() and not re.search(r"(?:id\s*[=:：]|编号\s*)" + re.escape(query["selector"]) + r"\b", context.user_message, re.I):
-            raise ValueError("列表序号不是数据库 ID，请使用‘第几个’或职位名称")
+            query = {**query, "selector": explicit["selector"]}
+        from ..runtime.job_references import instruction_reference
+        reference = instruction_reference(context.user_message)
+        if reference:
+            query = {**query, "selector": reference}
         view = explicit["view"] if explicit else args.get("view", "detail")
-        resolved = resolve_reference(context.dialogue or {}, kind="job", read_only=True, **query)
+        try:
+            resolved = resolve_reference(context.dialogue or {}, kind="job", read_only=True, **query)
+        except ValueError as exc:
+            raise TargetClarification(str(exc)) from exc
         if len(resolved["items"]) != 1:
             raise ValueError("详情查询需要指定一个职位")
         job = self.jobs.get_job(int(resolved["items"][0]["id"]))

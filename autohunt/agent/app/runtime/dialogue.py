@@ -350,6 +350,8 @@ def apply_operation(saved: dict | None, operation: dict, *, clock: float | None 
 
 def resolve_reference(saved: dict, *, kind: str, selector: str, snapshot_id: str | None = None,
                       clock: float | None = None, read_only: bool = False) -> dict:
+    qualifier = ""
+    explicit_job_id = None
     state = DialogueState.model_validate(saved)
     now = time.time() if clock is None else clock
     snapshots = [item for item in state.snapshots if item.kind == kind and (read_only or item.expires_at >= now)
@@ -371,6 +373,13 @@ def resolve_reference(saved: dict, *, kind: str, selector: str, snapshot_id: str
             raise ValueError("此前选中的职位列表不可用，请说明职位名称或序号")
         return {"snapshot_id": selected_snapshot.id, "source": selected_snapshot.source,
                 "version": selected_snapshot.version, "kind": kind, "items": [selected_item]}
+    if kind == "job" and not any(selector == item.get(key) for item in snapshot.items for key in ("title", "company")):
+        from .job_references import job_reference
+        reference = job_reference(selector)
+        if reference:
+            selector, qualifier = reference
+            if selector.startswith("ID:"):
+                explicit_job_id = int(selector[3:])
     numerals = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
     ordinal = re.fullmatch(r"(前|第)([一二三四五六七八九十百\d]+)(?:个|条|份)?", selector.strip())
     if ordinal:
@@ -400,10 +409,15 @@ def resolve_reference(saved: dict, *, kind: str, selector: str, snapshot_id: str
             raise ValueError("指代可能对应多个对象，请说明序号或名称")
         selected = snapshot.items
     else:
-        selected = [item for item in snapshot.items if selector == str(item["id"])
+        selected = [item for item in snapshot.items if explicit_job_id == item["id"]
+            or (kind != "job" and selector == str(item["id"]))
             or selector == item.get("title") or selector == item.get("company")]
         if len(selected) != 1:
             raise ValueError("名称不存在或有多个同名对象，请说明序号")
+    if qualifier:
+        compact = lambda value: re.sub(r"\s+", "", str(value or "")).casefold()
+        if not all(any(compact(qualifier) in compact(item.get(key)) for key in ("title", "company")) for item in selected):
+            raise ValueError("序号与岗位名称/公司不一致，请核对原列表；没有改选其他岗位")
     return {"snapshot_id": snapshot.id, "source": snapshot.source, "version": snapshot.version,
             "kind": kind, "items": selected}
 
