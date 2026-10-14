@@ -4,6 +4,7 @@ import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from "re
 import { ImportedResume, ImportedResumeEditor } from "@/components/imported-resume";
 import { useAgentRuntime } from "@/lib/use-agent-runtime";
 import { RuntimePanel } from "@/components/runtime-panel";
+import { JobTargetChoices } from "@/components/job-target-choices";
 import { WorkspaceIcon } from "@/components/workspace-icon";
 import { interruptionCommand, terminalRun } from "@/lib/agent-runtime";
 import { createChatTurn, createMessageId } from "@/lib/chat-message";
@@ -1911,6 +1912,7 @@ export default function Home() {
                       </div>
                     </div>
                   ))}
+                  <JobTargetChoices runs={runtime.runs} onChoose={runtime.chooseTarget} stopping={runtime.stopping} notice={setNotice} />
                 </div>
                 <div className="chat-input-dock">
                   <div className="quick-actions">

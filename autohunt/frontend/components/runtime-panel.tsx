@@ -141,7 +141,7 @@ export function RuntimePanel({ runtime, notice, showSession = true }: { runtime:
         </div>)}
         <div className="runtime-actions">
           {!terminalRun(run.status) && <button className="button secondary compact" disabled={runtime.stopping} onClick={() => void runtime.interrupt().then(() => notice("已核验当前会话及投递队列停止")).catch((error) => notice(error.message))}>停止当前会话</button>}
-          {run.can_resume && <button className="button primary compact" onClick={() => void runtime.control(run, "resume").catch((error) => notice(error.message))}>{run.status === "waiting_user" ? "确认登录，继续" : run.status === "waiting_reply" ? "检查回复" : "恢复执行"}</button>}
+          {run.can_resume && !run.target_choices?.length && <button className="button primary compact" onClick={() => void runtime.control(run, "resume").catch((error) => notice(error.message))}>{run.status === "waiting_user" ? "确认登录，继续" : run.status === "waiting_reply" ? "检查回复" : "恢复执行"}</button>}
           {!terminalRun(run.status) && <button className="text-button" onClick={() => runtime.observe(run)}>重新连接</button>}
         </div>
         <Steps run={run} />

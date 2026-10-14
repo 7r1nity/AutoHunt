@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, model_validator
 
 from ..core.security import redact
 
@@ -30,6 +30,15 @@ class ApprovalDecision(BaseModel):
     approve: StrictBool
 
 
+class TargetChoiceDecision(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    conversation_id: str = Field(pattern=r"^[a-zA-Z0-9_-]{1,80}$")
+    choice_id: str = Field(pattern=r"^[a-f0-9]{32}$")
+    step_id: str = Field(pattern=r"^[a-zA-Z0-9_-]{1,40}$")
+    expected_revision: StrictInt = Field(ge=0)
+    job_ids: list[StrictInt] = Field(min_length=1, max_length=200)
+
+
 def public_run(run: dict) -> dict:
     # Checkpoints contain model context and are internal, never an HTTP response.
     return redact({key: value for key, value in run.items() if key not in {"payload", "checkpoint", "request_hash"}} | {
@@ -42,6 +51,14 @@ def public_run(run: dict) -> dict:
                        "detail": step.get("detail", "请核对本次动作范围")}
                       for step in ((run["checkpoint"] or {}).get("plan") or {}).get("steps", [])
                       if step.get("status") == "waiting_approval" and step.get("approval_id")],
+        "target_choices": [{"id": step["target_choice"]["id"], "step_id": step["id"],
+                            "expected_revision": ((run["checkpoint"] or {}).get("plan") or {}).get("revision", 0),
+                            "selection_mode": step["target_choice"].get("selection_mode", "single"),
+                            "options": [{key: item.get(key) for key in ("id", "title", "company", "location", "salary", "score")}
+                                        for item in step["target_choice"]["options"]]}
+                           for step in ((run["checkpoint"] or {}).get("plan") or {}).get("steps", [])
+                           if not run["cancel_requested"] and run["status"] not in {"completed", "failed", "cancelled", "timed_out", "interrupted", "outcome_indeterminate"}
+                           and step.get("status") == "waiting_input" and step.get("target_choice", {}).get("status") == "pending"],
         "can_resume": bool(run["status"] in {"waiting_user", "waiting_reply"} or (
             run["status"] in {"interrupted", "timed_out", "failed"} and not run["mutation_started"] and (
                 run["kind"] == "learning_plan" or (run["checkpoint"] or {}).get("phase") == "tool_loop"))),

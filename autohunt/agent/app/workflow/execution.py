@@ -174,7 +174,7 @@ async def advance(plan: dict, registry) -> list[dict]:
                 # it off mid-write and reported "结果未确认" instead of a plan.
                 timeout = 180 if step["tool"] in {"learning_plan_generate", "job_results_refilter"} or (
                     step["tool"] == "mock_delivery_start" and step["arguments"].get("filters")) else (
-                    45 if step["tool"] in {"mock_delivery_start", "job_remove_selection"} and step["arguments"].get("selector") else 20)
+                    45 if step["tool"] in {"mock_delivery_start", "job_remove_selection", "job_target_resolve"} and step["arguments"].get("selector") else 20)
                 async with asyncio.timeout(timeout):
                     outcome = await registry.execute(step["tool"], step["arguments"],
                         user_message=step["command_quote"], state=ToolLoopState())
@@ -189,6 +189,8 @@ async def advance(plan: dict, registry) -> list[dict]:
                 elif outcome.status == "awaiting_user":
                     step.update(status="waiting_input", wait_reason="business_input", detail=str(outcome.content),
                         questions=[str(outcome.content)], failure=outcome.failure)
+                    if outcome.target_choice:
+                        step["target_choice"] = outcome.target_choice
                     plan["questions"] = list(dict.fromkeys([*plan.get("questions", []), str(outcome.content)]))
                 else:
                     step.update(status="outcome_indeterminate" if outcome.status == "outcome_indeterminate" else "blocked",
@@ -255,7 +257,12 @@ async def begin(plan: dict, registry) -> ChatResponse:
     if pending:
         text += "\n\n待前置步骤完成后：" + "、".join(tool_label(tool) for tool in pending) + "。不会把启动、入队或提案视为最终完成。"
     if plan.get("questions"):
-        text += "\n\n待补充的分支：\n" + "\n".join(f"{index}. {question}" for index, question in enumerate(plan["questions"], 1))
+        card_questions = {q for step in plan["steps"]
+                          if step.get("status") == "waiting_input" and step.get("target_choice", {}).get("status") == "pending"
+                          for q in step.get("questions", [])}
+        unanswered = [q for q in plan["questions"] if q not in text and q not in card_questions]
+        if unanswered:
+            text += "\n\n待补充的分支：\n" + "\n".join(f"{index}. {question}" for index, question in enumerate(unanswered, 1))
     # This selects content, but is not proof that a response was delivered.
     emit("plan_response_selection", plan_id=plan["id"],
          displayed_snapshot_ids=presentation.snapshot_ids,

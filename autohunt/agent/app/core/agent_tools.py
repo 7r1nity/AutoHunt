@@ -4,6 +4,7 @@ import asyncio
 import json
 import re
 import time
+import uuid
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
@@ -83,6 +84,7 @@ class AgentToolOutcome:
     resume_proposal: Any | None = None
     failure: dict | None = None
     approval: dict | None = None
+    target_choice: dict | None = None
 
     def observation(self) -> str:
         return bounded_data({
@@ -201,9 +203,14 @@ class AgentToolRegistry:
             AgentToolSpec("job_detail_read", "按已展示职位简表的稳定序号或名称读取完整 JD 与原始链接；只读，不重新搜索，不投递。",
                 obj({"selector": {"type": "string", "maxLength": 120}, "snapshot_id": {"type": "string"},
                     "view": {"type": "string", "enum": ["brief", "detail", "link"]}}, ["selector"]), "read", self._job_detail_read),
-            AgentToolSpec("job_remove_selection", "按已展示岗位的名称、描述或序号移出申请看板并取消这些岗位尚未发送的自动投递。保留JD、搜索/投递历史及已发送内容；不是修改搜索条件或重新筛选。",
+            AgentToolSpec("job_target_resolve", "只定位并冻结用户要保留/投递的岗位，不执行写入。按分数、公司、描述或序号选择；不明确时返回可点击候选。投递某岗位且移除其他的，必须先此步骤，再让移除exclude_target_step_id和投递target_step_id引用此步骤，不能把某公司全部当保留集合。",
+                obj({"selector": {"type": "string", "minLength": 1, "maxLength": 500},
+                     "snapshot_id": {"type": "string"}, "scope": {"type": "string", "enum": ["displayed", "board"]},
+                     "selection_mode": {"type": "string", "enum": ["single", "matching"]}}, ["selector"]), "read", self._job_target_resolve),
+            AgentToolSpec("job_remove_selection", "移出申请看板并取消选中岗位未发送的投递。移除其余岗位必须exclude_target_step_id引用先完成的job_target_resolve，按冻结范围减去选中ID，不由公司名猜补集。保留JD与全部历史。",
                 obj({"selector": {"type": "string", "minLength": 1, "maxLength": 500},
                      "snapshot_id": {"type": "string"},
+                     "exclude_target_step_id": {"type": "string", "pattern": "^[a-zA-Z0-9_-]{1,40}$"},
                      "selection_mode": {"type": "string", "enum": ["single", "matching"], "description": "single定位唯一岗位；matching仅用于明确选择所有符合描述的岗位。"}}, ["selector"]),
                 "write", self._job_remove_selection),
             AgentToolSpec("search_state_read", "读取当前会话搜索条件，包括岗位词、城市、数量、最低月薪及来源；不是长期偏好。",
@@ -332,6 +339,7 @@ class AgentToolRegistry:
                     obj({"min_score": {"type": "integer", "minimum": 0, "maximum": 100},
                          "selector": {"type": "string", "minLength": 1, "maxLength": 500, "description": "指定已展示岗位的序号、名称、公司地点、职责描述、这些或移除后的剩余岗位。必须保留目标，不能退化为批量范围。"},
                          "selection_mode": {"type": "string", "enum": ["single", "matching"]},
+                         "target_step_id": {"type": "string", "pattern": "^[a-zA-Z0-9_-]{1,40}$", "description": "引用本计划已完成job_target_resolve的稳定选择，不重新按名称定位"},
                          "snapshot_id": {"type": "string"},
                          "filters": {**filter_schema(), "type": ["object", "null"], "description": "投递分支条件树，不改变搜索条件；未知不投递"}}), "external", self._mock_delivery_start),
                 AgentToolSpec("mock_delivery_cancel", "按明确停止命令取消本会话的模拟站投递队列，已发送结果保留。", obj({}), "external", self._mock_delivery_cancel),
@@ -432,12 +440,18 @@ class AgentToolRegistry:
             emit("tool_finished", tool=name, status="awaiting_user", detail=str(exc), failure=failure, **receipt)
             return AgentToolOutcome(name, "awaiting_user", str(exc), spec.effect, failure=failure)
         except TargetClarification as exc:
+            choice = None
             if exc.candidates:
-                dialogue_change("snapshot", topic="applications", kind="job", version=exc.version,
-                                displayed=True, items=exc.candidates)
+                candidate_state = dialogue_change("snapshot", topic="applications", kind="job", version=exc.version,
+                                                 displayed=True, items=exc.candidates)
+                choice = {"id": uuid.uuid4().hex, "snapshot_id": candidate_state["snapshots"][-1]["id"],
+                          "status": "pending", "options": exc.candidates,
+                          "selection_mode": arguments.get("selection_mode", "single") if name == "job_target_resolve" else "single",
+                          **getattr(exc, "target_scope", {})}
+                emit("job_target_choice", choice=choice, **receipt)
             dialogue_change("question", topic="applications", question=str(exc), missing_slots=["selector"])
             emit("tool_finished", tool=name, status="awaiting_user", detail=str(exc), **receipt)
-            return AgentToolOutcome(name, "awaiting_user", str(exc), spec.effect)
+            return AgentToolOutcome(name, "awaiting_user", str(exc), spec.effect, target_choice=choice)
         except MissingPlanScope as exc:
             dialogue_change("question", topic="learning", question=str(exc), missing_slots=["score_scope"])
             emit("tool_finished", tool=name, status="awaiting_user", detail=str(exc), **receipt)
@@ -727,26 +741,76 @@ class AgentToolRegistry:
             selector = explicit_ordinals[0]  # Same stable reference contract as detail reads.
         elif not selector and explicit_ordinals:
             raise TargetClarification("这条多目标指令尚未明确投递对象；请说明要投递的岗位，没有退化为批量投递。")
-        if selector:
-            resolved = await self._resolve_job_targets({**args, "selector": selector})
+        if selector or args.get("target_step_id"):
+            resolved = await self._resolve_job_targets({**args, "selector": selector or "已选岗位"})
             kwargs["job_ids"] = [item["id"] for item in resolved["items"]]
-            kwargs["selection_evidence"] = {"snapshot_id": resolved["snapshot_id"], "selector": selector,
+            kwargs["selection_evidence"] = {"snapshot_id": resolved["snapshot_id"], "selector": resolved["selector"],
                                            "allow_unverified": True,
                                            "target_fingerprints": {str(item["id"]): item["content_hash"] for item in resolved["items"]}}
         if args.get("filters") is not None:
             kwargs["filters"] = args["filters"]
         return await self.mock_workflow.queue_deliveries(**kwargs)
 
+    async def _job_target_resolve(self, args):
+        context = active_run()
+        scope = args.get("scope", "displayed")
+        source_args = dict(args)
+        if scope == "board":
+            board = self.jobs.list_jobs(limit=201)
+            if len(board) > 200:
+                raise TargetClarification("看板超过200个岗位，请先缩小处理范围；没有截断或移除岗位。")
+            entries = []
+            for row in board:
+                job = self.jobs.get_job(row.id)
+                entries.append({**{key: job.get(key) for key in ("id", "title", "company", "location", "salary", "score")},
+                                "content_hash": self.jobs.review_fingerprint(job)})
+            if not entries:
+                raise TargetClarification("看板没有可选择的岗位。")
+            plan = context.plan_reader() if context.plan_reader else None
+            previous_step = next((s for s in (plan or {}).get("steps", []) if s["id"] == (context.action_authority or {}).get("step_id")), {})
+            previous_choice = previous_step.get("target_choice") or {}
+            if args.get("snapshot_id") == previous_choice.get("snapshot_id") and previous_choice.get("scope") == "board":
+                if {item["id"] for item in entries} != {item["id"] for item in previous_choice.get("scope_items", [])}:
+                    raise TargetClarification("看板范围已变化，请重新查看后选择；没有移除岗位。")
+            state = dialogue_change("snapshot", topic="applications", kind="job", source="board-targets", items=entries, displayed=True)
+            scope_snapshot_id = state["snapshots"][-1]["id"]
+            source_args["snapshot_id"] = args.get("snapshot_id") or scope_snapshot_id
+        else:
+            source = resolve_reference(context.dialogue or {}, kind="job", selector="全部已展示", snapshot_id=args.get("snapshot_id"), read_only=True)
+            entries = [{**item, **{key: self.jobs.get_job(item["id"]).get(key) for key in ("location", "salary", "score")},
+                        "content_hash": self.jobs.review_fingerprint(self.jobs.get_job(item["id"]))} for item in source["items"]]
+            scope_snapshot_id = source["snapshot_id"]
+        try:
+            selected = await self._resolve_job_targets(source_args)
+        except TargetClarification as exc:
+            exc.target_scope = {"scope": scope, "scope_items": entries,
+                                "source_snapshot_id": scope_snapshot_id}
+            raise
+        if not {item["id"] for item in selected["items"]} <= {item["id"] for item in entries}:
+            raise TargetClarification("选择不属于本次看板范围，请重新查看岗位。")
+        selected.update(scope=scope, scope_items=entries, snapshot_id=scope_snapshot_id)
+        return {"selection": selected, "selected_ids": [item["id"] for item in selected["items"]],
+                "message": f"已定位 {len(selected['items'])} 个目标岗位；尚未移除或投递。"}
+
     async def _resolve_job_targets(self, args):
         context = active_run()
         if context is None:
             raise TargetClarification("岗位操作需要当前会话的已展示列表。")
-        provider = self.response_llm or getattr(self.browser, "llm", None)
-        history = self.jobs.conversation_history(conversation_id=context.session_id, limit=6) if hasattr(self.jobs, "conversation_history") else []
-        result = await resolve_job_targets(args["selector"], dialogue=context.dialogue or {}, jobs=self.jobs,
-            generate=getattr(provider, "generate", None), snapshot_id=args.get("snapshot_id"),
-            selection_mode=args.get("selection_mode", "single"), history=history)
-        if not result["items"]:
+        if args.get("target_step_id") or args.get("exclude_target_step_id"):
+            from ..workflow.target_selection import prepared_selection, excluded_selection
+            result = prepared_selection(context, self.jobs, args.get("target_step_id") or args["exclude_target_step_id"])
+            if args.get("exclude_target_step_id"):
+                result = excluded_selection(result, self.jobs)
+        else:
+            provider = self.response_llm or getattr(self.browser, "llm", None)
+            history = self.jobs.conversation_history(conversation_id=context.session_id, limit=6) if hasattr(self.jobs, "conversation_history") else []
+            result = await resolve_job_targets(args["selector"], dialogue=context.dialogue or {}, jobs=self.jobs,
+                generate=getattr(provider, "generate", None), snapshot_id=args.get("snapshot_id"),
+                selection_mode=args.get("selection_mode", "single"), history=history, instruction=context.user_message)
+        if not any(s["id"] == result["snapshot_id"] for s in (context.dialogue or {}).get("snapshots", [])):
+            state = dialogue_change("snapshot", topic="applications", kind="job", items=result.get("scope_items", result["items"]), displayed=True)
+            result = {**result, "snapshot_id": state["snapshots"][-1]["id"]}
+        if not result["items"] and not args.get("exclude_target_step_id"):
             raise TargetClarification("本次选择没有剩余可操作岗位；没有进行批量操作。")
         dialogue_change("job_targets", snapshot_id=result["snapshot_id"], selector=args["selector"],
                         job_ids=[item["id"] for item in result["items"]], action="resolved")
@@ -758,6 +822,8 @@ class AgentToolRegistry:
         effect_checkpoint("preparing")
         context = active_run()
         resolved = await self._resolve_job_targets(args)
+        if not resolved["items"]:
+            return {"removed_ids": [], "history_preserved": True, "message": "除选中岗位外没有需要移除的岗位。"}
         if context.cancellation_requested and context.cancellation_requested():
             raise PreflightRefused("任务已停止，未移除岗位")
         if self.mock_workflow is not None:

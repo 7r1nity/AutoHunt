@@ -195,6 +195,8 @@ def edited_plan(plan: dict, edit: RevisionDraft, registry, *, stamp: str, sessio
     condition_updates.extend(step for step in result["steps"] if step["tool"] == "search_state_update"
                              and step["id"] in added_ids)
     from .graph import depend_on
+    from .target_selection import bind_target_dependencies
+    bind_target_dependencies(result["steps"])
     removals = [step for step in result["steps"] if step["tool"] == "job_remove_selection" and step["id"] in added_ids]
     for delivery in [step for step in result["steps"] if step["tool"] == "mock_delivery_start"
                      and step["id"] in added_ids]:

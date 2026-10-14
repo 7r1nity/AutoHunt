@@ -17,7 +17,7 @@ LABELS = {
     "context_question_ask": "补充信息", "search_state_read": "搜索条件",
     "search_state_update": "更新搜索条件", "job_search_start": "职位搜索",
     "job_results_read": "职位结果", "job_stats_read": "职位统计", "job_results_refilter": "按新条件重新筛选",
-    "job_review_selection": "职位审核", "job_detail_read": "职位详情", "job_remove_selection": "移除选中岗位",
+    "job_review_selection": "职位审核", "job_detail_read": "职位详情", "job_remove_selection": "移除选中岗位", "job_target_resolve": "定位目标岗位",
     "resume_document_read": "主简历", "resume_propose_patch": "简历修改提案",
     "preference_read": "求职偏好", "preference_update": "更新求职偏好",
     "memory_read": "长期记忆", "mock_delivery_start": "模拟站自动投递",

@@ -305,6 +305,72 @@ class AgentRuntime:
         async with lock:
             return self._decide_approval(run_id, approval_id, session_id, approve)
 
+    async def choose_job_target(self, run_id: str, decision) -> dict:
+        """Choose recorded IDs under the session lock; no model/tools run here."""
+        session_id = decision.conversation_id
+        async with self.sessions.setdefault(session_id, asyncio.Lock()):
+            run = self.store.get(run_id)
+            plan = copy.deepcopy((run["checkpoint"] or {}).get("plan") or {})
+            step = next((s for s in plan.get("steps", []) if s["id"] == decision.step_id), None)
+            choice = step.get("target_choice") if step else None
+            if run["session_id"] != session_id or not choice or choice["id"] != decision.choice_id:
+                raise ValueError("岗位选择不属于此任务和会话，请刷新候选列表")
+            ids = list(dict.fromkeys(decision.job_ids))
+            if choice.get("status") == "selected":
+                if choice.get("selected_ids") == ids:
+                    return run
+                raise ValueError("这次选择已提交，不能替换已开始执行的目标")
+            if (run["cancel_requested"] or run["status"] in TERMINAL or plan.get("status") == "cancelled" or step.get("withdrawn") or step["status"] != "waiting_input"
+                    or plan.get("revision", 0) != decision.expected_revision):
+                raise ValueError("任务已停止、修订或不再等待此选择，请刷新")
+            from ..growth.requests import resume_stamp
+            if plan["resume_stamp"] != resume_stamp(self.resume_workspace.read_document(), self.agent.candidate_state):
+                raise ValueError("简历已变化，请核对新的目标范围")
+            options = {item["id"]: item for item in choice["options"]}
+            if not ids or not set(ids) <= options.keys() or choice.get("selection_mode", "single") == "single" and len(ids) != 1:
+                raise ValueError("请仅从这次候选列表选择允许数量的岗位")
+            selected = [options[ident] for ident in ids]
+            for item in selected:
+                job = self.jobs.get_job(item["id"])
+                if (job.get("removed_at") or self.jobs.review_fingerprint(job) != item["content_hash"]
+                        or item.get("score") is not None and job.get("score") != item["score"]):
+                    raise ValueError("候选岗位已变化，请刷新后选择；未继续执行")
+            answered = set(step.get("questions", []))
+            if step["tool"] == "job_target_resolve":
+                scope_items = choice.get("scope_items") or choice["options"]
+                selection = {"snapshot_id": choice.get("source_snapshot_id") or choice["snapshot_id"],
+                    "items": selected, "scope_items": scope_items, "scope": choice.get("scope", "displayed"),
+                    "selector": step["arguments"]["selector"], "resolution": "user_choice"}
+                if selection["scope"] == "board" and {row.id for row in self.jobs.list_jobs(limit=201)} != {item["id"] for item in scope_items}:
+                    raise ValueError("看板范围已变化，请刷新后选择；没有移除岗位")
+                step.update(status="completed", result={"selection": selection, "selected_ids": ids,
+                    "message": "已选定目标岗位；后续动作仍按原计划执行。"})
+            elif step["tool"] in {"mock_delivery_start", "job_remove_selection"}:
+                if len(ids) != 1:
+                    raise ValueError("此旧动作只支持选择一个目标，请重新说明多选范围")
+                ordinal = next(i for i,item in enumerate(choice["options"], 1) if item["id"] == ids[0])
+                step["arguments"] = {**step["arguments"], "selector": f"第{ordinal}个", "snapshot_id": choice["snapshot_id"]}
+                from ..security.action_grants import action_binding
+                step["authority_binding"] = action_binding(step["tool"], step["arguments"], session_id=session_id, requested=step.get("user_requested", False))
+                step["status"] = "pending"
+            else:
+                raise ValueError("此步骤不支持岗位选择")
+            choice.update(status="selected", selected_ids=ids)
+            step.update(questions=[], missing_slots=[], detail="已点击选定目标")
+            step.pop("failure", None)
+            plan["questions"] = [q for q in plan.get("questions", []) if q not in answered]
+            plan["revision"] = decision.expected_revision + 1
+            plan["status"] = "clarifying" if plan["questions"] else "running"
+            if not self.store.save_plan(run_id, plan, expected_revision=decision.expected_revision):
+                raise ValueError("任务已变化，请刷新")
+            self.store.update(run_id, status="waiting_user" if plan.get("paused") else "running")
+            self.store.event(run_id, "job_target_choice", {"choice_id": choice["id"], "step_id": step["id"],
+                             "status": "selected", "job_ids": ids, "revision": plan["revision"]})
+            self.store.invalidate_approvals(run_id, [step["id"]])
+            if not plan.get("paused"):
+                self.schedule(run_id, watch_only=True)
+            return self.store.get(run_id)
+
     def _decide_approval(self, run_id: str, approval_id: str, session_id: str, approve: bool) -> dict:
         from ..growth.requests import resume_stamp
         run = self.store.get(run_id)

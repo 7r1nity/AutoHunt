@@ -4,7 +4,11 @@ export type AgentRun = {
   browser_id: string | null; created_at: string;
   plan_steps?: Array<{ id: string; tool: string; depends_on: string[]; status: string; detail?: string }>;
   approvals?: Array<{ id: string; tool: string; arguments: Record<string, unknown>; detail: string }>;
+  target_choices?: TargetChoice[];
 };
+
+export type TargetChoice = { id: string; step_id: string; expected_revision: number; selection_mode: "single" | "matching";
+  options: Array<{ id: number; title: string; company: string; location?: string; salary?: string; score?: number }> };
 
 export type RunEvent = { seq: number; kind: string; data: Record<string, unknown> };
 

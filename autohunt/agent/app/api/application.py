@@ -45,7 +45,7 @@ from ..core.dependencies import (
 )
 from ..core.dependencies import router_store
 from ..runtime.history_reset import HistoryResetter, ResetBusy, RESET_PATH
-from ..runtime.models import RunCreate, SessionCreate, ApprovalDecision, public_run
+from ..runtime.models import RunCreate, SessionCreate, ApprovalDecision, TargetChoiceDecision, public_run
 from ..delivery.automation import UnsupportedDeliverySite
 from ..jobs.analysis import analyze_job
 from ..core.middleware import (
@@ -332,6 +332,16 @@ async def run_steps(run_id: str, after: int = Query(default=0, ge=0)) -> list[di
         return run_store.public_events(run_id, after)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="运行记录不存在") from exc
+
+
+@app.post("/api/v1/runs/{run_id}/target-choice")
+async def choose_job_target(run_id: str, payload: TargetChoiceDecision) -> dict:
+    try:
+        return public_run(await agent_runtime.choose_job_target(run_id, payload))
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="任务或岗位不存在") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @app.post("/api/v1/runs/cancel-all")

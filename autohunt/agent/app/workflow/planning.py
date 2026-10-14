@@ -204,6 +204,8 @@ async def plan_request(llm, registry, message: str, *, dialogue: dict, condition
             "正在执行或结果未知的旧步骤不能改写/重放；可独立execute一个新的明确本地岗位操作，不继承旧失败前置步骤，不擅自恢复旧投递。"
             "result_sources列出真实搜索回执；task_id只能从这些记录中选择或省略由应用绑定。聊天消息source/run_id、计划id、snapshot_id、步骤id均不是搜索task_id，不能复制到refilter参数。"
             "移除这些、其余投递需要两个有序步骤：job_remove_selection后mock_delivery_start(selector=剩余岗位)，后者依赖前者。只排除投递条件不等于岗位移除。"
+            "相反，投递/保留某岗位、其他都从看板移除：先job_target_resolve(selector保留完整公司、分数、描述等,scope=board)，再job_remove_selection(selector=其余岗位,exclude_target_step_id=定位步骤ID)，投递使用target_step_id=同一定位步骤ID。定位未确定之前不得移除。"
+            "‘82分的某公司’是精确分数定位，必须保留82分于selector，不改成只有公司名+min_score=82；82分以上才是投递门槛。‘其他’是看板ID集合减去用户选中ID，不是公司名称之外的岗位。"
             "两个工具不要混传字段：job_results_refilter仅task_id；job_remove_selection无min_score/filters；mock_delivery_start无job_ids，目标通过selector定位。"
             "指定单个岗位投递时，除非本轮同时提出额外筛选，不要复制上一轮的批量投递filters。"
             "正式5份、实习5份等分组请求必须生成result_groups，每组label/count/filters；类别必须require，不可用allow替代，result_limit为各组数量之和。共同城市、薪资、排除条件仍放在搜索filters。只修改总数且不再要求分组时清除旧result_groups。"
@@ -347,6 +349,8 @@ def _validate_draft(draft: RequestDraft, registry, message: str, *, dialogue: di
     revoked_tools = list(previous.get("revoked_tools", [])) if continued else []
     searches = [step for step in steps if step["tool"] == "job_search_start"]
     removals = [step for step in steps if step["tool"] == "job_remove_selection"]
+    from .target_selection import bind_target_dependencies
+    bind_target_dependencies(steps)
     for delivery in [step for step in steps if step["tool"] == "mock_delivery_start"]:
         for removal in removals:
             depend_on(steps, delivery, removal)

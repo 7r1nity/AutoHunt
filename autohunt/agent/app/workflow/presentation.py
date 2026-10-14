@@ -18,7 +18,7 @@ from ..core.replies import public_reply, tool_reply
 from ..llm.base import LLMRequest
 
 TIMEOUT = 18
-READ_TOOLS = frozenset({"job_results_read", "job_detail_read", "job_stats_read",
+READ_TOOLS = frozenset({"job_target_resolve", "job_results_read", "job_detail_read", "job_stats_read",
     "resume_document_read", "context_state_read", "context_history_read",
     "search_state_read", "preference_read", "memory_read", "mock_delivery_status"})
 
@@ -69,6 +69,8 @@ def _result(step):
 
 
 def _render(step):
+    if step.get("status") == "waiting_input" and step.get("target_choice", {}).get("status") == "pending":
+        return "存在多个可能岗位，请点击下方候选选择；也可以按候选序号文字回答。目标确认前，关联的移除与投递不会执行。"
     if step["tool"] == "job_search_start" and step["status"] == "completed":
         return "职位搜索已完成；岗位明细与统计以本轮搜索报告为准。"
     value = step.get("result") if step["status"] in {

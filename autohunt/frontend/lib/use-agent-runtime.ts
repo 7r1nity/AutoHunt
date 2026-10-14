@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { AgentRun, RunEvent, createRun, followRun, terminalRun } from "./agent-runtime";
+import { AgentRun, RunEvent, TargetChoice, createRun, followRun, terminalRun } from "./agent-runtime";
 
 export type SessionSearchState = { queries: string[]; locations: string[]; result_limit: number | null;
   salary_min: number | null; query_source: string; revision: number;
@@ -56,7 +56,7 @@ export function useAgentRuntime() {
           const task = event.data.task as { detail?: string };
           setProgress((current) => ({ ...current, [run.id]: task.detail ?? "浏览器任务执行中" }));
         }
-        if (event.kind === "status" || event.kind === "browser" || event.kind === "delivery" || event.kind === "confirmation" || event.kind === "action_approval" || event.kind === "plan_step") {
+        if (event.kind === "status" || event.kind === "browser" || event.kind === "delivery" || event.kind === "confirmation" || event.kind === "action_approval" || event.kind === "plan_step" || event.kind === "job_target_choice") {
           void refresh(run.session_id);
         }
         if (event.kind === "response") {
@@ -201,6 +201,27 @@ export function useAgentRuntime() {
     finally { if (controls.current.get(key) === request) controls.current.delete(key); }
   }
 
+  async function chooseTarget(run: AgentRun, choice: TargetChoice, jobIds: number[]) {
+    const session = sessionId;
+    const key = `choice:${run.id}:${choice.id}`;
+    const existing = controls.current.get(key);
+    if (existing) return existing;
+    const pending = (async () => {
+      const response = await fetch(`/api/agent/runs/${run.id}/target-choice`, { method: "POST",
+        headers: { "Content-Type": "application/json" }, body: JSON.stringify({ conversation_id: session,
+          choice_id: choice.id, step_id: choice.step_id, expected_revision: choice.expected_revision, job_ids: jobIds }) });
+      const next = await response.json() as AgentRun & { detail?: string };
+      if (!response.ok) throw new Error(next.detail ?? "选择未提交，请刷新候选列表");
+      if (currentSession.current === session) setRuns(current => current.map(item => item.id === next.id ? next : item));
+      if (!terminalRun(next.status)) observe(next);
+      await refresh(session);
+      return next;
+    })();
+    controls.current.set(key, pending);
+    try { return await pending; }
+    finally { if (controls.current.get(key) === pending) controls.current.delete(key); }
+  }
+
   async function interrupt(scope: "session" | "all" = "session") {
     const session = sessionId;
     const stopKey = scope === "all" ? "*" : session;
@@ -265,5 +286,5 @@ export function useAgentRuntime() {
 
   // Queued deliveries can outlive their completed chat run; stop must remain available.
   const canInterrupt = true;
-  return { sessionId, setSessionId, sessions, searchState, resetSearchState, updateSearchSource, dialogue, resetContext, runs, progress, busyRun, stopping, canInterrupt, interrupt, notifications, currentSession, newSession, execute, control, observe };
+  return { sessionId, setSessionId, sessions, searchState, resetSearchState, updateSearchSource, dialogue, resetContext, runs, progress, busyRun, stopping, canInterrupt, interrupt, notifications, currentSession, newSession, execute, control, chooseTarget, observe };
 }
