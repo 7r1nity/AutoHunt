@@ -8,6 +8,7 @@ mock-site/      模拟招聘网站：FastAPI、静态页面、模拟职位
 ```
 
 - [AutoHunt 安装与启动](autohunt/README.md)：后端 `8000`，前端 `3000`；先进入 `autohunt/` 执行安装命令。
+- [AutoHunt 详细技术文档](autohunt/docs/technical-documentation.md)：项目定位、功能、技术选型、动态规划与记忆、投递/成长闭环、测试证据和能力边界。
 - [模拟网站安装与启动](mock-site/README.md)：网站 `8080`；进入 `mock-site/` 启动，不依赖 Agent 服务。
 - [变更记录](autohunt/CHANGELOG.md)。
 

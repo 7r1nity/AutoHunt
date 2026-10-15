@@ -76,6 +76,7 @@ pnpm --dir frontend dev --hostname 127.0.0.1
 
 | 目录/文档 | 用途 |
 |---|---|
+| [详细技术文档](docs/technical-documentation.md) | 当前代码基线的32章技术手册：定位、选型、模块实现、任务/投递/成长闭环、测试指标与面试说明 |
 | [Changelog](CHANGELOG.md) | 已交付变更、验证范围及尚未解决的问题 |
 | `frontend/` | 工作台与同源后端代理 |
 | `agent/app/core`、`intent`、`llm` | 编排、工具策略、路由、模型 |
