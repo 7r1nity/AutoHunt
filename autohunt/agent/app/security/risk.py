@@ -107,6 +107,19 @@ def grade_action(tool: str, arguments: dict[str, Any] | None = None, *,
     return ActionRisk(SecurityRisk.UNKNOWN, tool, "该工具尚未分级；必须有意识地分类，不得默认放行")
 
 
+def broad_delivery_scope(tool: str, arguments: dict[str, Any] | None = None) -> bool:
+    """Whether a mock delivery batch has no explicit score, filter or target bound.
+
+    A broad batch may still be a legitimate request, but it must not inherit an
+    auto-approval meant for a bounded scope. The check is structural: it never
+    tries to interpret the user's sentence.
+    """
+    if tool != "mock_delivery_start":
+        return False
+    arguments = arguments or {}
+    return not any(arguments.get(key) for key in ("selector", "target_step_id", "filters", "min_score"))
+
+
 # --------------------------------------------------------------------------- policy
 
 class ConfirmationPolicy(ABC):

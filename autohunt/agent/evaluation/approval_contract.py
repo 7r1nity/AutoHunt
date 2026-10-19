@@ -99,6 +99,19 @@ class DurableApprovalContracts(unittest.IsolatedAsyncioTestCase):
             watcher.cancel()
             await asyncio.gather(watcher, return_exceptions=True)
 
+    async def test_broad_delivery_scope_requires_confirmation_even_when_requested(self):
+        value = self.plan(requested=True)
+        value["steps"][0]["arguments"] = {}
+        self.store.save_plan(self.run["id"], value)
+        await self.tick(value)
+        step = value["steps"][0]
+        self.assertEqual(step["status"], "waiting_approval")
+        self.assertEqual(self.calls, [])
+        record = self.store.approvals(self.run["id"])[0]
+        self.assertEqual((record["status"], record["source"]), ("pending", "confirmation"))
+        self.assertEqual(record["snapshot"]["arguments"], {})
+        self.assertIn("未设置分数门槛", step["detail"])
+
     async def test_explicit_scope_runs_without_second_confirmation_and_without_task_ttl_expiry(self):
         value = self.plan(requested=True)
         await self.tick(value)

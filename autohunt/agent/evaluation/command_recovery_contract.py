@@ -243,7 +243,7 @@ class QueueScopeContracts(unittest.IsolatedAsyncioTestCase):
             row["filter_evidence"]["facts_digest"] = filter_facts_digest(row)
             ident, _ = self.jobs.upsert_job(row)
             self.rows.append(self.jobs.get_job(ident))
-        self.jobs.jobs_for_resume_analysis = lambda *args, **kwargs: self.rows
+        self.jobs.resume_analysis_evidence = lambda *args, **kwargs: (self.rows, {})
         async def unknown(request):
             self.model_calls.append(request)
             return LLMResult('{"conditions":[{"index":0,"status":"unknown","reason":"信息不足","evidence":[]}]}', "scripted", "fixture")

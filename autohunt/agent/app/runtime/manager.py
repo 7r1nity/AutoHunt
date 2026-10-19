@@ -12,6 +12,7 @@ from .search_state import prepare_search_state
 from .store import RunStore, TERMINAL
 from .control import stop_scope
 from ..core.models import BrowserSearchRequest
+from ..security.risk import broad_delivery_scope
 from .resilience import WatchLimits, wait_expired
 
 
@@ -28,6 +29,10 @@ def _approval_detail(tool: str, arguments: dict) -> str:
     if tool == "job_remove_selection":
         return f"请确认移除范围：{arguments.get('selector', '尚未指定')}。仅移出申请看板并停止选中岗位未完成的投递；不会删除JD或撤回已发送内容。"
     if tool == "mock_delivery_start":
+        if broad_delivery_scope(tool, arguments):
+            return ("本次投递未设置分数门槛、筛选条件或指定岗位，将按当前已搜索岗位批量入队。"
+                    "请确认此范围。\n\n确认后加入自动队列：先沟通，招聘方回复后发送已授权简历；"
+                    "可随时停止，在任务记录中查看进度。")
         parts = []
         count = arguments.get("expected_count")
         if isinstance(count, int) and count > 0:
@@ -281,7 +286,8 @@ class AgentRuntime:
         run = self.store.get(run_id)
         step_id, snapshot, requested = self.action_snapshot(run_id, tool, arguments)
         record = self.store.ensure_approval(run_id, run["session_id"], step_id, snapshot,
-                                           requested=requested and risk != "UNKNOWN" and not always)
+                                           requested=requested and risk != "UNKNOWN" and not always
+                                           and not broad_delivery_scope(tool, arguments))
         if record["status"] == "pending":
             # Persist wait BEFORE returning to the caller, including tool-loop callers.
             current = self.store.get(run_id)

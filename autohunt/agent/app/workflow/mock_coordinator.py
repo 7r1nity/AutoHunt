@@ -223,18 +223,34 @@ class MockWorkflowCoordinator:
         document = self.resume.read_document()
         document_digest = resume_document_digest(document)
         explicit = job_ids is not None and selection_evidence is not None
-        evidence = ([self.jobs.get_job(job_id) for job_id in dict.fromkeys(job_ids)] if explicit else
-                    self.jobs.jobs_for_resume_analysis(profile.resume_id, limit=200, min_score=min_score, task_id=task_id))
+        gaps: dict[str, int] = {}
+        if explicit:
+            evidence = [self.jobs.get_job(job_id) for job_id in dict.fromkeys(job_ids)]
+        else:
+            evidence, gaps = self.jobs.resume_analysis_evidence(
+                profile.resume_id, limit=200, min_score=min_score, task_id=task_id)
         target_hashes = (selection_evidence or {}).get("target_fingerprints", {})
         if explicit and any(target_hashes.get(str(job["id"])) and target_hashes[str(job["id"])] != self.jobs.review_fingerprint(job) for job in evidence):
             raise PreflightRefused("定位后岗位内容变化，未加入投递队列，请重新查看")
-        eligible = [self.jobs.get_job(item["id"]) for item in evidence
-                    if item["stage"] in {"review", "applying"}
-                    and not self.jobs.get_job(item["id"]).get("removed_at")
-                    and item.get("score", 0) >= min_score
-                    and (item.get("filter_status", "pass") == "pass" or explicit and item.get("filter_status") == "unknown")
-                    and self.delivery.supports(item["source_url"])
-                    and self.jobs.latest_delivery_status_for_job(item["id"]) is None]
+        eligible, already_delivered, not_applicable = [], 0, 0
+        for item in evidence:
+            job = self.jobs.get_job(item["id"])
+            if item.get("score", 0) < min_score:
+                not_applicable += 1
+                continue
+            if item["stage"] not in {"review", "applying"} or job.get("removed_at"):
+                not_applicable += 1
+                continue
+            if not self.delivery.supports(item["source_url"]):
+                not_applicable += 1
+                continue
+            if item.get("filter_status", "pass") != "pass" and not (explicit and item.get("filter_status") == "unknown"):
+                not_applicable += 1
+                continue
+            if self.jobs.latest_delivery_status_for_job(item["id"]) is not None:
+                already_delivered += 1
+                continue
+            eligible.append(job)
         scope_evidence, excluded, unknown = {}, 0, 0
         if filters is not None:
             from ..core.job_filters import evaluate_filter, validate_filter
@@ -287,13 +303,48 @@ class MockWorkflowCoordinator:
         effect_checkpoint("committed")
         self.wakeup.set()
         from ..core.job_filters import filter_summary
+        insufficient = (gaps.get("unknown_filter", 0) + gaps.get("stale_filter", 0)
+                        + gaps.get("missing_job", 0) + gaps.get("missing_score", 0)
+                        + gaps.get("salary_unverified", 0) + unknown)
+        no_match = (gaps.get("below_min_score", 0) + gaps.get("above_max_score", 0)
+                    + gaps.get("salary_below_min", 0) + gaps.get("removed", 0)
+                    + excluded + not_applicable)
+        queued = len(ids)
+        if queued:
+            reason = "queued"
+        elif insufficient:
+            reason = "insufficient_evidence"
+        elif gaps.get("no_search_evidence"):
+            reason = "no_search_evidence"
+        elif gaps.get("no_candidates"):
+            reason = "no_candidates"
+        else:
+            reason = "no_match"
         scope_label = (f"匹配分≥{min_score}" if min_score else "不设额外分数门槛") + ("；" + filter_summary(filters) if filters else "")
-        return {"queued": len(ids), "job_ids": ids, "min_score": min_score, "filters": filters,
-                "excluded": excluded, "unknown": unknown,
-                "message": f"已将 {len(ids)} 个{('指定' if explicit else '符合本次投递范围的')}模拟站职位加入队列（不是已投递）。范围：{scope_label}。"
-                + (f"未入队：不符合{excluded}个，信息不足{unknown}个。" if filters else "") +
-                "逐个快速发起沟通，各岗位同时等待HR回复；收到回复并核实按钮解锁后自动发送已授权简历。验证需人工接管，结果不确定不会重放。"
-                "仅处理当前简历的已搜索职位，不启用每日任务，也不自动添加未来职位。可说「停止自动投递」。"}
+        if reason == "queued":
+            message = (f"已将 {queued} 个{('指定' if explicit else '符合本次投递范围的')}模拟站职位加入队列（不是已投递）。范围：{scope_label}。"
+                       + (f"另有 {insufficient} 个因证据不足未入队。" if insufficient else "")
+                       + (f"未入队：不符合{excluded}个，信息不足{unknown}个。" if filters else "")
+                       + "逐个快速发起沟通，各岗位同时等待HR回复；收到回复并核实按钮解锁后自动发送已授权简历。验证需人工接管，结果不确定不会重放。"
+                       "仅处理当前简历的已搜索职位，不启用每日任务，也不自动添加未来职位。可说「停止自动投递」。")
+        elif reason == "insufficient_evidence":
+            message = (f"已找到候选岗位，但其中 {insufficient} 个缺少投递所需证据"
+                       "（分数、薪资、JD 或筛选状态），无法确认是否符合；本批次未入队。"
+                       "请选择：刷新已有结果、补一次最小范围搜索，或明确接受未知条件。")
+        elif reason == "no_search_evidence":
+            message = "当前简历还没有可用的已完成搜索结果；请先搜索，或指定 source_task_id。"
+        elif reason == "no_candidates":
+            message = "这轮搜索没有可投递的岗位记录；未入队。"
+        elif already_delivered and not no_match:
+            message = f"这些岗位已有投递记录（{already_delivered} 个），未重复入队。"
+        else:
+            message = ("没有符合条件的岗位；未入队。"
+                       + (f"不符合{excluded}个，信息不足{unknown}个。" if filters else "")
+                       + (f"已有投递记录 {already_delivered} 个。" if already_delivered else ""))
+        return {"queued": queued, "job_ids": ids, "min_score": min_score, "filters": filters,
+                "excluded": excluded, "unknown": unknown, "insufficient": insufficient,
+                "no_match": no_match, "already_delivered": already_delivered,
+                "reason": reason, "message": message}
 
     async def _operation(self, session_id: str, factory, *, job_id: int | None = None, queued: bool = True):
         if session_id in self.stopping_sessions or "*" in self.stopping_sessions:

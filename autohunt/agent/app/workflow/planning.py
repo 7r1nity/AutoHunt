@@ -197,6 +197,7 @@ async def plan_request(llm, registry, message: str, *, dialogue: dict, condition
             "85以上投递、以下的分析不足表示投递min_score=85，计划max_score=84；85以下且25k以上生成计划还需salary_min=25000。"
             "mock_delivery_start.filters是投递分支自己的语义条件树，例如只投正式岗、只投有转正机会的实习岗；不能改变搜索范围或忽略该限制。"
             "指定第几个、前几个、岗位名称投递时必须传mock_delivery_start.selector；序号不是数据库ID，不得用上一轮批量filters替代指定对象。"
+            "投递某一轮指定搜索结果时传mock_delivery_start.source_task_id，且只能使用result_sources里的已完成task_id；多轮搜索不明确时先问，不要默认用最近一轮。"
             "岗位公司地点/职责描述也可放selector，由共享目标解析器定位。single要求唯一对象；明确这些/所有符合描述者用selection_mode=matching。"
             "移除/跳过已展示岗位使用job_remove_selection(selector,snapshot_id可选,selection_mode可选)。它真正移出看板并停止选中岗位的未发送投递，不是search_state_update或job_results_refilter。"
             "已保存旧计划不是动作选择的标准答案：按当前请求重新核对每个工具的效果。移除某类岗位也属于岗位移除，selector保留完整描述、selection_mode=matching；不能改成NOT投递过滤或重新筛选。"

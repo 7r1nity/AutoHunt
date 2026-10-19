@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace as NS
 
-from app.core.agent_tools import AgentToolRegistry
+from app.core.agent_tools import AgentToolRegistry, MissingDeliveryEvidence
 from app.core.job_filters import evaluate_filter, filter_digest, validate_filter
 from app.core.models import BrowserTaskStatus
 from app.jobs.store import JobStore
@@ -154,6 +154,33 @@ class Refresh(unittest.IsolatedAsyncioTestCase):
         queued = await self.coordinator.queue_deliveries(min_score=85, session_id="default", task_id=self.task_id)
         self.assertEqual(queued["queued"], 5)
         TRACES.append({"kind": "refresh_queue", "result": result, "queued_ids": queued["job_ids"], "events": self.events})
+
+    async def test_unknown_evidence_reports_insufficient_not_completed_zero(self):
+        self.owned()
+        queued = await self.coordinator.queue_deliveries(min_score=85, session_id="default", task_id=self.task_id)
+        self.assertEqual((queued["queued"], queued["reason"]), (0, "insufficient_evidence"))
+        self.assertGreaterEqual(queued["insufficient"], 5)
+        with self.assertRaises(MissingDeliveryEvidence):
+            await self.registry._mock_delivery_start({"min_score": 85, "source_task_id": self.task_id})
+
+    async def test_source_task_id_binds_only_that_search(self):
+        self.owned()
+        await self.registry._job_results_refilter({})
+        second = "search-2"
+        self.jobs.create_task(second, "mock", "分析师", resume_id=self.profile.resume_id)
+        self.jobs.save_search_request(second, {"conversation_id": "default"})
+        self.jobs.update_task(second, status=BrowserTaskStatus.COMPLETED)
+        job_id, _ = self.jobs.upsert_job({"source": "MockJobSite", "external_id": "second",
+            "source_url": "http://127.0.0.1:8080/job.html?id=second", "title": "合成分析师",
+            "company": "合成二号公司", "location": "深圳", "salary": "30-35K",
+            "description": "招聘类型：社招。" + "合成JD职责和交付说明。" * 8,
+            "score": 92, "decision": "REVIEW", "reasoning": "合成说明", "filter_status": "pass"})
+        job = self.jobs.get_job(job_id)
+        self.jobs.event(second, "job_stored", "合成结果", sample={"job_id": job_id, "filter_status": "pass",
+            "filter_fingerprint": self.jobs.review_fingerprint(job)})
+        result = await self.registry._mock_delivery_start({"min_score": 85, "source_task_id": self.task_id})
+        self.assertEqual(result["queued"], 5)
+        self.assertNotIn(job_id, result["job_ids"])
 
     async def test_refresh_wrong_session_and_resume_rejected(self):
         self.owned()

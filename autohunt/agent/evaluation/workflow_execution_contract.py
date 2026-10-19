@@ -203,7 +203,7 @@ class WorkflowExecutionContracts(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([c["tool"] for c in self.h.calls], ["learning_plan_generate"])
 
     async def test_unknown_effect_is_not_safe_merely_because_error_says_before_submit(self):
-        self.h.install([step("delivery", "mock_delivery_start")])
+        self.h.install([step("delivery", "mock_delivery_start", {"min_score": 85})])
         async def fail(args): raise TimeoutError("before submit")
         self.h.behavior["mock_delivery_start"] = fail
         await self.h.tick()
@@ -211,7 +211,7 @@ class WorkflowExecutionContracts(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(recover_plan(self.h.store.get(self.h.run["id"]), session_id="default", stamp=STAMP).action, "verify")
 
     async def test_started_phase_cannot_be_downgraded_by_nested_preparing_marker(self):
-        self.h.install([step("delivery", "mock_delivery_start")])
+        self.h.install([step("delivery", "mock_delivery_start", {"min_score": 85})])
         async def fail(args):
             effect_checkpoint("preparing")
             effect_checkpoint("started")

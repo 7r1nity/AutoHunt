@@ -37,6 +37,14 @@ class MissingPlanScope(ValueError):
     """An explicit action is remembered, but no evidence exists in its scope."""
 
 
+class MissingDeliveryEvidence(ValueError):
+    """Candidates exist, but required delivery evidence cannot be verified."""
+
+    def __init__(self, message: str, *, missing_slots: list[str] | None = None):
+        super().__init__(message)
+        self.missing_slots = list(missing_slots or [])
+
+
 
 @dataclass(frozen=True)
 class AgentToolSpec:
@@ -341,6 +349,7 @@ class AgentToolRegistry:
                          "selection_mode": {"type": "string", "enum": ["single", "matching"]},
                          "target_step_id": {"type": "string", "pattern": "^[a-zA-Z0-9_-]{1,40}$", "description": "引用本计划已完成job_target_resolve的稳定选择，不重新按名称定位"},
                          "snapshot_id": {"type": "string"},
+                         "source_task_id": {"type": "string", "minLength": 1, "maxLength": 120, "description": "指定使用哪一轮已完成搜索的结果；省略时使用本计划前置搜索回执"},
                          "filters": {**filter_schema(), "type": ["object", "null"], "description": "投递分支条件树，不改变搜索条件；未知不投递"}}), "external", self._mock_delivery_start),
                 AgentToolSpec("mock_delivery_cancel", "按明确停止命令取消本会话的模拟站投递队列，已发送结果保留。", obj({}), "external", self._mock_delivery_cancel),
                 AgentToolSpec("mock_delivery_status", "读取本会话模拟站自动投递队列状态，不启动或重试。", obj({}), "read", self._mock_delivery_status),
@@ -457,6 +466,12 @@ class AgentToolRegistry:
             dialogue_change("question", topic="learning", question=str(exc), missing_slots=["score_scope"])
             emit("tool_finished", tool=name, status="awaiting_user", detail=str(exc), **receipt)
             return AgentToolOutcome(name, "awaiting_user", str(exc), spec.effect)
+        except MissingDeliveryEvidence as exc:
+            dialogue_change("question", topic="applications", question=str(exc), missing_slots=exc.missing_slots)
+            failure = {"code": "delivery_evidence_insufficient", "retryable": False,
+                       "effect_started": False, "uncertain": False}
+            emit("tool_finished", tool=name, status="awaiting_user", detail=str(exc), failure=failure, **receipt)
+            return AgentToolOutcome(name, "awaiting_user", str(exc), spec.effect, failure=failure)
         except MissingSearchInput as exc:
             dialogue_change("question", topic="search", question=str(exc), missing_slots=["queries"])
             dialogue_change("tool", tool=name, status="awaiting_user", detail=str(exc))
@@ -733,7 +748,13 @@ class AgentToolRegistry:
         # falls inside it without filtering anything yet.
         self.mock_workflow.remember_authorization_scope(
             active_run().user_message if active_run() else "", context.search_state, min_score=args.get("min_score", 0))
-        task_id = (context.action_authority or {}).get("evidence_task_id")
+        task_id = args.get("source_task_id") or (context.action_authority or {}).get("evidence_task_id")
+        if args.get("source_task_id"):
+            profile = self.candidate_state.read().profile if self.candidate_state else None
+            if not profile or not profile.resume_id:
+                raise PreflightRefused("没有启用的主简历，不能指定搜索结果")
+            task_id = resolve_search_source(self.jobs, context, resume_id=profile.resume_id,
+                                            explicit=args["source_task_id"])
         kwargs = {"min_score": args.get("min_score", 0), "session_id": context.session_id, "task_id": task_id}
         selector = args.get("selector")
         explicit_ordinals = re.findall(r"(?:第|前)[一二三四五六七八九十百\d]+(?:个|条|份)", context.user_message)
@@ -750,7 +771,10 @@ class AgentToolRegistry:
                                            "target_fingerprints": {str(item["id"]): item["content_hash"] for item in resolved["items"]}}
         if args.get("filters") is not None:
             kwargs["filters"] = args["filters"]
-        return await self.mock_workflow.queue_deliveries(**kwargs)
+        result = await self.mock_workflow.queue_deliveries(**kwargs)
+        if result.get("reason") in {"insufficient_evidence", "no_search_evidence"}:
+            raise MissingDeliveryEvidence(result["message"], missing_slots=["min_score", "filters", "source_task_id"])
+        return result
 
     async def _job_target_resolve(self, args):
         context = active_run()

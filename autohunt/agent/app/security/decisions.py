@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 
-from .risk import ConfirmRisky, ConfirmationPolicy, SecurityRisk, grade_action
+from .risk import ConfirmRisky, ConfirmationPolicy, SecurityRisk, broad_delivery_scope, grade_action
 
 
 class Decision(StrEnum):
@@ -49,7 +49,11 @@ class ActionPolicy:
             risk = grade_action(tool, arguments, effect=effect).risk
         else:
             risk = SecurityRisk.UNKNOWN
-        confirm = risk == SecurityRisk.UNKNOWN or self.confirmation.should_confirm(risk)
-        return ActionDecision(Decision.REQUIRE_APPROVAL if confirm else Decision.ALLOW,
-            "unknown_risk" if risk == SecurityRisk.UNKNOWN else "confirmation_required" if confirm else "within_policy",
-            risk, "请核对并确认此动作的范围" if confirm else "符合当前执行策略")
+        broad_delivery = broad_delivery_scope(tool, arguments)
+        confirm = broad_delivery or risk == SecurityRisk.UNKNOWN or self.confirmation.should_confirm(risk)
+        code = ("delivery_scope_confirmation_required" if broad_delivery else
+                "unknown_risk" if risk == SecurityRisk.UNKNOWN else
+                "confirmation_required" if confirm else "within_policy")
+        detail = ("本次投递未设置分数门槛、筛选条件或指定岗位，范围较宽；请核对后确认。"
+                  if broad_delivery else "请核对并确认此动作的范围" if confirm else "符合当前执行策略")
+        return ActionDecision(Decision.REQUIRE_APPROVAL if confirm else Decision.ALLOW, code, risk, detail)

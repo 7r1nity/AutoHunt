@@ -1216,11 +1216,20 @@ class JobStore:
             "score_fair": sum(1 for score in scores if score < 80),
         }
 
-    def jobs_for_resume_analysis(self, resume_id: str, *, limit: int = 20,
+    def resume_analysis_evidence(self, resume_id: str, *, limit: int = 20,
                                  legacy_since: str | None = None, min_score: int | None = None,
                                  max_score: int | None = None, salary_min: int | None = None,
-                                 task_id: str | None = None) -> list[dict[str, Any]]:
-        """Return saved JD evidence from terminal runs for one resume, not the global board."""
+                                 task_id: str | None = None) -> tuple[list[dict[str, Any]], dict[str, int]]:
+        """Return saved JD evidence plus why other candidates were excluded.
+
+        The gaps mapping separates "no matching job" from "cannot decide because
+        the search evidence is missing or stale". Delivery uses that distinction
+        to wait for the user instead of reporting a completed zero-job batch.
+        """
+        gaps = {"no_search_evidence": 0, "no_candidates": 0, "unknown_filter": 0,
+                "stale_filter": 0, "missing_job": 0, "removed": 0, "missing_score": 0,
+                "below_min_score": 0, "above_max_score": 0, "salary_unverified": 0,
+                "salary_below_min": 0}
         with self.lock, self._connect() as db:
             task_ids = [row["id"] for row in db.execute(
                 "SELECT id FROM browser_tasks WHERE status IN ('completed','stopped','failed') AND resume_id=? "
@@ -1239,7 +1248,8 @@ class JobStore:
                 ).fetchone()
                 task_ids = [legacy["id"]] if legacy else []
             if not task_ids:
-                return []
+                gaps["no_search_evidence"] = 1
+                return [], gaps
             placeholders = ",".join("?" for _ in task_ids)
             from ..core.job_filters import filter_digest, validate_filter
             updated_digests = {}
@@ -1263,30 +1273,77 @@ class JobStore:
                     job_id = int(sample.get("job_id") or 0)
                 except (ValueError, TypeError, json.JSONDecodeError):
                     continue
-                if job_id > 0 and job_id not in seen_ids:
-                    seen_ids.add(job_id)
-                    outcomes[job_id] = sample
-                    fresh = event["task_id"] not in updated_digests or sample.get("filter_evidence", {}).get("digest") == updated_digests[event["task_id"]]
-                    if fresh and sample.get("filter_status", "pass") == "pass" and sample.get("admission", "accepted") == "accepted":
-                        ids.append(job_id)
+                if job_id <= 0 or job_id in seen_ids:
+                    continue
+                seen_ids.add(job_id)
+                outcomes[job_id] = sample
+                fresh = event["task_id"] not in updated_digests or sample.get("filter_evidence", {}).get("digest") == updated_digests[event["task_id"]]
+                if not fresh:
+                    gaps["stale_filter"] += 1
+                    continue
+                if sample.get("filter_status", "pass") != "pass" or sample.get("admission", "accepted") != "accepted":
+                    gaps["unknown_filter"] += 1
+                    continue
+                ids.append(job_id)
             if not ids:
-                return []
+                gaps["no_candidates"] = 1
+                return [], gaps
             rows = db.execute(
                 "SELECT * "
                 "FROM jobs WHERE id IN (" + ",".join("?" for _ in ids) + ")", ids,
             ).fetchall()
         by_id = {int(row["id"]): dict(row) for row in rows}
         from ..core.search_contract import monthly_salary_lower_bound
-        return [by_id[job_id] for job_id in ids if job_id in by_id
-                and not by_id[job_id].get("removed_at")
-                and by_id[job_id].get("filter_status", "pass") == "pass"
-                and outcomes[job_id].get("filter_status", "pass") == "pass"
-                and (not outcomes[job_id].get("filter_fingerprint") or
-                     outcomes[job_id]["filter_fingerprint"] == self.review_fingerprint(by_id[job_id]))
-                and (min_score is None or by_id[job_id]["score"] >= min_score)
-                and (max_score is None or by_id[job_id]["score"] <= max_score)
-                and (salary_min is None or (monthly_salary_lower_bound(by_id[job_id]["salary"]) is not None
-                     and monthly_salary_lower_bound(by_id[job_id]["salary"]) >= salary_min))][:limit]
+        selected: list[dict[str, Any]] = []
+        for job_id in ids:
+            row = by_id.get(job_id)
+            if row is None:
+                gaps["missing_job"] += 1
+                continue
+            if row.get("removed_at"):
+                gaps["removed"] += 1
+                continue
+            if row.get("filter_status", "pass") != "pass":
+                gaps["unknown_filter"] += 1
+                continue
+            outcome = outcomes.get(job_id, {})
+            if outcome.get("filter_status", "pass") != "pass":
+                gaps["unknown_filter"] += 1
+                continue
+            if (outcome.get("filter_fingerprint")
+                    and outcome["filter_fingerprint"] != self.review_fingerprint(row)):
+                gaps["stale_filter"] += 1
+                continue
+            score = row.get("score")
+            if score is None:
+                gaps["missing_score"] += 1
+                continue
+            if min_score is not None and score < min_score:
+                gaps["below_min_score"] += 1
+                continue
+            if max_score is not None and score > max_score:
+                gaps["above_max_score"] += 1
+                continue
+            if salary_min is not None:
+                salary = monthly_salary_lower_bound(row["salary"])
+                if salary is None:
+                    gaps["salary_unverified"] += 1
+                    continue
+                if salary < salary_min:
+                    gaps["salary_below_min"] += 1
+                    continue
+            selected.append(row)
+            if len(selected) >= limit:
+                break
+        return selected, gaps
+
+    def jobs_for_resume_analysis(self, resume_id: str, *, limit: int = 20,
+                                 legacy_since: str | None = None, min_score: int | None = None,
+                                 max_score: int | None = None, salary_min: int | None = None,
+                                 task_id: str | None = None) -> list[dict[str, Any]]:
+        """Return saved JD evidence from terminal runs for one resume, not the global board."""
+        return self.resume_analysis_evidence(resume_id, limit=limit, legacy_since=legacy_since,
+            min_score=min_score, max_score=max_score, salary_min=salary_min, task_id=task_id)[0]
 
     def save_learning_plan(self, plan: dict[str, Any]) -> None:
         now = utc_now()
