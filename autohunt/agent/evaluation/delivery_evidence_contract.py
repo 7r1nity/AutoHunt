@@ -6,6 +6,7 @@ user database, resume, network, browser, contact or submission is used.
 from __future__ import annotations
 
 import asyncio
+import ast
 import copy
 import gc
 import io
@@ -32,6 +33,7 @@ from app.workflow.mock_coordinator import MockWorkflowCoordinator
 from app.workflow.planning import RequestDraft, plan_request, validate_draft
 from app.workflow.result_sources import ResultSourceClarification
 from app.workflow.revision import RevisionDraft, edited_plan
+from app.security.scope_changes import delivery_scope_change
 
 TRACES = []
 
@@ -99,6 +101,51 @@ class Scope(unittest.TestCase):
         self.assertEqual(compile_context(state, {})["delivery_scope"], scope())
         state = apply_operation(state, {"op": "reset"})
         self.assertIsNone(state["delivery_scope"])
+
+    def test_model_new_flag_cannot_prove_old_filters_are_retained(self):
+        result = delivery_scope_change({"scope_mode": "new", "min_score": 85}, scope(),
+            session_id="default", stamp="stamp", task_id="search")
+        self.assertTrue(result)
+        self.assertIn("原有筛选条件", " ".join(result["reasons"]))
+
+    def test_actual_subset_not_flag_controls_whether_confirmation_is_needed(self):
+        args = self.resolve({"min_score": 88, "filters": leaf("有补贴")})
+        self.assertIsNone(delivery_scope_change(args, scope(), session_id="default", stamp="stamp"))
+        args["min_score"] = 80
+        self.assertIsNotNone(delivery_scope_change(args, scope(), session_id="default", stamp="stamp"))
+
+    def test_salary_narrowing_is_provable_but_alternative_expansion_is_not(self):
+        salary = lambda n: {"op": "condition", "text": f"月薪至少{n}", "salary": {"unit": "monthly", "minimum": n}}
+        previous = {**scope(), "filters": {"op": "all", "children": [leaf("正式"), salary(15000)]}}
+        for amount, needs_confirmation in ((20000, False), (15000, False), (14000, True)):
+            args = {"min_score": 85, "source_task_id": "search", "filters": {"op": "all", "children": [leaf("正式"), salary(amount)]}}
+            self.assertEqual(bool(delivery_scope_change(args, previous, session_id="default", stamp="stamp")), needs_confirmation)
+        args["filters"] = {"op": "any", "children": [previous["filters"], leaf("实习")]}
+        self.assertIsNotNone(delivery_scope_change(args, previous, session_id="default", stamp="stamp"))
+
+    def test_uncertain_paraphrase_requires_confirmation_not_silent_approval(self):
+        previous = {**scope(), "filters": leaf("正式岗位")}
+        self.assertIsNotNone(delivery_scope_change({"min_score": 85, "source_task_id": "search", "filters": leaf("全职工作")},
+            previous, session_id="default", stamp="stamp"))
+
+    def test_structural_subset_proof_has_no_boolean_false_positive(self):
+        import itertools
+        a, b, c = [leaf(x) for x in "ABC"]
+        trees = [a, b, c, {"op": "not", "children": [a]},
+            {"op": "all", "children": [a, b]}, {"op": "any", "children": [a, b]},
+            {"op": "all", "children": [a, {"op": "any", "children": [b, c]}]},
+            {"op": "any", "children": [{"op": "all", "children": [a, b]}, c]}]
+        def truth(node, values):
+            if node["op"] == "condition": return values[node["text"]]
+            children = [truth(x, values) for x in node["children"]]
+            return not children[0] if node["op"] == "not" else all(children) if node["op"] == "all" else any(children)
+        for old, new in itertools.product(trees, repeat=2):
+            change = delivery_scope_change({"min_score": 85, "source_task_id": "search", "filters": new},
+                {**scope(), "filters": old}, session_id="default", stamp="stamp")
+            if change is None:
+                for bits in itertools.product((False, True), repeat=3):
+                    values = dict(zip("ABC", bits))
+                    self.assertFalse(truth(new, values) and not truth(old, values), (old, new, values))
 
 
 class Evidence(unittest.IsolatedAsyncioTestCase):
@@ -260,6 +307,82 @@ class PersistedFlow(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(row["scope_evidence"]["conditions"][0]["reused"])
         self.assertEqual(len(result["scope_checks"]), 2)
         TRACES.append({"flow": "search-enrich-persist-queue", "result": result, "model_calls": len(self.calls)})
+
+    async def test_partial_upsert_keeps_raw_tags_and_screening_evidence(self):
+        self.context.owner = asyncio.current_task()
+        await self.seed()
+        before = self.store.get_job(1)
+        partial = {k: v for k, v in before.items() if k not in {"source_tags", "filter_status", "filter_evidence"}}
+        partial["tags"] = ["Python"]
+        self.store.upsert_job(partial)
+        after = self.store.get_job(1)
+        self.assertEqual(after["source_tags"], before["source_tags"])
+        self.assertEqual(after["filter_evidence"], before["filter_evidence"])
+        verdict = await evaluate_filter(self.browser.llm.generate, leaf("正式全职"), after,
+            prior_evidence=json.loads(after["filter_evidence"]))
+        self.assertTrue(verdict["conditions"][0]["reused"])
+        self.assertEqual(len(self.calls), 2)
+
+    async def test_explicit_null_empty_and_replacement_tags_are_not_omission(self):
+        self.context.owner = asyncio.current_task()
+        await self.seed()
+        row = self.store.get_job(1)
+        row["filter_evidence"] = json.loads(row["filter_evidence"])
+        for value, expected in ((None, None), ([], "[]"), (["SQL", "Excel"], '["SQL", "Excel"]')):
+            self.store.upsert_job({**row, "tags": ["Python"], "source_tags": value})
+            self.assertEqual(self.store.get_job(1)["source_tags"], expected)
+
+    async def test_partial_upsert_with_changed_jd_cannot_reuse_old_evidence(self):
+        self.context.owner = asyncio.current_task()
+        await self.seed()
+        row = self.store.get_job(1)
+        partial = {k: v for k, v in row.items() if k not in {"source_tags", "filter_evidence", "filter_status"}}
+        partial["description"] += "以上是旧模板，实际以实习协议为准。"
+        partial["tags"] = ["Python"]
+        self.store.upsert_job(partial)
+        updated = self.store.get_job(1)
+        result = await evaluate_filter(self.browser.llm.generate, leaf("正式全职"), updated,
+            prior_evidence=json.loads(updated["filter_evidence"]))
+        self.assertEqual(result["status"], "unknown")
+        self.assertFalse(result["conditions"][0].get("reused"))
+        self.assertEqual(len(self.calls), 3)
+
+    async def test_contact_import_uses_partial_upsert_without_erasing_evidence(self):
+        self.context.owner = asyncio.current_task()
+        await self.seed()
+        row = self.store.get_job(1)
+        self.coordinator.candidate = NS(read=lambda: NS(profile=NS(skills=[]), preferences=NS(target_roles=NS(values=[]))))
+        remote = {"title": row["title"], "company_name": row["company"], "city": row["location"],
+            "salary_min": 19, "salary_max": 23, "description": row["description"], "skills": ["Python"]}
+        ident, inserted = self.coordinator._import_contacted_job(1, remote)
+        self.assertEqual((ident, inserted), (1, False))
+        updated = self.store.get_job(1)
+        self.assertEqual(updated["source_tags"], row["source_tags"])
+        self.assertEqual(updated["filter_evidence"], row["filter_evidence"])
+
+    async def test_manual_http_import_body_preserves_raw_tags_in_isolated_store(self):
+        self.context.owner = asyncio.current_task()
+        await self.seed()
+        row = self.store.get_job(1)
+        remote = {"title": row["title"], "company_name": row["company"], "city": row["location"],
+            "salary_min": 19, "salary_max": 23, "description": row["description"], "skills": ["Python"]}
+        # Execute the actual endpoint body with a scripted transport, without
+        # importing the application module (which owns the user's live stores).
+        from fastapi import HTTPException, Query
+        from app.core.models import StoredJobView
+        source = Path(__file__).parents[1] / "app/api/application.py"
+        tree = ast.parse(source.read_text(encoding="utf-8"))
+        fn = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == "import_mock_site_job")
+        fn.decorator_list = []
+        ns = {"asyncio": asyncio, "json": json, "Query": Query, "HTTPException": HTTPException,
+              "StoredJobView": StoredJobView, "job_store": self.store,
+              "urlopen": lambda *a, **kw: io.BytesIO(json.dumps(remote).encode())}
+        exec(compile(ast.Module(body=[fn], type_ignores=[]), str(source), "exec"), ns)
+        result = await ns["import_mock_site_job"](1, "gated")
+        self.assertEqual(result.id, 1)
+        updated = self.store.get_job(1)
+        self.assertEqual(updated["source_tags"], row["source_tags"])
+        self.assertEqual(updated["filter_evidence"], row["filter_evidence"])
 
     async def test_followup_and_manual_selection_keep_previous_batch_scope(self):
         self.context.owner = asyncio.current_task()

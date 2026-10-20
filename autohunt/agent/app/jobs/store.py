@@ -716,9 +716,16 @@ class JobStore:
                 "UPDATE jobs SET source_url=?,salary=?,description=?,tags=?,score=?,decision=?,reasoning=?,stage=CASE WHEN stage='review' THEN ? ELSE stage END,content_hash=?,last_seen_at=? WHERE id=?",
                 (job["source_url"], job.get("salary", "未注明"), description, json.dumps(job.get("tags", []), ensure_ascii=False), job["score"], job["decision"], job["reasoning"], job.get("stage", "review"), content_hash, now, existing["id"]),
             )
-            db.execute("UPDATE jobs SET source=?,filter_status=?,filter_evidence=? WHERE id=?",
-                (job["source"], job.get("filter_status", "pass"), json.dumps(job.get("filter_evidence", {}), ensure_ascii=False), existing["id"]))
-            db.execute("UPDATE jobs SET source_tags=? WHERE id=?", (source_tags_json, existing["id"]))
+            db.execute("UPDATE jobs SET source=? WHERE id=?", (job["source"], existing["id"]))
+            # An import/contact sync is not a replacement of screening evidence.
+            # Omitted fields preserve their value; explicit null clears raw tags.
+            if "filter_status" in job:
+                db.execute("UPDATE jobs SET filter_status=? WHERE id=?", (job["filter_status"], existing["id"]))
+            if "filter_evidence" in job:
+                db.execute("UPDATE jobs SET filter_evidence=? WHERE id=?",
+                    (json.dumps(job["filter_evidence"], ensure_ascii=False), existing["id"]))
+            if "source_tags" in job:
+                db.execute("UPDATE jobs SET source_tags=? WHERE id=?", (source_tags_json, existing["id"]))
             db.execute("UPDATE jobs SET board_visible=CASE WHEN removed_at IS NOT NULL THEN 0 ELSE MAX(board_visible,?) END WHERE id=?",
                        (int(job.get("board_visible", True)), existing["id"]))
             return int(existing["id"]), False

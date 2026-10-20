@@ -112,6 +112,113 @@ class DurableApprovalContracts(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(record["snapshot"]["arguments"], {})
         self.assertIn("未设置分数门槛", step["detail"])
 
+    def remember_delivery_scope(self):
+        filters = {"op": "all", "children": [{"op": "condition", "text": "正式岗位"},
+            {"op": "condition", "text": "月薪至少15k", "salary": {"unit": "monthly", "minimum": 15000}}]}
+        remembered = {"id": "old-batch", "session_id": "default", "resume_stamp": STAMP,
+            "task_id": "synthetic-search", "min_score": 85, "filters": filters}
+        self.context.dialogue = self.store.mutate_dialogue("default", {"op": "delivery_scope", "scope": remembered})
+        return remembered
+
+    def changed_scope_plan(self, *, extra=False):
+        value = self.plan(requested=True, extra=extra)
+        value["steps"][0]["arguments"] = {"scope_mode": "new", "min_score": 85, "source_task_id": "synthetic-search"}
+        self.store.save_plan(self.run["id"], value)
+        return value
+
+    async def test_model_new_and_requested_true_cannot_drop_old_filters(self):
+        self.remember_delivery_scope()
+        value = self.changed_scope_plan(extra=True)
+        await self.tick(value)
+        self.assertEqual([s["status"] for s in value["steps"]], ["waiting_approval", "completed"])
+        self.assertEqual([c[0] for c in self.calls], ["learning_plan_generate"])
+        record = self.store.approvals(self.run["id"])[0]
+        self.assertEqual((record["status"], record["source"]), ("pending", "confirmation"))
+        self.assertTrue(record["snapshot"]["scope_reset"])
+        self.assertIn("上一批", value["steps"][0]["detail"])
+        self.assertIn("15,000", value["steps"][0]["detail"])
+        self.assertIn("本次未设置额外语义筛选", value["steps"][0]["detail"])
+
+    async def test_model_new_with_proved_preserved_filters_has_no_extra_confirmation(self):
+        remembered = self.remember_delivery_scope()
+        value = self.changed_scope_plan()
+        value["steps"][0]["arguments"].update(filters=remembered["filters"], min_score=88)
+        self.store.save_plan(self.run["id"], value)
+        await self.tick(value)
+        self.assertEqual(value["steps"][0]["status"], "completed")
+        self.assertEqual(self.store.approvals(self.run["id"])[0]["source"], "instruction")
+        self.assertEqual(len(self.calls), 1)
+
+    async def test_scope_change_confirmation_survives_reopen_and_pointer_change(self):
+        self.remember_delivery_scope()
+        value = self.changed_scope_plan()
+        await self.tick(value)
+        ident = value["steps"][0]["approval_id"]
+        self.store = RunStore(self.store.path, self.key)
+        self.runtime.store = self.store
+        self.context.dialogue = self.store.mutate_dialogue("default", {"op": "delivery_scope", "scope": None})
+        value = self.store.get(self.run["id"])["checkpoint"]["plan"]
+        value["steps"][0].update(status="pending", user_requested=True)
+        self.store.save_plan(self.run["id"], value)
+        await self.tick(value)
+        self.assertEqual(value["steps"][0]["status"], "waiting_approval")
+        self.assertEqual(value["steps"][0]["approval_id"], ident)
+        self.assertEqual(self.calls, [])
+        await self.finish_approval(value)
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(self.store.approval(ident)["source"], "confirmation")
+        self.assertEqual(self.store.get(self.run["id"])["status"], "completed")
+
+    async def test_legacy_instruction_autoapproval_is_not_a_human_scope_reset(self):
+        self.remember_delivery_scope()
+        value = self.changed_scope_plan()
+        args = value["steps"][0]["arguments"]
+        original = self.store.ensure_approval(self.run["id"], "default", "delivery", {
+            "plan_id": value["id"], "tool": "mock_delivery_start", "arguments": args,
+            "resume_stamp": STAMP, "evidence_task_id": None}, requested=True)
+        await self.tick(value)
+        self.assertEqual(self.store.approval(original["id"])["status"], "invalidated")
+        self.assertNotEqual(value["steps"][0]["approval_id"], original["id"])
+        self.assertEqual(value["steps"][0]["status"], "waiting_approval")
+        self.assertEqual(self.calls, [])
+
+    async def test_scope_reset_rejection_never_sends(self):
+        self.remember_delivery_scope()
+        value = self.changed_scope_plan()
+        await self.tick(value)
+        await self.finish_approval(value, False)
+        self.assertEqual(self.calls, [])
+
+    async def test_scope_reset_confirmation_cannot_approve_changed_parameters(self):
+        self.remember_delivery_scope()
+        value = self.changed_scope_plan()
+        await self.tick(value)
+        ident = value["steps"][0]["approval_id"]
+        saved = self.store.get(self.run["id"])["checkpoint"]["plan"]
+        saved["steps"][0]["arguments"]["min_score"] = 50
+        self.store.save_plan(self.run["id"], saved)
+        with self.assertRaises(ValueError):
+            await self.runtime.decide_approval(self.run["id"], ident, "default", True)
+        self.assertEqual(self.calls, [])
+
+    async def test_omitting_scope_mode_does_not_bypass_scope_change_confirmation(self):
+        self.remember_delivery_scope()
+        value = self.changed_scope_plan()
+        value["steps"][0]["arguments"].pop("scope_mode")
+        self.store.save_plan(self.run["id"], value)
+        await self.tick(value)
+        self.assertEqual(value["steps"][0]["status"], "waiting_approval")
+        self.assertEqual(self.calls, [])
+
+    async def test_single_selected_job_keeps_independent_authorization(self):
+        self.remember_delivery_scope()
+        value = self.changed_scope_plan()
+        value["steps"][0]["arguments"] = {"selector": "第七个", "scope_mode": "new"}
+        self.store.save_plan(self.run["id"], value)
+        await self.tick(value)
+        self.assertEqual(value["steps"][0]["status"], "completed")
+        self.assertEqual(len(self.calls), 1)
+
     async def test_explicit_scope_runs_without_second_confirmation_and_without_task_ttl_expiry(self):
         value = self.plan(requested=True)
         await self.tick(value)

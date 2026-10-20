@@ -285,9 +285,35 @@ class AgentRuntime:
     def authorize_action(self, run_id: str, tool: str, arguments: dict, risk: str, always: bool) -> dict:
         run = self.store.get(run_id)
         step_id, snapshot, requested = self.action_snapshot(run_id, tool, arguments)
+        scope_reset = None
+        if tool == "mock_delivery_start":
+            from ..security.scope_changes import delivery_scope_change
+            # A pending human-only decision stays human-only across retries,
+            # restarts or a later change of the dialogue's current-scope pointer.
+            for saved in self.store.approvals(run_id):
+                recorded = saved["snapshot"]
+                if (saved["step_id"] == step_id and recorded.get("scope_reset")
+                        and {k: v for k, v in recorded.items() if k != "scope_reset"} == snapshot):
+                    scope_reset = recorded["scope_reset"]
+                    break
+            scope_reset = scope_reset or delivery_scope_change(arguments,
+                self.store.dialogue_state(run["session_id"]).get("delivery_scope"),
+                session_id=run["session_id"], stamp=snapshot["resume_stamp"], task_id=snapshot["evidence_task_id"])
+            if scope_reset:
+                snapshot["scope_reset"] = copy.deepcopy(scope_reset)
         record = self.store.ensure_approval(run_id, run["session_id"], step_id, snapshot,
                                            requested=requested and risk != "UNKNOWN" and not always
-                                           and not broad_delivery_scope(tool, arguments))
+                                           and not broad_delivery_scope(tool, arguments) and not scope_reset)
+        detail = _approval_detail(tool, arguments)
+        if scope_reset:
+            from ..core.job_filters import filter_summary
+            try:
+                old_summary = filter_summary(scope_reset["previous_filters"]) if scope_reset.get("previous_filters") else "无额外语义限制"
+            except (TypeError, ValueError, KeyError):
+                old_summary = "原筛选结构需要人工核对"
+            detail = ("投递范围变化，需要人工确认：" + "；".join(scope_reset["reasons"]) + "。\n"
+                + f"上一批：匹配分≥{scope_reset['previous_min_score']}；{old_summary}。\n"
+                + ("本次未设置额外语义筛选。\n" if not arguments.get("filters") else "") + detail)
         if record["status"] == "pending":
             # Persist wait BEFORE returning to the caller, including tool-loop callers.
             current = self.store.get(run_id)
@@ -296,7 +322,6 @@ class AgentRuntime:
             # T-13/T-19: Generate a human-readable summary from the step arguments
             # so the approval card immediately shows what the user is being asked
             # to confirm, without them needing to open the raw arguments JSON.
-            detail = _approval_detail(tool, arguments)
             step.update(status="waiting_approval", approval_id=record["id"], detail=detail)
             self.store.update(run_id, checkpoint={**current["checkpoint"], "plan": plan}, status="waiting_confirmation")
             if not self.store.has_event(run_id, "approval:" + record["id"]):
@@ -304,7 +329,8 @@ class AgentRuntime:
                 self.store.event(run_id, "action_approval", {"approval_id": record["id"], "step_id": step_id,
                     "tool": tool, "risk": risk, "status": "pending", "detail": detail})
         return {key: record[key] for key in ("id", "status", "source")} | {
-            "scope": snapshot, "detail": _approval_detail(tool, arguments)}
+            "scope": snapshot, "detail": detail,
+            **({"code": "delivery_scope_change_confirmation_required"} if scope_reset else {})}
 
     async def decide_approval(self, run_id: str, approval_id: str, session_id: str, approve: bool) -> dict:
         lock = self.sessions.setdefault(session_id, asyncio.Lock())
@@ -392,6 +418,8 @@ class AgentRuntime:
         snapshot = {"plan_id": plan["id"], "tool": step["tool"], "arguments": step["arguments"],
                     "resume_stamp": plan["resume_stamp"] if step["tool"] in RESUME_BOUND_TOOLS else None,
                     "evidence_task_id": producer.get("task_id")}
+        if record["snapshot"].get("scope_reset"):
+            snapshot["scope_reset"] = copy.deepcopy(record["snapshot"]["scope_reset"])
         if step.get("withdrawn") or step["tool"] in plan.get("revoked_tools", []):
             raise ValueError("动作已撤回")
         if snapshot["resume_stamp"] is not None and snapshot["resume_stamp"] != resume_stamp(self.resume_workspace.read_document(), self.agent.candidate_state):
