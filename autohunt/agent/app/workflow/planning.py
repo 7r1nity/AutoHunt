@@ -196,6 +196,9 @@ async def plan_request(llm, registry, message: str, *, dialogue: dict, condition
             "搜索薪资属于job_search_start；各投递/计划分支的薪资和分数条件独立，不能搬到另一个动作。"
             "85以上投递、以下的分析不足表示投递min_score=85，计划max_score=84；85以下且25k以上生成计划还需salary_min=25000。"
             "mock_delivery_start.filters是投递分支自己的语义条件树，例如只投正式岗、只投有转正机会的实习岗；不能改变搜索范围或忽略该限制。"
+            "dialogue.delivery_scope记录上一批已执行投递的范围，不是授权。补投、漏投或还有几个未投时默认继承该范围；"
+            "scope_mode=inherit（默认）会保留旧条件并与新限制取交集，不得漏掉薪资/岗位类型等条件。"
+            "用户明确另起独立批次、取消或替换旧限制、降低分数门槛时scope_mode=new，并给出完整新范围。指定单个岗位不继承旧批量范围。"
             "指定第几个、前几个、岗位名称投递时必须传mock_delivery_start.selector；序号不是数据库ID，不得用上一轮批量filters替代指定对象。"
             "投递某一轮指定搜索结果时传mock_delivery_start.source_task_id，且只能使用result_sources里的已完成task_id；多轮搜索不明确时先问，不要默认用最近一轮。"
             "岗位公司地点/职责描述也可放selector，由共享目标解析器定位。single要求唯一对象；明确这些/所有符合描述者用selection_mode=matching。"
@@ -216,6 +219,7 @@ async def plan_request(llm, registry, message: str, *, dialogue: dict, condition
             "例如正式岗有月薪门槛或面议、实习有独立日薪门槛：any(all(正式岗位,any(月薪门槛,面议)),all(实习岗位,日薪门槛))，门槛金额只能来自有效用户请求或conditions。"
             "系统说明和schema里的示例数值不是用户条件，不得复制。用户没有提出日薪门槛且会话也没有该门槛时，绝不能增加日薪条件。没有提出独立实习门槛时只添加allow，不得自行创建带门槛的实习备选分支。"
             "这里正式岗位/实习岗位是当前岗位的类型事实，不是公司是否接受实习生；不要生成‘接受实习岗位’的require叶。仅说实习也可且没有独立实习门槛时用allow，不额外限制正式岗位。"
+            "校招/应届/社招是招聘对象，不等于正式/实习岗位性质；应届实习及有转正机会的实习仍计入实习组，不能仅凭月薪认定正式。"
             "用户本轮修改搜索条件并要求对已有结果投递时，不能只生成mock_delivery_start：先search_state_update保存完整新条件树，再job_results_refilter刷新已有JD，投递依赖refilter。"
             "若需要新增候选则按新条件job_search_start，后续依赖搜索；若条件未变化且仅要求投递可直接投递。省略的条件继承，明确修改的条件必须覆盖旧树对应要求，不能丢失。"
             "保留条件否定与组合逻辑，不把不要外包理解成取消搜索；缺JD证据不能猜符合。"
@@ -489,6 +493,16 @@ def _validate_draft(draft: RequestDraft, registry, message: str, *, dialogue: di
         if name == "resume_propose_patch" and not args.get("instruction"):
             args["instruction"] = (step["command_quote"] or original)[:spec.parameters["properties"]["instruction"].get("maxLength", 2000)]
         if name == "mock_delivery_start":
+            from .delivery_scope import materialize_delivery_scope
+            from .result_sources import ResultSourceClarification
+            try:
+                args.update(materialize_delivery_scope(args, dialogue.get("delivery_scope"),
+                    session_id=session_id, stamp=stamp, new_search=bool(searches),
+                    task_id=(dialogue.get("tasks") or {}).get("browser_id")))
+            except ResultSourceClarification as exc:
+                wait_for_scope(step, str(exc), field="scope_mode", value=args.get("scope_mode", "inherit"))
+            if dialogue.get("delivery_scope") or "scope_mode" in args:
+                args["scope_mode"] = "new"  # Freeze expanded scope before binding.
             source = (searches[0]["arguments"].get("source", conditions.get("source", "mock"))
                       if len(searches) == 1 else conditions.get("source", "mock"))
             if source != "mock":

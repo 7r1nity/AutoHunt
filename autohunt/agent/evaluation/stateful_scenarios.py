@@ -443,7 +443,10 @@ async def scenario(h, case):
     elif family == "crash_barrier":
         # Events, not sleeps, place the crash after a durable claim and at an
         # exact synthetic adapter phase. A claimed write is not proof it was sent.
-        h.install([step("action", p["tool"])])
+        # The broad-scope confirmation policy must remain enabled. This family
+        # tests a crash AFTER approval/claim, not an unbounded pending approval.
+        bounded = {"min_score": 85} if p["tool"] == "mock_delivery_start" else {}
+        h.install([step("action", p["tool"], bounded)])
         entered, release = asyncio.Event(), asyncio.Event()
         async def held(args):
             effect_checkpoint("preparing")

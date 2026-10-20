@@ -46,6 +46,7 @@ def compile_context(saved: dict, conditions: dict, history: list[dict] | None = 
         "task_request": root, "search_conditions": conditions, "questions": questions, "instruction": pending_instruction,
         "learning_request": saved.get("learning_request"), "tasks": saved.get("tasks", {}), "selected_job": selected,
         "job_target_context": saved.get("job_target_context"),
+        "delivery_scope": saved.get("delivery_scope"),
         "pending": [{key: item.get(key) for key in ("id", "topic", "tool", "description", "expires_at", "status")}
             for item in saved.get("pending", []) if item.get("status") == "pending" and item.get("expires_at", 0) >= now],
     }

@@ -341,8 +341,17 @@ class MockWorkflowCoordinator:
             message = ("没有符合条件的岗位；未入队。"
                        + (f"不符合{excluded}个，信息不足{unknown}个。" if filters else "")
                        + (f"已有投递记录 {already_delivered} 个。" if already_delivered else ""))
+        pending_checks = [{"job_id": ident,
+            "reasons": list(dict.fromkeys(c.get("reason") or "条件证据不足"
+                for c in verdict.get("conditions", []) if c.get("status") == "unknown"))}
+            for ident, verdict in scope_evidence.items() if verdict.get("status") == "unknown"]
+        if pending_checks:
+            message += "\n待核实：" + "；".join(f"岗位 #{item['job_id']}：{'、'.join(item['reasons'])}"
+                for item in pending_checks[:3]) + (f"；其余 {len(pending_checks)-3} 个见运行记录。" if len(pending_checks) > 3 else "。")
         return {"queued": queued, "job_ids": ids, "min_score": min_score, "filters": filters,
                 "excluded": excluded, "unknown": unknown, "insufficient": insufficient,
+                "scope_checks": [{"job_id": ident, **verdict} for ident, verdict in scope_evidence.items()],
+                "pending_verification": pending_checks,
                 "no_match": no_match, "already_delivered": already_delivered,
                 "reason": reason, "message": message}
 

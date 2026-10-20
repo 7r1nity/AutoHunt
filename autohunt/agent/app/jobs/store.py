@@ -198,6 +198,7 @@ class JobStore:
             self._ensure_column(db, "jobs", "removed_at", "TEXT")
             db.execute("CREATE TABLE IF NOT EXISTS job_removals (job_id INTEGER PRIMARY KEY,session_id TEXT NOT NULL,run_id TEXT NOT NULL,content_hash TEXT NOT NULL,removed_at TEXT NOT NULL)")
             self._ensure_column(db, "jobs", "filter_evidence", "TEXT NOT NULL DEFAULT '{}'")
+            self._ensure_column(db, "jobs", "source_tags", "TEXT")
             self._ensure_column(db, "mock_delivery_queue", "scope_json", "TEXT NOT NULL DEFAULT '{}'")
             self._ensure_column(db, "mock_delivery_queue", "scope_evidence_json", "TEXT NOT NULL DEFAULT '{}'")
             self._ensure_column(db, "jobs", "recruiter_reply_at", "TEXT")
@@ -695,6 +696,10 @@ class JobStore:
             return self._upsert_job(db, job)
 
     def _upsert_job(self, db, job: dict[str, Any]) -> tuple[int, bool]:
+        source_tags = job.get("source_tags")
+        if isinstance(source_tags, str):
+            source_tags = json.loads(source_tags)
+        source_tags_json = json.dumps(source_tags, ensure_ascii=False) if source_tags is not None else None
         is_mock = job.get("source") == "MockJobSite" and job.get("external_id")
         dedupe = (
             normalized_key("MockJobSite", str(job["external_id"])) if is_mock
@@ -713,6 +718,7 @@ class JobStore:
             )
             db.execute("UPDATE jobs SET source=?,filter_status=?,filter_evidence=? WHERE id=?",
                 (job["source"], job.get("filter_status", "pass"), json.dumps(job.get("filter_evidence", {}), ensure_ascii=False), existing["id"]))
+            db.execute("UPDATE jobs SET source_tags=? WHERE id=?", (source_tags_json, existing["id"]))
             db.execute("UPDATE jobs SET board_visible=CASE WHEN removed_at IS NOT NULL THEN 0 ELSE MAX(board_visible,?) END WHERE id=?",
                        (int(job.get("board_visible", True)), existing["id"]))
             return int(existing["id"]), False
@@ -724,6 +730,7 @@ class JobStore:
         )
         db.execute("UPDATE jobs SET filter_status=?,filter_evidence=? WHERE id=?",
             (job.get("filter_status", "pass"), json.dumps(job.get("filter_evidence", {}), ensure_ascii=False), cursor.lastrowid))
+        db.execute("UPDATE jobs SET source_tags=? WHERE id=?", (source_tags_json, cursor.lastrowid))
         db.execute("UPDATE jobs SET board_visible=? WHERE id=?", (int(job.get("board_visible", True)), cursor.lastrowid))
         return int(cursor.lastrowid), True
 

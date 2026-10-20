@@ -23,6 +23,7 @@ PUBLIC_FILTER_DEPTH = 6
 MAX_FILTER_DEPTH = PUBLIC_FILTER_DEPTH + 2
 MAX_FILTER_NODES = 256
 MAX_FILTER_CHILDREN = 32
+FILTER_POLICY_VERSION = 2
 
 
 class FilterExpression(BaseModel):
@@ -151,9 +152,24 @@ def filter_digest(expression):
 
 def filter_facts_digest(facts):
     """Bind reusable judgments to all supplied JD facts, not just one quote."""
-    supplied = {key: facts.get(key) or "" for key in
-                ("title", "company", "location", "salary", "description", "tags")}
+    supplied = filter_facts(facts)
     return hashlib.sha256(json.dumps(supplied, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+
+
+def filter_facts(facts):
+    """Observed JD input only. Display/matching tags must never become evidence.
+
+    NULL source_tags denotes legacy rows whose original tags were not retained;
+    derived display tags are omitted rather than presented as original evidence.
+    Always read the live text fields, so a stored tag snapshot cannot hide a JD edit.
+    """
+    supplied = {key: facts.get(key) or "" for key in
+                ("title", "company", "location", "salary", "description")}
+    tags = (facts.get("source_tags") or []) if "source_tags" in facts else (facts.get("tags") or [])
+    if isinstance(tags, str):
+        tags = json.loads(tags)
+    supplied["tags"] = list(tags)
+    return supplied
 
 
 def filter_summary(value):
@@ -184,8 +200,10 @@ def filter_summary(value):
 
 async def evaluate_filter(generate, expression, facts, *, prior_evidence=None):
     """One bounded no-tools call. Timeout, mock provider, invalid evidence fail closed."""
+    facts = {**facts, **filter_facts(facts)}
     expression = validate_filter(expression) if expression is not None else None
     result = {"status": "pass", "digest": filter_digest(expression), "conditions": [],
+              "policy_version": FILTER_POLICY_VERSION,
               "facts_digest": filter_facts_digest(facts)}
     if expression is None:
         return result
@@ -193,6 +211,10 @@ async def evaluate_filter(generate, expression, facts, *, prior_evidence=None):
     documents = {key: str(facts.get(key) or "")[:30000]
                  for key in ("title", "company", "location", "salary", "description")}
     documents["tags"] = "、".join(str(tag) for tag in facts.get("tags", []))[:4000]
+    reusable = ((prior_evidence or {}).get("facts_digest") == result["facts_digest"]
+                and (prior_evidence or {}).get("policy_version") == FILTER_POLICY_VERSION)
+    if reusable and (prior_evidence or {}).get("employment"):
+        result["employment"] = _employment_evidence(prior_evidence["employment"], documents)
     judgments = [{"index": index, "status": "unknown", "reason": "条件证据不足或模型不可用", "evidence": []}
                  for index in range(len(leaves))]
     semantic = [index for index, leaf in enumerate(leaves) if leaf.salary is None and leaf.mode != "allow"]
@@ -201,12 +223,13 @@ async def evaluate_filter(generate, expression, facts, *, prior_evidence=None):
             judgments[index].update(status="pass", reason="用户允许包含的范围，不是岗位必须满足的事实", evidence=[])
     for index, leaf in enumerate(leaves):
         if leaf.salary:
-            judgments[index].update(judge_salary(leaf.salary, facts))
+            judgments[index].update(judge_salary(leaf.salary, {**facts,
+                "employment_kind": result.get("employment", {}).get("kind", {}).get("value")}))
     # Reuse only the same semantic predicate with still-verifiable JD evidence.
     # Different wording is interpreted by the model, never guessed equivalent.
     for index in list(semantic):
         leaf = leaves[index]
-        if (prior_evidence or {}).get("facts_digest") != result["facts_digest"]:
+        if not reusable:
             continue  # Legacy or changed facts must be judged again.
         prior = next((item for item in (prior_evidence or {}).get("conditions", [])
                       if item.get("text", "").strip() == leaf.text.strip()
@@ -237,7 +260,14 @@ async def evaluate_filter(generate, expression, facts, *, prior_evidence=None):
                 "未提及不等于没有；证据不足、主观定义不明确、缺失信息一律unknown。"
                 "只判断当前岗位，不要求该公司所有岗位都满足同一条件。严格区分机会与保证、必要条件与充分条件。"
                 "原文要求有机会时，有条件的机会也算机会；不能擅自升级为必然成功或无条件保证。"
-                "实习有转正机会不等于保证转正。pass和fail都必须有直接证据，不得推测。"),
+                "实习有转正机会不等于保证转正。pass和fail都必须有直接证据，不得推测。"
+                "分开核对招聘对象与当前岗位性质：校招/应届/社招属于招聘对象，不自动等于正式全职或实习。"
+                "正式岗位需要当前全职/正式录用等明确说明或相符的合同与工作安排证据；只有校招/应届或月薪不能证明正式。"
+                "应届实习、毕业实习、有转正机会的实习当前仍是实习；接受实习经历仅是候选人经历要求，不能证明岗位是实习。"
+                "信息矛盾或不足时对应条件返回unknown；不能因另一OR分支不适用而否决已经满足的分支。"
+                "同时输出employment对象，分别记录kind和hiring_channel，每项为{value,reason,evidence}。"
+                "kind.value仅regular/internship/unknown；hiring_channel.value仅campus/experienced/unknown。"
+                "两项各自引用原文，不能以招聘对象或计薪单位推断岗位性质；employment不是执行授权。"),
             user_message=json.dumps({"conditions": [{"index": index, "text": leaves[index].text, "quote": leaves[index].quote or leaves[index].text} for index in semantic],
                 "output_contract": "每个输入index只返回一条，必须完整判断该text。不得拆分条件、增添index或改变index；复合要求需要综合判断。引用必须连续原文，不能改写、合并句子或用省略号。",
                 "facts": documents}, ensure_ascii=False),
@@ -247,6 +277,8 @@ async def evaluate_filter(generate, expression, facts, *, prior_evidence=None):
             raise ValueError("mock model cannot verify semantic conditions")
         result.update(provider=response.provider, model=response.model)
         payload = json.loads(re.sub(r"^```(?:json)?\s*|\s*```$", "", response.text.strip()))
+        if isinstance(payload.get("employment"), dict):
+            result["employment"] = _employment_evidence(payload["employment"], documents)
         seen = set()
         for item in payload["conditions"]:
             index = item["index"]
@@ -267,7 +299,32 @@ async def evaluate_filter(generate, expression, facts, *, prior_evidence=None):
         # asyncio cancellation is BaseException: user stop must propagate.
         for index in semantic:
             judgments[index].update(status="unknown", reason="筛选服务不可用或输出不完整，需核实", evidence=[])
+    # Unit/range arithmetic is deterministic, but applicability may depend on
+    # the separately evidenced role classification returned in this same call.
+    for index, leaf in enumerate(leaves):
+        if leaf.salary:
+            judgments[index].update(judge_salary(leaf.salary, {**facts,
+                "employment_kind": result.get("employment", {}).get("kind", {}).get("value")}))
     return _filter_result(result, expression, leaves, judgments)
+
+
+def _employment_evidence(value, documents):
+    """Keep the two independent model observations only with checkable quotes."""
+    output = {}
+    for key, choices in (("kind", {"regular", "internship", "unknown"}),
+                         ("hiring_channel", {"campus", "experienced", "unknown"})):
+        item = value.get(key) or {}
+        if not isinstance(item, dict):
+            item = {}
+        evidence = item.get("evidence") or []
+        valid = isinstance(evidence, list) and bool(evidence) and all(
+            isinstance(e, dict) and e.get("field") in documents
+            and isinstance(e.get("quote"), str) and len(e["quote"].strip()) >= 2
+            and e["quote"] in documents[e["field"]] for e in evidence)
+        observed = item.get("value")
+        output[key] = {"value": observed if isinstance(observed, str) and observed in choices and (observed == "unknown" or valid) else "unknown",
+                       "reason": str(item.get("reason", ""))[:240], "evidence": evidence if valid else []}
+    return output
 
 
 def partial_filter_status(expression, facts):

@@ -1269,7 +1269,11 @@ class BrowserAutomationService:
 
     async def _check_filters(self, task_id: str, detail: dict, request: BrowserSearchRequest):
         from ..core.result_groups import grouped_filter, group_verdicts
+        detail["title"] = clean_title(detail.get("title") or "")
+        detail["company"] = clean_title(detail.get("company") or "")
         detail["description"] = re.sub(r"\s+", " ", str(detail.get("description") or "")).strip()
+        # Preserve scraped facts before matching enriches the display tags.
+        detail.setdefault("source_tags", list(detail.get("tags") or []))
         if request.locations and not any(city in str(detail.get("location", "")) for city in request.locations):
             verdict = {"status": "unknown" if detail.get("location") in {None, "", "未注明", "未知"} else "fail", "conditions": [], "reason": "工作地点无法满足本轮城市条件"}
         else:
@@ -1318,6 +1322,7 @@ class BrowserAutomationService:
             "decision": analysis.decision,
             "stage": "rejected" if analysis.decision == "SKIP" else "review",
             "reasoning": analysis.reasoning,
+            "source_tags": detail.get("source_tags", list(detail.get("tags") or [])),
             "tags": sorted(set(detail["tags"] + analysis.matched_skills + analysis.missing_skills))[:10],
         })
         if request is not None:

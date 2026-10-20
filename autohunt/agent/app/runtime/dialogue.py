@@ -90,6 +90,7 @@ class DialogueState(Strict):
     instruction_request: dict[str, Any] | None = None
     task_request: dict[str, Any] | None = None
     job_target_context: dict[str, Any] | None = None
+    delivery_scope: dict[str, Any] | None = None
 
 
 def topic_for(message: str, previous: str = "general") -> str:
@@ -139,6 +140,10 @@ def apply_operation(saved: dict | None, operation: dict, *, clock: float | None 
         return state.model_dump(mode="json")
     if op == "workflow":
         state.workflow_request = copy.deepcopy(operation.get("request"))
+        state.revision += 1
+        return state.model_dump(mode="json")
+    if op == "delivery_scope":
+        state.delivery_scope = copy.deepcopy(operation.get("scope"))
         state.revision += 1
         return state.model_dump(mode="json")
     if op == "instruction":
@@ -474,6 +479,7 @@ def compact_state(saved: dict) -> dict:
         "tasks": state.tasks, "selected_job": state.selected_job.model_dump() if state.selected_job else None,
         "job_target_context": state.job_target_context,
         "learning_request": state.learning_request,
+        "delivery_scope": state.delivery_scope,
         "instruction": state.instruction_request,
         "task_request": state.task_request,
         "workflow": ({key: state.workflow_request.get(key) for key in

@@ -239,6 +239,25 @@ def edited_plan(plan: dict, edit: RevisionDraft, registry, *, stamp: str, sessio
             continue
         producers = [item for item in result["steps"] if item["tool"] in {"job_search_start", "job_results_refilter"}]
         bind_evidence(result["steps"], step, producers)
+        if step["tool"] == "mock_delivery_start":
+            from ..runtime.context import active_run
+            from .delivery_scope import materialize_delivery_scope
+            from .result_sources import ResultSourceClarification
+            context = active_run()
+            remembered = (context.dialogue or {}).get("delivery_scope") if context else None
+            ancestors = dependency_ancestors(step["id"], result["steps"])
+            sources = [item for item in producers if item["id"] in ancestors]
+            try:
+                step["arguments"] = materialize_delivery_scope(step["arguments"], remembered,
+                    session_id=session_id, stamp=stamp,
+                    task_id=next((item.get("task_id") for item in reversed(sources) if item.get("task_id")), None),
+                    new_search=any(item["tool"] == "job_search_start" and item["status"] != "completed" for item in sources))
+            except ResultSourceClarification as exc:
+                wait_for_scope(step, str(exc), field="scope_mode", value=step["arguments"].get("scope_mode", "inherit"))
+            if remembered or "scope_mode" in step["arguments"]:
+                step["arguments"]["scope_mode"] = "new"
+            step["authority_binding"] = action_binding(step["tool"], step["arguments"], session_id=session_id,
+                requested=step.get("user_requested", False))
     result["goals"] = [*result.get("goals", []), *[goal.model_dump() for goal in edit.goals]]
     preflight(result["steps"], result["goals"], [plan["original"], message], set(registry._tools))
     paused = result.get("paused", False) if edit.pause is None else edit.pause

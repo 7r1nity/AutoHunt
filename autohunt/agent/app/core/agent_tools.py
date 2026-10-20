@@ -343,8 +343,9 @@ class AgentToolRegistry:
         ]
         if self.mock_workflow is not None:
             specs.extend([
-                AgentToolSpec("mock_delivery_start", "将用户要求范围内的已搜索模拟站职位加入有限投递队列。filters为投递独立语义条件，可复用搜索判断；min_score可选，省略不设分数门槛。内部生成逐职位预览与一次性授权，快速逐个沟通、并行等待HR回复、回复后发送简历；不支持真实网站。",
+                AgentToolSpec("mock_delivery_start", "将用户要求范围内的已搜索模拟站职位加入有限投递队列。批量补投默认继承上一批完整条件，scope_mode=new用于用户明确另起或替换范围；指定岗位不继承旧批量条件。filters为投递独立条件，可复用搜索判断。内部生成逐职位预览与一次性授权，快速逐个沟通、并行等待HR回复、回复后发送简历；不支持真实网站。",
                     obj({"min_score": {"type": "integer", "minimum": 0, "maximum": 100},
+                         "scope_mode": {"type": "string", "enum": ["inherit", "new"], "description": "默认inherit，补投/漏投继承同一搜索和简历的上一批条件，新条件取交集、分数不降低。用户明确取消/替换旧限制或开启独立范围时new。不是授权令牌。"},
                          "selector": {"type": "string", "minLength": 1, "maxLength": 500, "description": "指定已展示岗位的序号、名称、公司地点、职责描述、这些或移除后的剩余岗位。必须保留目标，不能退化为批量范围。"},
                          "selection_mode": {"type": "string", "enum": ["single", "matching"]},
                          "target_step_id": {"type": "string", "pattern": "^[a-zA-Z0-9_-]{1,40}$", "description": "引用本计划已完成job_target_resolve的稳定选择，不重新按名称定位"},
@@ -407,6 +408,8 @@ class AgentToolRegistry:
             emit("tool_retry", tool=name, effect=spec.effect, **data)
         try:
             self.validate_arguments(spec.parameters, arguments)
+            if name == "mock_delivery_start":
+                arguments = self._delivery_arguments(arguments)
             decision = self.authorize(name, arguments)
             emit("action_decision", tool=name, decision=decision.decision.value,
                  code=decision.code, risk=decision.risk.value, **receipt)
@@ -738,14 +741,30 @@ class AgentToolRegistry:
                 items=[{"id": result["id"], "title": result.get("title", "学习计划")}])
         return result
 
+    def _delivery_arguments(self, args: dict) -> dict:
+        from ..workflow.delivery_scope import materialize_delivery_scope
+        from ..growth.requests import resume_stamp
+        context = active_run()
+        previous = (context.dialogue or {}).get("delivery_scope") if context else None
+        if context and context.action_authority and "scope_mode" not in args:
+            return args  # A compiled action had no remembered scope; do not bind one later.
+        if not previous or args.get("scope_mode") == "new" or args.get("selector") or args.get("target_step_id"):
+            return args
+        return materialize_delivery_scope(args, previous, session_id=context.session_id,
+            stamp=resume_stamp(self.resume_workspace.read_document(), self.candidate_state),
+            task_id=(context.action_authority or {}).get("evidence_task_id")
+                    or (context.dialogue or {}).get("tasks", {}).get("browser_id"))
+
     async def _mock_delivery_start(self, args: dict) -> dict:
         effect_checkpoint("preparing")
         context = active_run()
         if context is None:
             raise PreflightRefused("自动投递需要当前会话")
-        # Remember the user's own instruction as the boundary of what this batch is
-        # authorised to cover. Measurement only for now: queue_deliveries records what
-        # falls inside it without filtering anything yet.
+        # The registry/plan normally materializes before authorization. This
+        # also keeps internal direct callers on the same inheritance contract.
+        args = self._delivery_arguments(args)
+        # Legacy authorization measurement is observational only. The concrete
+        # queue below independently enforces the fully materialized filters.
         self.mock_workflow.remember_authorization_scope(
             active_run().user_message if active_run() else "", context.search_state, min_score=args.get("min_score", 0))
         task_id = args.get("source_task_id") or (context.action_authority or {}).get("evidence_task_id")
@@ -755,6 +774,11 @@ class AgentToolRegistry:
                 raise PreflightRefused("没有启用的主简历，不能指定搜索结果")
             task_id = resolve_search_source(self.jobs, context, resume_id=profile.resume_id,
                                             explicit=args["source_task_id"])
+        elif (task_id is None and (context.dialogue or {}).get("tasks", {}).get("browser_id")
+                and self.jobs is not None and hasattr(self.jobs, "search_source") and self.candidate_state is not None):
+            profile = self.candidate_state.read().profile
+            if profile.resume_id:
+                task_id = resolve_search_source(self.jobs, context, resume_id=profile.resume_id)
         kwargs = {"min_score": args.get("min_score", 0), "session_id": context.session_id, "task_id": task_id}
         selector = args.get("selector")
         explicit_ordinals = re.findall(r"(?:第|前)[一二三四五六七八九十百\d]+(?:个|条|份)", context.user_message)
@@ -772,6 +796,14 @@ class AgentToolRegistry:
         if args.get("filters") is not None:
             kwargs["filters"] = args["filters"]
         result = await self.mock_workflow.queue_deliveries(**kwargs)
+        if (not selector and not args.get("target_step_id") and self.candidate_state is not None
+                and self.resume_workspace is not None and not result.get("binding")):
+            from ..growth.requests import resume_stamp
+            dialogue_change("delivery_scope", scope={"id": uuid.uuid4().hex,
+                "session_id": context.session_id,
+                "resume_stamp": resume_stamp(self.resume_workspace.read_document(), self.candidate_state),
+                "task_id": task_id or (context.dialogue or {}).get("tasks", {}).get("browser_id"),
+                "filters": kwargs.get("filters"), "min_score": kwargs["min_score"]})
         if result.get("reason") in {"insufficient_evidence", "no_search_evidence"}:
             raise MissingDeliveryEvidence(result["message"], missing_slots=["min_score", "filters", "source_task_id"])
         return result

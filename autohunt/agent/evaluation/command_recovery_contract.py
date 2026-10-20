@@ -17,7 +17,7 @@ from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock
 
-from app.core.job_filters import evaluate_filter, filter_facts_digest
+from app.core.job_filters import evaluate_filter, filter_facts_digest, FILTER_POLICY_VERSION
 from app.core.models import ResumeDocumentView, DeliveryTaskView, BrowserTaskStatus
 from app.runtime.resilience import PreflightRefused
 from app.jobs.store import JobStore
@@ -198,7 +198,7 @@ class EvidenceReuseContracts(unittest.IsolatedAsyncioTestCase):
     async def test_same_predicate_reuses_verified_jd_evidence_without_model(self):
         async def forbidden(_): raise AssertionError("cached predicate should not call model")
         facts = {"description": "本岗位为正式岗位，由本公司签订劳动合同。"}
-        prior = {"facts_digest": filter_facts_digest(facts), "conditions": [{"text": "正式岗位", "status": "pass", "mode": "require",
+        prior = {"policy_version": FILTER_POLICY_VERSION, "facts_digest": filter_facts_digest(facts), "conditions": [{"text": "正式岗位", "status": "pass", "mode": "require",
             "reason": "明确正式", "evidence": [{"field": "description", "quote": "本岗位为正式岗位"}]}]}
         result = await evaluate_filter(forbidden, leaf("正式岗位"), facts, prior_evidence=prior)
         self.assertEqual(result["status"], "pass")
@@ -218,7 +218,7 @@ class EvidenceReuseContracts(unittest.IsolatedAsyncioTestCase):
 
     async def test_quote_still_present_but_other_facts_changed_is_not_reused(self):
         facts = {"description": "本岗位为正式岗位，由本公司签订劳动合同。"}
-        prior = {"facts_digest": filter_facts_digest(facts), "conditions": [{"text": "正式岗位", "status": "pass",
+        prior = {"policy_version": FILTER_POLICY_VERSION, "facts_digest": filter_facts_digest(facts), "conditions": [{"text": "正式岗位", "status": "pass",
             "mode": "require", "evidence": [{"field": "description", "quote": "本岗位为正式岗位"}]}]}
         async def unknown(request):
             return LLMResult('{"conditions":[{"index":0,"status":"unknown","reason":"信息矛盾","evidence":[]}]}', "scripted", "fixture")
@@ -241,6 +241,7 @@ class QueueScopeContracts(unittest.IsolatedAsyncioTestCase):
                 "filter_evidence": {"status": "pass", "conditions": [{"text": "正式岗位", "status": status,
                     "mode": "require", "evidence": [{"field": "description", "quote": quote}]}]}}
             row["filter_evidence"]["facts_digest"] = filter_facts_digest(row)
+            row["filter_evidence"]["policy_version"] = FILTER_POLICY_VERSION
             ident, _ = self.jobs.upsert_job(row)
             self.rows.append(self.jobs.get_job(ident))
         self.jobs.resume_analysis_evidence = lambda *args, **kwargs: (self.rows, {})
