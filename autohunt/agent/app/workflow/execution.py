@@ -173,11 +173,20 @@ async def advance(plan: dict, registry) -> list[dict]:
             try:
                 decision = registry.authorize(step["tool"], step["arguments"]) if hasattr(registry, "authorize") else None
             except ValueError as exc:
+                invalid_arguments = False
+                spec = getattr(registry, "_tools", {}).get(step["tool"])
+                if spec:
+                    try:
+                        registry.validate_arguments(spec.parameters, step["arguments"])
+                    except ValueError:
+                        invalid_arguments = True
                 step.update(status="blocked", detail=str(exc),
-                    failure={"code": "action_state_conflict", "effect_started": False, "uncertain": False})
+                    failure={"code": "invalid_arguments" if invalid_arguments else "action_state_conflict", "effect_started": False, "uncertain": False})
                 observed.append(step); changed = True
                 context.user_message, context.action_authority = previous_message, previous_authority
                 persist(plan)
+                from .failure_recovery import recover_failed_step
+                await recover_failed_step(plan, step, registry, persist)
                 continue
             if decision and decision.decision != "ALLOW":
                 emit("action_decision", tool=step["tool"], step_id=step["id"], plan_id=plan["id"],
@@ -258,16 +267,19 @@ async def advance(plan: dict, registry) -> list[dict]:
             observed.append(step); changed = True
             emit("plan_step", step_id=step["id"], tool=step["tool"], status=step["status"], detail=step.get("detail", ""), failure=step.get("failure"))
             persist(plan)
+            if step["status"] in {"failed", "blocked", "outcome_indeterminate"}:
+                from .failure_recovery import recover_failed_step
+                await recover_failed_step(plan, step, registry, persist)
             if claimed >= EXECUTION_BATCH_SIZE:
                 plan["batch_progress"] = {"claimed": claimed, "remaining": sum(s["status"] == "pending" for s in plan["steps"])}
                 plan["status"] = "running"
                 persist(plan)
-                return observed
+                return list({step["id"]: step for step in observed}.values())
         if not changed:
             break
     plan["status"] = "clarifying" if plan.get("questions") else "running" if any(step["status"] not in DONE for step in plan["steps"]) else "finished"
     persist(plan)
-    return observed
+    return list({step["id"]: step for step in observed}.values())
 
 
 async def begin(plan: dict, registry) -> ChatResponse:

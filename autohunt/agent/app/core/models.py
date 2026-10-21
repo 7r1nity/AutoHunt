@@ -532,6 +532,7 @@ class DeliveryTaskView(BaseModel):
     resume_version: int | None = None
     resume_digest: str | None = None
     mock_resume_id: int | None = None
+    mock_resume_digest: str | None = None
     mock_applicant_id: int | None = None
     attempts: int = 0
     action: str | None = None

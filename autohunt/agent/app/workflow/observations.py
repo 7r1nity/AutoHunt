@@ -23,6 +23,7 @@ def board_facts(jobs) -> dict:
         "runs": runs,
         "reply_candidates": jobs.delivery_runs_waiting_reply(limit=50),
         "failed_starts": jobs.delivery_runs_failed_before_submit(limit=50),
+        "uncertain_deliveries": jobs.deliveries_to_reconcile() if hasattr(jobs, "deliveries_to_reconcile") else [],
     }
     # Split pre-click failures by remaining retry budget. Retrying is only safe while
     # the budget lasts; past it the only useful action is to hand the job to a human,

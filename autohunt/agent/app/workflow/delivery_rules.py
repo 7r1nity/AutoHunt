@@ -85,6 +85,10 @@ def build_rules(coordinator) -> list[Rule]:
         return bool((observation.get("settings") or {}).get("daily_enabled"))
 
     return [
+        Rule("reconcile_uncertain_delivery", 85,
+             lambda observation: bool(observation.get("uncertain_deliveries")) and bool(observation.get("applicant_id")),
+             lambda observation: coordinator.reconcile_uncertain_deliveries(),
+             reason="发送结果未知时仅核验外部记录；不重放点击或授权", cooldown=30),
         # Budget exhausted outranks everything: retrying again would repeat the same
         # failure, so the job must be handed to a human before any retry rule sees it.
         Rule("escalate_exhausted_start", 95, has_exhausted_start, escalate_exhausted,

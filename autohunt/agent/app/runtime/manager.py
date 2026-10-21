@@ -544,6 +544,21 @@ class AgentRuntime:
                                 result = analyze_job(JobAnalysisRequest.model_validate(run["payload"])).model_dump(mode="json")
                             else:
                                 worker = copy.copy(self.agent)
+                                from .semantic_memory import SemanticMemory
+                                memory = SemanticMemory(self.store, getattr(self.agent, "llm", None),
+                                    record=lambda kind, data: self.store.event(run_id, kind, data))
+                                epoch = (context.dialogue or {}).get("history_epoch", 0)
+                                context.recall_memory = lambda query, limit: memory.recall(run["session_id"], query,
+                                    epoch=(context.dialogue or {}).get("history_epoch", 0), limit=limit)
+                                context.memory_source_read = lambda source_id: self.store.memory_source(run["session_id"], source_id,
+                                    epoch=(context.dialogue or {}).get("history_epoch", 0))
+                                try:
+                                    await memory.compact(run["session_id"], epoch=epoch)
+                                    context.historical_memory = await memory.recall(run["session_id"], run["payload"]["message"], epoch=epoch)
+                                except asyncio.CancelledError:
+                                    raise
+                                except Exception as exc:
+                                    self.store.event(run_id, "memory_unavailable", {"error_type": type(exc).__name__})
                                 history = self.jobs.conversation_history(conversation_id=run["session_id"], limit=100)
                                 worker.restore_history(history)
                                 if not run["parent_id"]:

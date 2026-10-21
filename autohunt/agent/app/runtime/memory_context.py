@@ -61,6 +61,14 @@ def compile_context(saved: dict, conditions: dict, history: list[dict] | None = 
         "trace": [{key: item.get(key) for key in ("turn", "kind", "source", "detail", "tool", "status")}
                   for item in saved.get("trace", [])[-6:]],
     }
+    from .context import active_run
+    from datetime import datetime
+    context = active_run()
+    recalled = context.historical_memory if context and context.session_id else []
+    if recalled:
+        epoch = saved.get("history_epoch", 0)
+        optional["recalled_memory"] = [item for item in recalled if all(
+            datetime.fromisoformat(source["created_at"]).timestamp() >= epoch for source in item.get("sources", []))]
     try:
         output, stats = builder.session(output, optional, purpose=purpose)
     except ContextBudgetExceeded as exc:

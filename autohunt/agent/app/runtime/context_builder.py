@@ -134,7 +134,7 @@ class ContextBuilder:
         budget = self.limits.routing_tokens if purpose == "router" else self.limits.session_tokens
         selected, omitted = [], []
         # Highest-priority optional context first. None is not an instruction.
-        for key in ("recent_turns", "historical_summary", "trace", "focus"):
+        for key in ("recent_turns", "recalled_memory", "historical_summary", "trace", "focus"):
             value = optional.get(key, [])
             candidate = {**output, key: value}
             if estimate_tokens(candidate) <= budget:

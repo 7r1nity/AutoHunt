@@ -210,6 +210,9 @@ class JobStore:
             self._ensure_column(db, "delivery_runs", "resume_version", "INTEGER")
             self._ensure_column(db, "delivery_runs", "resume_digest", "TEXT")
             self._ensure_column(db, "delivery_runs", "mock_resume_id", "INTEGER")
+            self._ensure_column(db, "delivery_runs", "mock_resume_digest", "TEXT")
+            self._ensure_column(db, "delivery_runs", "reconciliation_json", "TEXT")
+            self._ensure_column(db, "delivery_runs", "reconciled_at", "TEXT")
             self._ensure_column(db, "delivery_runs", "mock_applicant_id", "INTEGER")
             self._ensure_column(db, "delivery_runs", "action", "TEXT NOT NULL DEFAULT 'submit_resume'")
         self._ensure_column(db, "delivery_runs", "attempts", "INTEGER NOT NULL DEFAULT 0")
@@ -549,7 +552,7 @@ class JobStore:
         allowed = {
             "status", "checkpoint", "detail", "takeover_reason", "current_url", "submitted",
             "recruiter_reply", "recruiter_reply_at", "last_checked_at", "mock_resume_id", "mock_applicant_id",
-            "attempts",
+            "attempts", "mock_resume_digest",
         }
         values = {
             key: (value.value if hasattr(value, "value") else value)
@@ -1496,6 +1499,44 @@ class JobStore:
             rows = db.execute("SELECT * FROM delivery_runs ORDER BY started_at DESC LIMIT ?",
                               (limit,)).fetchall()
         return [dict(row) for row in rows]
+
+    def deliveries_to_reconcile(self, *, limit: int = 10, applicant_id: int | None = None) -> list[dict]:
+        with self.lock, self._connect() as db:
+            rows = db.execute("SELECT * FROM delivery_runs WHERE status='outcome_indeterminate' "
+                "AND (? IS NULL OR mock_applicant_id=?) "
+                "ORDER BY COALESCE(reconciled_at,''),started_at LIMIT ?", (applicant_id, applicant_id, limit)).fetchall()
+        return [dict(row) for row in rows]
+
+    def record_delivery_reconciliation(self, expected: dict, observation: dict) -> bool:
+        """CAS a read receipt and local completion together; never schedule sends."""
+        keys = ("job_id", "target_url", "mock_applicant_id", "mock_resume_id", "mock_resume_digest",
+                "resume_document_id", "resume_version", "resume_digest", "action", "updated_at")
+        with self.lock, self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT * FROM delivery_runs WHERE id=?", (expected["id"],)).fetchone()
+            if not row or row["status"] != 'outcome_indeterminate' or any(row[key] != expected.get(key) for key in keys):
+                return False
+            confirmed = observation.get("status") == "confirmed" and observation.get("application_id") is not None
+            latest = db.execute("SELECT id FROM delivery_runs WHERE job_id=? ORDER BY started_at DESC,rowid DESC LIMIT 1",
+                                (row["job_id"],)).fetchone()
+            # A later delivery attempt owns the visible job state.
+            if not latest or latest["id"] != expected["id"]:
+                return False
+            stamp = utc_now()
+            db.execute("UPDATE delivery_runs SET reconciliation_json=?,reconciled_at=?,updated_at=? WHERE id=?",
+                (json.dumps(observation, ensure_ascii=False), stamp, stamp, row["id"]))
+            db.execute("INSERT INTO browser_events(task_id,event_type,detail,sample_json,created_at) VALUES (?,?,?,?,?)",
+                (row["id"], "delivery_reconciliation", observation.get("reason", "")[:500],
+                 json.dumps(observation, ensure_ascii=False), stamp))
+            if not confirmed:
+                return False
+            db.execute("UPDATE delivery_runs SET status='completed',submitted=1,checkpoint='read_receipt_confirmed',detail=? WHERE id=?",
+                (observation["reason"], row["id"]))
+            db.execute("UPDATE jobs SET stage='waiting',mode='已核实投递',last_seen_at=? WHERE id=? "
+                       "AND removed_at IS NULL AND stage NOT IN ('interview','rejected')", (stamp, row["job_id"]))
+            db.execute("UPDATE mock_delivery_queue SET status='completed',detail=?,updated_at=? WHERE run_id=? AND status<>'cancelled'",
+                       (observation["reason"], stamp, row["id"]))
+            return True
 
     def delivery_runs_failed_before_submit(self, *, limit: int = 50) -> list[dict]:
         """Explicit transient pre-submit failures, including exhausted budgets.

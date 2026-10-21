@@ -38,6 +38,9 @@ class RunContext:
     # Passive records may be inherited by scoring workers; they cannot mutate a
     # plan, acquire authority or publish conversation text.
     diagnose: Callable[[str, dict], None] | None = None
+    historical_memory: list | None = None
+    recall_memory: Callable | None = None
+    memory_source_read: Callable | None = None
 
 
 current_run: ContextVar[RunContext | None] = ContextVar("autohunt_run", default=None)

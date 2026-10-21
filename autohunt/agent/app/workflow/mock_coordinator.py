@@ -703,6 +703,33 @@ class MockWorkflowCoordinator:
                         counters["awaiting_reply"] += 1
             return counters
 
+    async def reconcile_uncertain_deliveries(self) -> str:
+        from ..delivery.reconciliation import read_receipt
+        settings = self.settings()
+        applicant_id = settings.get("applicant_id")
+        if not applicant_id:
+            return "未绑定账号，未知投递继续等待核验"
+        confirmed = checked = 0
+        for run in self.jobs.deliveries_to_reconcile(applicant_id=applicant_id):
+            if checked >= 3:
+                break
+            if run.get("reconciled_at") and not wait_expired(run["reconciled_at"], 30):
+                continue
+            if run.get("mock_applicant_id") != applicant_id:
+                continue  # Never inspect another account through the current headers.
+            checked += 1
+            observation = await read_receipt(run, applicant_id)
+            if self.jobs.record_delivery_reconciliation(run, observation):
+                confirmed += 1
+                if self.delivery.current().id == run["id"]:
+                    self.delivery.state = self.jobs.get_delivery_run(run["id"])
+                item = next((item for item in self.jobs.mock_delivery_queue(active_only=False) if item.get("run_id") == run["id"]), None)
+                owner = item["session_id"] if item else self.delivery_owner(run["id"]) if self.delivery_owner else None
+                if owner:
+                    self.jobs.add_conversation_message("assistant", f"职位 #{run['job_id']}：只读对账已确认原授权简历投递成功；没有重复发送。",
+                                                       conversation_id=owner)
+        return f"只读核验 {checked} 项，确认已投递 {confirmed} 项；其余保留待核验，不自动重发"
+
     @staticmethod
     async def _get(client: httpx.AsyncClient, path: str, headers: dict, params: dict | None = None):
         async def read():

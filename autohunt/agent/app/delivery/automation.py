@@ -214,6 +214,7 @@ class DeliveryAutomationService:
                 takeover_reason=self.state.takeover_reason,
                 current_url=self.state.current_url,
                 submitted=self.state.submitted,
+                mock_resume_digest=self.state.mock_resume_digest,
                 recruiter_reply=self.state.recruiter_reply,
                 recruiter_reply_at=self.state.recruiter_reply_at,
                 last_checked_at=self.state.last_checked_at,
@@ -391,6 +392,8 @@ class DeliveryAutomationService:
                 applicant_id=self.state.mock_applicant_id or self.jobs.mock_workflow_settings().get("applicant_id"),
                 resume_id=self.state.mock_resume_id)
             self.state.mock_resume_id, self.state.mock_applicant_id = binding.resume_id, binding.applicant_id
+            from .reconciliation import resume_fingerprint
+            self.state.mock_resume_digest = resume_fingerprint(payload)
             self._update(DeliveryTaskStatus.RUNNING, "已同步并绑定授权主简历，正在核对发送条件", checkpoint="resume_bound")
             self._authorized_resume_payload()
             observation = await self.adapter.inspect(page)

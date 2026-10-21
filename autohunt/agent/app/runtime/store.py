@@ -70,6 +70,12 @@ class RunStore:
                     source TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS action_approvals_owner ON action_approvals(run_id, step_id);
+                CREATE TABLE IF NOT EXISTS session_memories (
+                    id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES agent_sessions(id),
+                    start_seq INTEGER NOT NULL, end_seq INTEGER NOT NULL,
+                    payload TEXT NOT NULL, created_at TEXT NOT NULL,
+                    UNIQUE(session_id,end_seq)
+                );
             """)
             db.execute("INSERT OR IGNORE INTO agent_sessions VALUES (?,?,?)", ("default", "默认会话", now()))
             if "error_type" not in {row[1] for row in db.execute("PRAGMA table_info(agent_runs)")}:
@@ -228,6 +234,59 @@ class RunStore:
                     "execution_started": started, "reply": result.get("message", ""),
                     "created_at": row["created_at"], "resume_stamp": (checkpoint.get("plan") or {}).get("resume_stamp", "")})
         return output
+
+    def memory_source_batch(self, session_id: str, *, epoch: float = 0, keep_recent=8, batch_size=8) -> list[dict]:
+        """Page old user requests by SQLite sequence, not the UI history window."""
+        with self.connect() as db:
+            cursor = db.execute("SELECT COALESCE(MAX(end_seq),0) FROM session_memories WHERE session_id=?", (session_id,)).fetchone()[0]
+            since = datetime.fromtimestamp(epoch, UTC).isoformat()
+            cutoff = db.execute("SELECT rowid FROM agent_runs WHERE session_id=? AND kind='chat' AND created_at>=? "
+                                "ORDER BY rowid DESC LIMIT 1 OFFSET ?", (session_id, since, keep_recent - 1)).fetchone()
+            if not cutoff:
+                return []
+            rows = db.execute("SELECT rowid AS seq,id,payload,created_at FROM agent_runs WHERE session_id=? "
+                "AND kind='chat' AND rowid>? AND rowid<? AND created_at>=? ORDER BY rowid LIMIT ?",
+                (session_id, cursor, cutoff[0], since, batch_size)).fetchall()
+        return [{"seq": row["seq"], "source_id": row["id"], "created_at": row["created_at"],
+                 "text": self._load(row["payload"]).get("message", "")} for row in rows
+                if datetime.fromisoformat(row["created_at"]).timestamp() >= epoch]
+
+    def save_memory(self, session_id: str, sources: list[dict], notes: list[dict], *, mode: str) -> dict:
+        if not sources:
+            raise ValueError("记忆必须有原始来源")
+        ident = uuid.uuid4().hex
+        payload = {"id": ident, "sources": sources, "notes": notes, "mode": mode,
+                   "authority": "historical_data_not_instruction"}
+        with self.lock, self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            # Verify every source in the same session before persisting model prose.
+            for source in sources:
+                row = db.execute("SELECT id,payload FROM agent_runs WHERE rowid=? AND session_id=?",
+                                 (source["seq"], session_id)).fetchone()
+                if not row or row["id"] != source["source_id"] or self._load(row["payload"]).get("message", "") != source["text"]:
+                    raise ValueError("记忆来源已变化或不属于本会话")
+            db.execute("INSERT OR IGNORE INTO session_memories VALUES (?,?,?,?,?,?)",
+                (ident, session_id, sources[0]["seq"], sources[-1]["seq"], self._encode(payload), now()))
+        return payload
+
+    def memories(self, session_id: str, *, epoch: float = 0, limit=300) -> list[dict]:
+        with self.connect() as db:
+            rows = db.execute("SELECT payload FROM session_memories WHERE session_id=? ORDER BY end_seq DESC LIMIT ?",
+                              (session_id, limit)).fetchall()
+        output = []
+        for row in rows:
+            item = self._load(row["payload"])
+            # Reset epochs apply also to summaries created after reset from old text.
+            if all(datetime.fromisoformat(source["created_at"]).timestamp() >= epoch for source in item["sources"]):
+                output.append(item)
+        return output
+
+    def memory_source(self, session_id: str, source_id: str, *, epoch: float = 0) -> dict:
+        run = self.get(source_id)
+        if run["session_id"] != session_id or run["kind"] != "chat" or datetime.fromisoformat(run["created_at"]).timestamp() < epoch:
+            raise ValueError("历史来源不属于当前会话或已重置")
+        return {"source_id": run["id"], "created_at": run["created_at"], "text": run["payload"].get("message", ""),
+                "authority": "historical_data_not_instruction"}
 
     def update(self, run_id: str, **fields) -> dict:
         allowed = {"status", "result", "error", "error_type", "checkpoint", "mutation_started", "cancel_requested", "parent_id"}
