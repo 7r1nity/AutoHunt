@@ -1,4 +1,6 @@
 .next/
+# Local simulator is intentionally not distributed with AutoHunt.
+/mock-site/
 node_modules/
 .pnpm-store/
 out/

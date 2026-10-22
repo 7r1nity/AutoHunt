@@ -1,5 +1,17 @@
 # AutoHunt 隔离评估
 
+## 当前入口与外部前置条件（2026-10-22）
+
+模拟招聘网站 `mock-site/` 已取消 Git 跟踪，不再随仓库分发。下面的历史记录保留其当时环境与结果，不代表新克隆包含模拟站。
+
+- 当前跨模块离线回归：在 `autohunt/agent/` 运行 `python -m evaluation.context_ledger_regression`。
+- 状态驱动多轮场景：同目录运行 `python -m evaluation.stateful_scenarios`。
+- 两者使用合成数据与隔离存储，无需启动模拟站或调用真实模型。
+- `evaluation.gated_delivery_browser_contract` 读取本地模拟站 HTML，`evaluation.layout_contract` 需要两个应用的本地环境；新克隆缺少这些前置条件，不能作为开箱即用的验证入口。
+- 外部模型评估仍需明确同意数据范围与调用预算。离线通过不代表真实模型理解准确率或完整网站端到端成功率。
+
+最新恢复与记忆实现及验证边界见 [恢复、对账与长期记忆](recovery-reconciliation-memory.md)。以下为按时间保留的专项与历史报告。
+
 ## 目录与普通存储迁移（2026-10-11）
 
 从 `autohunt/agent/` 运行 `python -m evaluation.layout_contract`，需要先安装两个应用的本地 `.venv`。13 项检查涵盖应用路径、实验包删除、原子读写/边界/大小、记忆/Skills、加密档案/凭据、配置、隔离后端装配，以及临时数据库中的模拟站 ASGI 页面/API 冒烟。未使用本机简历/历史，未搜索或投递。

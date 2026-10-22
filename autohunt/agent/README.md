@@ -1,97 +1,60 @@
-# AutoHunt Backend MVP
+# AutoHunt Backend
 
-This backend is a local, single-orchestrator MVP. It includes FastAPI, a Playwright browser worker, SQLite job/event storage, ordinary data-file IO, persistent `memory.md`, versioned skill files, encrypted private profile storage, durable task orchestration, and a local MCP server. The experimental Multi-Agent Broker and SandboxBackend protocol have been removed.
+Python 3.12+ / FastAPI 后端，负责模型工具调用、持久任务编排、浏览器执行、材料与简历管理、职位看板、成长计划及运行诊断。运行方式是单用户、单 Agent、单后端进程；不是分布式多 Agent 服务，也不提供容器执行沙箱。
 
-## Security model
+安装及前后端配置请先阅读 [应用运行指南](../README.md)。不要单独生成与前端不一致的 API Token。
 
-- The Agent has no shell, arbitrary path, arbitrary URL fetch, browser, or submission tool.
-- API authentication uses `AUTOHUNT_API_KEY` and constant-time comparison.
-- The Next.js browser client never receives the backend API key; a server route proxies requests.
-- Email and phone are rejected from memory and stored only in the encrypted private profile.
-- API keys and secret-looking values are rejected from memory and skills.
-- MCP can only propose skill changes; an authenticated API action must approve them.
-- Audit logs redact email, phone, and common secret patterns.
-- DeepSeek keys are encrypted with Fernet, never returned by the API, and never written to audit bodies.
-- Uploaded resumes, extracted text, candidate profiles, and structured job preferences are encrypted at rest. Resume-derived roles remain `inferred` until the user confirms them.
-- Course reports, project documents, source files, and bounded ZIP archives become candidate evidence; dependency/build directories are ignored and ZIP files are never extracted onto the host filesystem.
-- Explicit chat requests such as “把这段实习项目加入简历” create conversation-sourced evidence and rebuild the Markdown resume draft.
-- Confirmed search keyword history is encrypted, versioned, and capped at five entries.
-- Agent prompts are compiled at runtime from versioned structured preferences; raw resumes are never inserted into long-term public memory.
-- Provider URLs and model IDs are server-side allowlists; the browser cannot submit a custom upstream URL.
-- Browser navigation is restricted by the BOSS adapter to HTTPS BOSS job-detail URLs.
-- CAPTCHA, login and MFA trigger `waiting_for_user`; the worker never attempts to solve or bypass them. Resume re-discovers the active BOSS tab and restores the requested URL instead of trusting a stale page handle.
-- Real browser actions are serialized by a cross-process lock. Analysis workers may run concurrently, but browser sessions may not.
-- Every browser checkpoint stores redacted login evidence and a private screenshot under `data/private/browser-evidence/`.
-- Delivery requires a reviewable preview and a short-lived, one-time authorization. Ambiguous outcomes enter `outcome_indeterminate` and must never be retried automatically.
-- Workspace writes are path-confined, size-limited, extension-allowlisted, and atomic.
+## 启动入口
 
-## Setup
-
-From `agent/`:
+在本目录执行：
 
 ```powershell
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
-Copy-Item .env.example .env
-```
-
-Replace the API key and generate a Fernet data key as described in `.env.example`.
-`AUTOHUNT_DATA_KEY` must remain stable across restarts or previously saved credentials cannot be decrypted.
-
-Run the API:
-
-```powershell
-.\.venv\Scripts\python.exe -m playwright install chromium
 .\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --env-file .env
 ```
 
-### Connect an existing Chrome session (recommended)
-
-From `autohunt/`, start a dedicated Chrome profile with remote debugging:
-
-```powershell
-.\scripts\start-chrome-cdp.ps1
-```
-
-Log in to BOSS in that visible Chrome window. In AutoHunt choose **现有 Chrome** or **自动连接**. `auto` first tries `http://127.0.0.1:9223` and falls back to the managed Chromium profile. CAPTCHA and MFA are always completed by the user in the visible browser; AutoHunt only re-checks evidence after the user clicks continue.
-
-Do not expose the CDP port outside localhost and do not use your everyday Chrome profile as the remote-debugging profile.
-
-The owner authorized a new persistent synthetic evaluation suite on 2026-10-10.
-From this directory run `.venv/Scripts/python.exe -m evaluation.run` for isolated
-contracts, adding `--browser-fixtures` for intercepted headless Chromium pages.
-See [evaluation instructions](../docs/evaluation.md). External model evaluation
-requires separate consent and a bounded call budget. Known failures are retained,
-not hidden with expected-failure markers. Static checks remain in `scripts/verify.ps1`.
-
-Run the local MCP server over stdio:
+本地 stdio MCP 入口：
 
 ```powershell
 .\.venv\Scripts\python.exe -m app.mcp.server
 ```
 
-The MCP server exposes only allowlisted memory, sanitized candidate-profile, preference proposal/rendering, skills, and user-provided JD analysis tools. MCP preference changes remain proposals until an authenticated API action confirms them.
+HTTP API 与 MCP 工具面不是同一份接口清单。工具注册、执行策略和参数约束以当前源码为准，不能仅凭模型输出就调用任意命令或路径。
 
-## API summary
+## 模块职责
 
-- `POST /api/v1/chat`
-- `POST /api/v1/browser/search`
-- `GET/POST /api/v1/resumes`
-- `GET/POST /api/v1/materials`
-- `GET /api/v1/candidate-state`
-- `PUT /api/v1/preferences`
-- `GET/POST /api/v1/browser/tasks/current/...`
-- `POST /api/v1/jobs/{id}/delivery-preview`
-- `POST /api/v1/deliveries/{preview_id}/authorize`
-- `GET /api/v1/jobs`
-- `GET /api/v1/automation/stats`
-- `GET/PUT /api/v1/llm/config`
-- `POST /api/v1/llm/test`
-- `GET /api/v1/memory`
-- `PUT /api/v1/memory/facts`
-- `GET /api/v1/skills/...`
-- `GET/POST /api/v1/skill-proposals/...`
-- `POST /api/v1/jobs/analyze`
-- `POST /api/v1/tasks/job-analysis`
-- `GET /api/v1/tasks/{id}`
-- `GET/PUT /api/v1/private-profile`
+| 模块 | 责任 |
+| --- | --- |
+| `app/intent`、`app/llm` | 快路径/可选分类模型/主模型路由、结构化语义理解与工具调用 |
+| `app/workflow` | 持久计划、依赖、修订、接续、授权绑定及失败恢复决策 |
+| `app/runtime` | 会话状态、上下文预算、带来源记忆、执行记录和观测 |
+| `app/core` | 共享条件契约、工具注册与执行策略 |
+| `app/memory`、`app/jobs` | 材料、简历、偏好、职位、证据与统计存储 |
+| `app/browser`、`app/delivery` | 浏览器操作、后台监测、受控投递、结果核验与只读对账 |
+| `app/mcp` | 本地 MCP 服务 |
+| `evaluation/` | 隔离契约、合成数据和评估入口 |
+
+## 数据与执行边界
+
+- 私有简历、原件和模型凭据加密保存；`AUTOHUNT_DATA_KEY` 必须跨重启保持不变。
+- 后端 API 受服务 Token 保护；前端服务端代理不向浏览器暴露该 Token。
+- 受控内部参数、状态和授权指纹不进行破坏性脱敏。日志及跨信任边界输出按用途处理副本，不能修改内部校验数据。
+- 结构化任务条件与授权独立持久化；历史语义摘要用于召回，不授予工具权限、不覆盖当前条件。
+- 本地模拟投递保留预览、一次性授权、账号/岗位/简历绑定、重复保护和验证码人工接管。真实招聘网站沟通、上传简历与提交禁用。
+- 只读恢复有次数与时间预算；不确定的外部副作用不自动重放。固定本地模拟站的只读对账需要充分证据才补记完成。
+- 运行数据、密钥、浏览器 profile 与日志不提交 Git。不要暴露本地 API 或 CDP 端口到公网。
+
+模拟招聘网站源码不随本仓库分发。保留的适配器和依赖该网站页面的测试，需要另备兼容本地站点；取消 Git 跟踪不会删除已有本地副本。
+
+## 验证与文档
+
+```powershell
+.\.venv\Scripts\python.exe -m evaluation.context_ledger_regression
+.\.venv\Scripts\python.exe -m evaluation.stateful_scenarios
+```
+
+上述为合成输入、脚本模型和临时数据库的离线工程验证，不调用真实模型或执行招聘操作，不代表真实语义准确率或网站端到端成功率。外部模型评估须单独明确数据范围和请求预算。
+
+- [评估入口与历史结果](../docs/evaluation.md)
+- [详细技术文档](../docs/technical-documentation.md)
+- [受限恢复、投递对账与记忆](../docs/recovery-reconciliation-memory.md)
+- [上下文预算与执行账本](../docs/context-ledger-refactor.md)
