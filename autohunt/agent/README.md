@@ -55,6 +55,7 @@ HTTP API 与 MCP 工具面不是同一份接口清单。工具注册、执行策
 上述为合成输入、脚本模型和临时数据库的离线工程验证，不调用真实模型或执行招聘操作，不代表真实语义准确率或网站端到端成功率。外部模型评估须单独明确数据范围和请求预算。
 
 - [评估入口与历史结果](../docs/evaluation.md)
-- [详细技术文档](../docs/technical-documentation.md)
+- [完整技术报告（2026-10-23）](../docs/technical-report-2026-10-23.md)
+- [源码技术索引](../docs/technical-reference.md)
 - [受限恢复、投递对账与记忆](../docs/recovery-reconciliation-memory.md)
 - [上下文预算与执行账本](../docs/context-ledger-refactor.md)

@@ -59,7 +59,8 @@
 ## 文档
 
 - [安装与运行](autohunt/README.md)
-- [技术手册：选型、实现、闭环与测试](autohunt/docs/technical-documentation.md)
+- [完整技术报告：架构、实现细节、闭环与测试（2026-10-23）](autohunt/docs/technical-report-2026-10-23.md)
+- [源码技术索引：全部路由、工具、配置、建表与模块](autohunt/docs/technical-reference.md)
 - [上下文预算与执行账本](autohunt/docs/context-ledger-refactor.md)
 - [受限恢复、未知结果对账与长期记忆](autohunt/docs/recovery-reconciliation-memory.md)
 - [筛选证据与投递范围](autohunt/docs/delivery-evidence-reuse.md)

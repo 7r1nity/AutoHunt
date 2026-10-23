@@ -104,7 +104,8 @@ cd agent
 | `scripts/` | 配置、启动、维护和静态检查 |
 
 - [后端说明](agent/README.md)
-- [详细技术手册](docs/technical-documentation.md)
+- [完整技术报告（2026-10-23）](docs/technical-report-2026-10-23.md)
+- [源码技术索引](docs/technical-reference.md)
 - [上下文预算与执行账本](docs/context-ledger-refactor.md)
 - [恢复、对账与长期记忆](docs/recovery-reconciliation-memory.md)
 - [岗位定位与移除](docs/job-target-actions.md)
