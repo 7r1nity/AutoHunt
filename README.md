@@ -56,6 +56,8 @@
 
 运行命令及覆盖边界见 [评估说明](autohunt/docs/evaluation.md) 和 [恢复、对账与记忆验证](autohunt/docs/recovery-reconciliation-memory.md)。通过数不等于自然语言准确率、真实网站成功率或生产可靠性承诺。运行日志和个人数据不提交 Git。
 
+最新实测见 [2026-10-26 分层评测报告](autohunt/docs/benchmark-2026-10-26.md)：30 份虚构简历、100 条 JD、450 对参考标签，20 组真实模型多轮规划，以及 96 次隔离浏览器/模拟站对照试验。包含失败与框架修正记录；标签尚待人工复核，正向投递完成率与安全停止率分别报告。
+
 ## 文档
 
 - [安装与运行](autohunt/README.md)

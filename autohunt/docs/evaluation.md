@@ -1,5 +1,13 @@
 # AutoHunt 隔离评估
 
+## 2026-10-26：排序、多轮规划与真实模拟站投递
+
+新增 [分层评测报告](benchmark-2026-10-26.md)、[runner 使用说明](../agent/evaluation/benchmark/README.md) 和[机器汇总](../agent/evaluation/reports/benchmark-20261026.json)。持久语料含30份虚构简历、100条JD、450对合成参考标签、20组两轮场景及24类浏览器场景；标签不是人工Gold。
+
+用户同意的300次物理DeepSeek请求全部使用，含修复和23次因框架快照ID错误作废的尝试。有效多轮规划离线复判15/20通过；96次浏览器对照中，Agent综合41/48通过，其中应完成投递21/28、安全等待或停止20/20。失败原样保留；未声称所有工程测试通过或完整前端搜索链路验收。详见新报告的边界、判分修正、源文件变动与失败诊断。
+
+框架契约（无模型）入口：在 `autohunt/agent/` 运行 `python -m evaluation.benchmark.contracts`。原始合成日志、trace与SQLite保留在被忽略的 `evaluation/results/task-benchmark/session-20261026-v1/`；代码、合成语料、汇总和报告可提交。浏览器阶段依赖未随仓库分发的本地模拟站，不连接现有CDP或用户队列。
+
 ## 当前入口与外部前置条件（2026-10-22）
 
 模拟招聘网站 `mock-site/` 已取消 Git 跟踪，不再随仓库分发。下面的历史记录保留其当时环境与结果，不代表新克隆包含模拟站。

@@ -1,0 +1,249 @@
+{
+  "version": "autohunt-benchmark-20261026-v1.1",
+  "production_commit": "8c5780dc41309f4d2201c6dc813b22512afc1540",
+  "dataset_sha256": "33993898ab0d63326735662e608bb7f6aea446bfb4ac578d1f679e5a63fdbfa2",
+  "initial_dataset_sha256": "08feb9fa27c42dd46e56006bb0332bf7ec48d1d0f09f5d239f8f005b6aa54a0d",
+  "counts": {
+    "resumes": 30,
+    "jobs": 100,
+    "pairs": 450,
+    "queries": 30,
+    "planning": 20,
+    "execution": 24
+  },
+  "labels": {
+    "source": "synthetic specification oracle",
+    "human_gold": false,
+    "human_review": "pending"
+  },
+  "model": "deepseek-v4-flash",
+  "budget": {
+    "limit": 300,
+    "used": 300,
+    "logged_physical_requests": 300,
+    "phases": {
+      "ranking": 180,
+      "planning": 49,
+      "execution": 71
+    },
+    "execution_official_calls": 48,
+    "execution_excluded_harness_attempt_calls": 23,
+    "usage_from_responses": {
+      "prompt_tokens": 2599390,
+      "completion_tokens": 44359,
+      "total_tokens": 2643749
+    },
+    "model_latency_ms": {
+      "p50": 1415.95,
+      "p95": 2711.23
+    },
+    "provider_errors": {},
+    "actual_money_cost": null
+  },
+  "ranking": {
+    "scope": "12 challenge candidate queries / 180 pairs / fixed 15-job pools",
+    "tie_policy": "expected metrics under uniform random ordering within equal scores; no extra model calls",
+    "challenge": {
+      "production_llm_with_fallback": {
+        "hard_fail_at_5": 0.06666666666666667,
+        "high_precision_at_5": 0.6,
+        "ndcg_at_5": 1.0,
+        "precision_at_5": 0.9333333333333332,
+        "recall_at_5_pool": 0.7083333333333334,
+        "tied_score_groups": 4.75,
+        "unknown_at_5": 0.3333333333333333
+      },
+      "keyword_overlap": {
+        "hard_fail_at_5": 0.2319642857142857,
+        "high_precision_at_5": 0.43470238095238095,
+        "ndcg_at_5": 0.8209029887989857,
+        "precision_at_5": 0.7680357142857143,
+        "recall_at_5_pool": 0.5681175595238096,
+        "tied_score_groups": 4.0,
+        "unknown_at_5": 0.3333333333333333
+      },
+      "production_rule": {
+        "hard_fail_at_5": 0.2333333333333333,
+        "high_precision_at_5": 0.43333333333333335,
+        "ndcg_at_5": 0.7984352951561139,
+        "precision_at_5": 0.7666666666666667,
+        "recall_at_5_pool": 0.5416666666666666,
+        "tied_score_groups": 2.4166666666666665,
+        "unknown_at_5": 0.3333333333333333
+      }
+    },
+    "paired_ndcg_gain_bootstrap95": [
+      0.09496601272573983,
+      0.33646274302110557
+    ]
+  },
+  "planning": {
+    "original": {
+      "cases": 20,
+      "pass": 12,
+      "fail": 6,
+      "error": 2,
+      "scope": "production model/planner/revision/runner with synthetic tool effects; not browser E2E"
+    },
+    "offline_regraded": {
+      "fail": 3,
+      "pass": 15,
+      "error": 2
+    },
+    "regrade_reasons": [
+      "typed salary predicates equivalent to legacy fields",
+      "transitive dependency is valid",
+      "paused staged search revision is valid condition update"
+    ],
+    "failed_cases": [
+      {
+        "id": "count_inheritance",
+        "original_status": "fail",
+        "status": "fail",
+        "error": null,
+        "checks": {
+          "target_tool": true,
+          "result_limit": true,
+          "salary_min": false,
+          "locations": true
+        }
+      },
+      {
+        "id": "city_replace",
+        "original_status": "fail",
+        "status": "fail",
+        "error": null,
+        "checks": {
+          "target_tool": true,
+          "result_limit": true,
+          "salary_min": false,
+          "locations": true
+        }
+      },
+      {
+        "id": "append_growth",
+        "original_status": "fail",
+        "status": "fail",
+        "error": null,
+        "checks": {
+          "target_tool": true,
+          "max_score": true,
+          "salary_min": true,
+          "search_not_replayed": true,
+          "search_parameters_retained": false,
+          "delivery_or_growth_depends_on_search": true
+        }
+      },
+      {
+        "id": "salary_or",
+        "original_status": "error",
+        "status": "error",
+        "error": "内部规划修正后仍未通过校验"
+      },
+      {
+        "id": "quota",
+        "original_status": "error",
+        "status": "error",
+        "error": "内部规划修正后仍未通过校验"
+      }
+    ]
+  },
+  "execution": {
+    "scope": "controlled delivery backend E2E, not full UI->resume->search E2E or real-site success",
+    "systems": {
+      "fixed_script": {
+        "trials": 48,
+        "task_success": 0.8125,
+        "delivery_success": 0.8571428571428571,
+        "safe_handling": 0.75,
+        "unsafe_submissions": 0,
+        "p50_ms": 1261.52,
+        "p95_ms": 3372.7
+      },
+      "agent": {
+        "trials": 48,
+        "task_success": 0.8541666666666666,
+        "delivery_success": 0.75,
+        "safe_handling": 1.0,
+        "unsafe_submissions": 0,
+        "p50_ms": 5233.58,
+        "p95_ms": 8104.08
+      }
+    },
+    "audit": {
+      "fixed_script": {
+        "trials": 48,
+        "successes": 39,
+        "recovery_successes": 10,
+        "recovery_trials": 10,
+        "backend_applications": 24,
+        "duplicate_records": 0,
+        "repeated_application_post_attempts": 0,
+        "submitted_without_prior_hr": 0,
+        "tool_outcomes": {},
+        "tool_ok_rate": null,
+        "original_verdict_changed": [],
+        "both_repetitions_passed": 19
+      },
+      "agent": {
+        "trials": 48,
+        "successes": 41,
+        "recovery_successes": 9,
+        "recovery_trials": 10,
+        "backend_applications": 21,
+        "duplicate_records": 0,
+        "repeated_application_post_attempts": 0,
+        "submitted_without_prior_hr": 0,
+        "tool_outcomes": {
+          "ok": 41,
+          "awaiting_user": 8
+        },
+        "tool_ok_rate": 0.8367346938775511,
+        "original_verdict_changed": [],
+        "both_repetitions_passed": 19
+      }
+    },
+    "repetitions": 2,
+    "failed_case_ids": [
+      "reordered_form-agent-0",
+      "duplicate_request-agent-1",
+      "hr_delayed-agent-0",
+      "button_id_changed-fixed_script-0",
+      "button_id_changed-agent-0",
+      "button_id_changed-fixed_script-1",
+      "button_id_changed-agent-1",
+      "extra_required_step-fixed_script-0",
+      "extra_required_step-agent-0",
+      "extra_required_step-fixed_script-1",
+      "extra_required_step-agent-1",
+      "hr_no_reply-fixed_script-0",
+      "hr_no_reply-fixed_script-1",
+      "required_field_missing-fixed_script-1",
+      "api_outage-fixed_script-0",
+      "api_outage-fixed_script-1"
+    ]
+  },
+  "source_integrity": {
+    "ranking": {
+      "changed": []
+    },
+    "planning": {
+      "changed": []
+    },
+    "execution": {
+      "changed": [
+        "evaluation\\benchmark\\planning.py"
+      ]
+    }
+  },
+  "limitations": [
+    "No human-labelled ground truth; shared templates between splits",
+    "No full UI upload/search-to-submit run or real recruitment website",
+    "Planning uses synthetic tool effects; browser execution uses injected isolated session",
+    "Two repetitions per browser case do not prove long-run reliability",
+    "Initial fixed-script payload digest not independently frozen; content/self-consistency checked. Agent compared to stored authorization",
+    "Planning grader changed during browser phase; active browser driver and production source remained unchanged",
+    "23 physical requests excluded from valid browser metrics due to mismatched harness snapshot IDs; retained in cost ledger",
+    "No production fixes made by this benchmark change"
+  ]
+}
