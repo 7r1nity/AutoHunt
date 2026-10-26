@@ -35,8 +35,8 @@ class BudgetExceeded(PermissionError):
 
 
 class PhysicalBudget:
-    def __init__(self, path, limit):
-        if not 1 <= limit <= 300: raise ValueError("Consent ceiling is 300 physical requests")
+    def __init__(self, path, limit, *, ceiling=300):
+        if not 1 <= limit <= ceiling <= 10000: raise ValueError("Physical request limit exceeds this runner's consent ceiling")
         self.path, self.limit = path, limit
         if not path.exists(): write(path,{"limit":limit,"used":0,"reservations":[]})
         if self.state()["limit"] != limit: raise ValueError("Cannot silently change persisted budget")
