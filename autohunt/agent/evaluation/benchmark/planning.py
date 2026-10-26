@@ -37,6 +37,28 @@ def salary_scope_exact(arguments,floor):
             and not salary_accepts(arguments,salary=f"{max(0,floor-1000)}-{floor+1000}元/月"))
 
 
+def inherited_search_scope(plan, consumer, old=None):
+    """Search provenance can enforce scope without copying its filter to delivery."""
+    from app.workflow.validation import dependency_ancestors
+    args=consumer.get("arguments",{})
+    if args.get("selector") or args.get("target_step_id"):
+        return False  # Explicit targets are a different contract.
+    source=next((s for s in plan.get("steps",[]) if s["id"]==consumer.get("evidence_step")),None)
+    if not source or source["tool"]!="job_search_start" or source["id"] not in dependency_ancestors(consumer["id"],plan["steps"]):
+        return False
+    current=source.get("staged_arguments") or source["arguments"]
+    if not current.get("filters"):
+        return False
+    if args.get("source_task_id") and args["source_task_id"]!=source.get("task_id"):
+        return False
+    if old:
+        previous=next((s for s in old.get("steps",[]) if s["id"]==source["id"]),None)
+        previous=(previous.get("staged_arguments") or previous["arguments"]) if previous else {}
+    else:
+        previous=plan.get("verified_conditions",{})
+    return all(current.get(key)==previous.get(key) for key in ("filters","locations","queries"))
+
+
 def check_plan(plan,expected,conditions,old):
     pending=[s for s in plan.get("steps",[]) if not s.get("withdrawn") and s.get("status") not in {"skipped","blocked"}]
     tools={s["tool"]:s for s in pending}; checks={}
@@ -64,7 +86,8 @@ def check_plan(plan,expected,conditions,old):
         from app.workflow.validation import dependency_ancestors
         consumer=tools.get(expected["tool"],{})
         checks["delivery_or_growth_depends_on_search"]=search.get("id") in dependency_ancestors(consumer.get("id",""),pending)
-    if expected.get("inherited_scope"): checks["scope_retained"]=bool(args.get("filters"))
+    if expected.get("inherited_scope"):
+        checks["scope_retained"]=bool(args.get("filters")) or inherited_search_scope(plan,tools.get(expected["tool"],{}),old)
     if expected.get("not_stop"): checks["no_stop"]=not any("stop" in name or "cancel" in name for name in tools)
     if expected.get("no_search"): checks["no_new_search"]=not any(s["tool"]=="job_search_start" and s["status"]=="pending" for s in pending)
     if expected.get("no_search") and expected.get("tool")=="search_state_update" and search.get("staged_arguments"):

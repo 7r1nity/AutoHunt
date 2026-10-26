@@ -15,9 +15,20 @@ from .corpus import build, digest
 from .analyze import tie_metrics
 from .planning import salary_scope_exact, check_plan
 from .audit import backend_assertions, expected_resume
+from .ranking import candidate_request
 
 
 class Contracts(unittest.TestCase):
+    def test_current_matcher_receives_sourced_minimal_facts(self):
+        data=build(); candidate=data["resumes"][0]
+        request=candidate_request(candidate,data["jobs"][0])
+        facts=request.candidate_facts["documents"]
+        self.assertEqual(set(facts),{"education","years_experience"})
+        self.assertTrue(all(quote in candidate["text"] for quote in facts.values()))
+        hidden={**candidate,"years":None,"education":None}
+        self.assertFalse(candidate_request(hidden,data["jobs"][0]).candidate_facts["documents"])
+        with self.assertRaises(ValueError): candidate_request({**candidate,"years":999},data["jobs"][0])
+
     def test_corpus_counts_and_unique_pairs(self):
         data=build()
         self.assertEqual([len(data[k]) for k in ("resumes","jobs","pairs","planning","execution")],[30,100,450,20,24])

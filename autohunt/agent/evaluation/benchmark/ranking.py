@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 import time
@@ -18,6 +19,21 @@ def tokens(text):
     return words
 
 
+def candidate_request(candidate, jd):
+    """Use the current minimal-facts interface, not the pre-fix narrow input."""
+    documents={}
+    for field,key,prefix in (("education","education","学历："),("years_experience","years","工作年限：")):
+        if candidate.get(key) is not None:
+            quote=prefix+str(candidate[key])
+            if quote not in candidate["text"]:
+                raise ValueError("Synthetic qualification fact has no source quote")
+            documents[field]=quote
+    return JobAnalysisRequest(title=jd["title"],company=jd["company"],description=jd["description"],
+        candidate_skills=candidate["skills"],target_roles=[candidate["role"]],search_queries=[candidate["role"]],
+        candidate_facts={"document_id":candidate["id"],"digest":hashlib.sha256(candidate["text"].encode()).hexdigest(),
+                         "documents":documents,"authority":"synthetic_candidate_evidence_not_execution_permission"})
+
+
 async def run(data, output, model=None):
     resumes={item["id"]:item for item in data["resumes"]}; jobs={item["id"]:item for item in data["jobs"]}
     labels={(p["candidate_id"],p["job_id"]):p for p in data["pairs"]}
@@ -25,8 +41,7 @@ async def run(data, output, model=None):
     async def score(candidate,jd):
         async with semaphore:
             token=CASE.set("ranking:"+candidate["id"]+":"+jd["id"]); started=time.perf_counter()
-            request=JobAnalysisRequest(title=jd["title"],company=jd["company"],description=jd["description"],
-                candidate_skills=candidate["skills"],target_roles=[candidate["role"]],search_queries=[candidate["role"]])
+            request=candidate_request(candidate,jd)
             raw=[]
             async def traced(request):
                 result=await model.generate(request); raw.append(result); return result
@@ -41,8 +56,7 @@ async def run(data, output, model=None):
         candidate=resumes[query["candidate_id"]]; pool=[jobs[ident] for ident in query["pool"]]
         references=[labels[(candidate["id"],j["id"])] for j in pool]
         relevant=[p["relevance"] for p in references]; eligible=[p["eligibility"] for p in references]
-        rule_scores=[analyze_job(JobAnalysisRequest(title=j["title"],company=j["company"],description=j["description"],
-            candidate_skills=candidate["skills"],target_roles=[candidate["role"]],search_queries=[candidate["role"]])).score for j in pool]
+        rule_scores=[analyze_job(candidate_request(candidate,j)).score for j in pool]
         candidate_terms=tokens(candidate["text"])
         keyword_scores=[len(candidate_terms & tokens(j["title"]+j["description"])) for j in pool]
         systems={"keyword_overlap":keyword_scores,"production_rule":rule_scores}
@@ -62,7 +76,7 @@ async def run(data, output, model=None):
             for name in {r["system"] for r in rows if r["split"]==split}
             if (selected:=[r for r in rows if r["split"]==split and r["system"]==name])}
     summary={"label_status":"synthetic_oracle_pending_human_review","scope":"fixed_pool_reranking_not_full_corpus_recall",
-        "candidate_information_gap":"Production matcher receives skills and target roles, NOT structured years/education/full resume. Same production input used for rules and LLM.",
+        "candidate_information_gap":"Current matcher receives skills, roles and sourced minimal education/years facts; no full resume. Rule baseline receives the same request but does not reason over qualification facts.",
         "tie_policy":"stable corpus order, shared across systems; report ties rather than claim unique rank",
         "splits":groups}
     write(output/"ranking-summary.json",summary)

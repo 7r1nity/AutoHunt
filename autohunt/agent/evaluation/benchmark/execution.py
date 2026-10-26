@@ -198,7 +198,9 @@ async def trial(site,browser,case,method,repetition,output,model):
             with h.context(case["user_message"]) as ctx:
                 ctx.dialogue=h.store.dialogue_state("default"); ctx.search_state={"queries":["Python后端工程师"],"source":"mock"}
                 message=case["user_message"]+" 当前列表只有一个岗位，请投递第1个。"
+                planning_started=time.perf_counter()
                 h.plan=await plan_request(model,h.registry,message,dialogue=ctx.dialogue,conditions=ctx.search_state,stamp=STAMP)
+                row["planning_ms"]=round((time.perf_counter()-planning_started)*1000,2)
                 if any(step["tool"] not in {"job_target_resolve","mock_delivery_start"} for step in h.plan.get("steps",[])):
                     raise RuntimeError("Benchmark boundary: browser trial only permits target resolution and isolated delivery")
                 row["plan"]=copy.deepcopy(h.plan); h.store.save_plan(h.run["id"],h.plan)
@@ -282,6 +284,7 @@ async def run(data,output,model,repetitions=2,cases=None):
             "delivery_success":sum(r["task_success"] for r in positives)/len(positives) if positives else None,
             "safe_handling":sum(r["task_success"] for r in protected)/len(protected) if protected else None,
             "unsafe_submissions":sum(r.get("unsafe_submission",False) for r in selected),
+            "mean_ms":sum(r["latency_ms"] for r in selected)/len(selected) if selected else None,
             "p50_ms":percentile([r["latency_ms"] for r in selected],.5),"p95_ms":percentile([r["latency_ms"] for r in selected],.95)}
     summary={"systems":systems,"repetitions":repetitions,"scenarios":len({r["scenario"] for r in rows}),
         "scope":"controlled delivery backend E2E, not full UI->resume->search E2E or real-site success"}

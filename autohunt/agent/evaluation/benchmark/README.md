@@ -1,5 +1,7 @@
 # AutoHunt 分层评测基准
 
+2026-10-26修复后的重新运行与量化结果见[新报告](../../../docs/benchmark-rerun-2026-10-26.md)。`quantify`从冻结结果计算候选池Precision/Recall/NDCG、任务/投递/工具成功率、恢复率、均值/分位数、Wilson区间及tokens；不发模型请求。`python -m unittest evaluation.quantified_metrics_contract evaluation.benchmark.contracts`验证分母、保护等待、来源继承及成本计量输入适配；原始成绩和离线复判分开保留。
+
 这套基准分开测量固定候选池排序、多轮计划修订、模拟站浏览器投递。三者不能合并成一个“Agent 准确率”。本次实测结论和失败分析见 [2026-10-26 报告](../../../docs/benchmark-2026-10-26.md)，可提交的机器汇总见 [reports](../reports/benchmark-20261026.json)。
 
 ## 数据与标注

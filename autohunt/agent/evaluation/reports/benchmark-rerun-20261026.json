@@ -1,0 +1,1140 @@
+{
+  "production_commit": "6a550d5bf8615750caf08d64c9abb0a7ed34ec80",
+  "dataset_sha256": "33993898ab0d63326735662e608bb7f6aea446bfb4ac578d1f679e5a63fdbfa2",
+  "definitions": {
+    "ranking": "Macro on 12 challenge queries, fixed 15-job pools; positives relevance>=1, gains 2^relevance-1; ties uniformly averaged",
+    "recall": "Recall@5 within labelled candidate pool, not full-site retrieval Recall; zero-relevant queries omitted with explicit count",
+    "task_success": "Expected final result including correct safety waits/stops; independent backend content and HR-order checks",
+    "end_to_end_delivery": "Only must-submit cases; selected-job instruction through planner/tool/queue/browser to correct backend receipt, not full upload/search pipeline",
+    "raw_tool_success": "tool_finished status=ok / all observed tool_finished; includes protective refusals as raw non-ok, not DOM click accuracy; fixed script not instrumented",
+    "duration": "Trial wall time includes fixture setup, real model planning, execution and teardown; HR delay is synthetic, not real recruitment response time",
+    "recovery_and_delay_tolerance": "Five preregistered cases: slow_page, slow_messages, submit_response_lost, hr_delayed, reload_after_greeting",
+    "fault_recovery": "Strict subset submit_response_lost and reload_after_greeting; not all possible production errors",
+    "confidence": "Wilson intervals describe finite trials, repetitions/templates are correlated; not proof of production reliability"
+  },
+  "ranking": {
+    "keyword_overlap": {
+      "queries": 12,
+      "pairs": 180,
+      "metrics": {
+        "hard_fail_at_5": 0.2319642857142857,
+        "high_precision_at_5": 0.43470238095238095,
+        "ndcg_at_5": 0.8209029887989857,
+        "precision_at_5": 0.7680357142857143,
+        "recall_at_5_pool": 0.5681175595238096,
+        "tied_score_groups": 4.0,
+        "unknown_at_5": 0.3333333333333333
+      },
+      "recall_defined_queries": 12,
+      "ndcg_defined_queries": 12
+    },
+    "production_llm_with_fallback": {
+      "queries": 12,
+      "pairs": 180,
+      "metrics": {
+        "hard_fail_at_5": 0.0642857142857143,
+        "high_precision_at_5": 0.6,
+        "ndcg_at_5": 1.0000000000000002,
+        "precision_at_5": 0.9333333333333332,
+        "recall_at_5_pool": 0.7083333333333334,
+        "tied_score_groups": 3.4166666666666665,
+        "unknown_at_5": 0.3333333333333333
+      },
+      "recall_defined_queries": 12,
+      "ndcg_defined_queries": 12
+    },
+    "production_rule": {
+      "queries": 12,
+      "pairs": 180,
+      "metrics": {
+        "hard_fail_at_5": 0.2333333333333333,
+        "high_precision_at_5": 0.43333333333333335,
+        "ndcg_at_5": 0.7984352951561139,
+        "precision_at_5": 0.7666666666666667,
+        "recall_at_5_pool": 0.5416666666666666,
+        "tied_score_groups": 2.4166666666666665,
+        "unknown_at_5": 0.3333333333333333
+      },
+      "recall_defined_queries": 12,
+      "ndcg_defined_queries": 12
+    }
+  },
+  "qualification": {
+    "pairs": 180,
+    "accuracy": 0.9777777777777777,
+    "confusion": [
+      {
+        "expected": "fail",
+        "actual": "fail",
+        "count": 52
+      },
+      {
+        "expected": "pass",
+        "actual": "pass",
+        "count": 64
+      },
+      {
+        "expected": "pass",
+        "actual": "unknown",
+        "count": 4
+      },
+      {
+        "expected": "unknown",
+        "actual": "unknown",
+        "count": 60
+      }
+    ],
+    "matcher_duration": {
+      "n": 180,
+      "mean_ms": 1941.0681666666667,
+      "p50_ms": 1874.74,
+      "p95_ms": 2477.06
+    }
+  },
+  "execution": {
+    "fixed_script": {
+      "task_success": {
+        "successes": 40,
+        "total": 48,
+        "rate": 0.8333333333333334,
+        "wilson95": [
+          0.7042217159874441,
+          0.9130448642351444
+        ]
+      },
+      "task_failure": {
+        "successes": 8,
+        "total": 48,
+        "rate": 0.16666666666666666,
+        "wilson95": [
+          0.08695513576485567,
+          0.295778284012556
+        ]
+      },
+      "end_to_end_delivery_success": {
+        "successes": 24,
+        "total": 28,
+        "rate": 0.8571428571428571,
+        "wilson95": [
+          0.685101978364747,
+          0.9430099468025059
+        ]
+      },
+      "protected_case_handling": {
+        "successes": 16,
+        "total": 20,
+        "rate": 0.8,
+        "wilson95": [
+          0.5839825677481064,
+          0.919342337420202
+        ]
+      },
+      "task_duration": {
+        "n": 48,
+        "mean_ms": 1529.1656249999999,
+        "p50_ms": 1232.9,
+        "p95_ms": 3289.35
+      },
+      "positive_delivery_duration": {
+        "n": 28,
+        "mean_ms": 1627.5385714285715,
+        "p50_ms": 1274.16,
+        "p95_ms": 3349.3
+      },
+      "planning_duration": {
+        "n": 0,
+        "mean_ms": null,
+        "p50_ms": null,
+        "p95_ms": null
+      },
+      "raw_tool_success": {
+        "successes": 0,
+        "total": 0,
+        "rate": null
+      },
+      "raw_tool_failure": {
+        "successes": 0,
+        "total": 0,
+        "rate": null
+      },
+      "tool_statuses": {},
+      "by_tool": {},
+      "recovery_and_delay_tolerance": {
+        "successes": 10,
+        "total": 10,
+        "rate": 1.0,
+        "wilson95": [
+          0.7224672001371107,
+          0.9999999999999999
+        ]
+      },
+      "fault_recovery": {
+        "successes": 4,
+        "total": 4,
+        "rate": 1.0,
+        "wilson95": [
+          0.5101091635454027,
+          1
+        ]
+      },
+      "duplicates": 0,
+      "unsafe_submissions": 0,
+      "repeated_post_attempts": 0,
+      "by_scenario": [
+        {
+          "scenario": "api_outage",
+          "successes": 0,
+          "total": 2,
+          "rate": 0.0,
+          "wilson95": [
+            0,
+            0.6576197724933469
+          ]
+        },
+        {
+          "scenario": "button_id_changed",
+          "successes": 0,
+          "total": 2,
+          "rate": 0.0,
+          "wilson95": [
+            0,
+            0.6576197724933469
+          ]
+        },
+        {
+          "scenario": "button_label_changed",
+          "successes": 2,
+          "total": 2,
+          "rate": 1.0,
+          "wilson95": [
+            0.34238022750665303,
+            1
+          ]
+        },
+        {
+          "scenario": "button_moved",
+          "successes": 2,
+          "total": 2,
+          "rate": 1.0,
+          "wilson95": [
+            0.34238022750665303,
+            1
+          ]
+        },
+        {
+          "scenario": "cancel_before_submit",
+          "successes": 2,
+          "total": 2,
+          "rate": 1.0,
+          "wilson95": [
+            0.34238022750665303,
+            1
+          ]
+        },
+        {
+          "scenario": "captcha",
+          "successes": 2,
+          "total": 2,
+          "rate": 1.0,
+          "wilson95": [
+            0.34238022750665303,
+            1
+          ]
+        },
+        {
+          "scenario": "closed_job",
+          "successes": 2,
+          "total": 2,
+          "rate": 1.0,
+          "wilson95": [
+            0.34238022750665303,
+            1
+          ]
+        },
+        {
+          "scenario": "duplicate_request",
+          "successes": 2,
+          "total": 2,
+          "rate": 1.0,
+          "wilson95": [
+            0.34238022750665303,
+            1
+          ]
+        },
+        {
+          "scenario": "extra_optional_field",
+          "successes": 2,
+          "total": 2,
+          "rate": 1.0,
+          "wilson95": [
+            0.34238022750665303,
+            1
+          ]
+        },
+        {
+          "scenario": "extra_required_step",
+          "successes": 0,
+          "total": 2,
+          "rate": 0.0,
+          "wilson95": [
+            0,
+            0.6576197724933469
+          ]
+        },
+        {
+          "scenario": "hr_delayed",
+          "successes": 2,
+          "total": 2,
+          "rate": 1.0,
+          "wilson95": [
+            0.34238022750665303,
+            1
+          ]
+        },
+        {
+          "scenario": "hr_no_reply",
+          "successes": 0,
+          "total": 2,
+          "rate": 0.0,
+          "wilson95": [
+            0,
+            0.6576197724933469
+          ]
+        },
+        {
+          "scenario": "missing_resume",
+          "successes": 2,
+          "total": 2,
+          "rate": 1.0,
+          "wilson95": [
+            0.34238022750665303,
+            1
+          ]
+        },
+        {
+          "scenario": "normal",
+          "successes": 2,
+          "total": 2,
+          "rate": 1.0,
+          "wilson95": [
+            0.34238022750665303,
+            1
+          ]
+        },
+        {
+          "scenario": "reload_after_greeting",
+          "successes": 2,
+          "total": 2,
+          "rate": 1.0,
+          "wilson95": [
+            0.34238022750665303,
+            1
+          ]
+        },
+        {
+          "scenario": "reordered_form",
+          "successes": 2,
+          "total": 2,
+          "rate": 1.0,
+          "wilson95": [
+            0.34238022750665303,
+            1
+          ]
+        },
+        {
+          "scenario": "required_field_missing",
+          "successes": 2,
+          "total": 2,
+          "rate": 1.0,
+          "wilson95": [
+            0.34238022750665303,
+            1
+          ]
+        },
+        {
+          "scenario": "resume_changed",
+          "successes": 2,
+          "total": 2,
+          "rate": 1.0,
+          "wilson95": [
+            0.34238022750665303,
+            1
+          ]
+        },
+        {
+          "scenario": "resume_upload",
+          "successes": 2,
+          "total": 2,
+          "rate": 1.0,
+          "wilson95": [
+            0.34238022750665303,
+            1
+          ]
+        },
+        {
+          "scenario": "slow_messages",
+          "successes": 2,
+          "total": 2,
+          "rate": 1.0,
+          "wilson95": [
+            0.34238022750665303,
+            1
+          ]
+        },
+        {
+          "scenario": "slow_page",
+          "successes": 2,
+          "total": 2,
+          "rate": 1.0,
+          "wilson95": [
+            0.34238022750665303,
+            1
+          ]
+        },
+        {
+          "scenario": "submit_response_lost",
+          "successes": 2,
+          "total": 2,
+          "rate": 1.0,
+          "wilson95": [
+            0.34238022750665303,
+            1
+          ]
+        },
+        {
+          "scenario": "validation_rejected",
+          "successes": 2,
+          "total": 2,
+          "rate": 1.0,
+          "wilson95": [
+            0.34238022750665303,
+            1
+          ]
+        },
+        {
+          "scenario": "wrong_account",
+          "successes": 2,
+          "total": 2,
+          "rate": 1.0,
+          "wilson95": [
+            0.34238022750665303,
+            1
+          ]
+        }
+      ],
+      "failed_cases": [
+        {
+          "id": "button_id_changed-fixed_script-0",
+          "scenario": "button_id_changed",
+          "error_type": "TimeoutError",
+          "checkpoints": []
+        },
+        {
+          "id": "button_id_changed-fixed_script-1",
+          "scenario": "button_id_changed",
+          "error_type": "TimeoutError",
+          "checkpoints": []
+        },
+        {
+          "id": "extra_required_step-fixed_script-0",
+          "scenario": "extra_required_step",
+          "error_type": null,
+          "checkpoints": []
+        },
+        {
+          "id": "extra_required_step-fixed_script-1",
+          "scenario": "extra_required_step",
+          "error_type": null,
+          "checkpoints": []
+        },
+        {
+          "id": "hr_no_reply-fixed_script-0",
+          "scenario": "hr_no_reply",
+          "error_type": "TimeoutError",
+          "checkpoints": []
+        },
+        {
+          "id": "hr_no_reply-fixed_script-1",
+          "scenario": "hr_no_reply",
+          "error_type": "TimeoutError",
+          "checkpoints": []
+        },
+        {
+          "id": "api_outage-fixed_script-0",
+          "scenario": "api_outage",
+          "error_type": "TimeoutError",
+          "checkpoints": []
+        },
+        {
+          "id": "api_outage-fixed_script-1",
+          "scenario": "api_outage",
+          "error_type": "TimeoutError",
+          "checkpoints": []
+        }
+      ]
+    },
+    "agent": {
+      "task_success": {
+        "successes": 47,
+        "total": 48,
+        "rate": 0.9791666666666666,
+        "wilson95": [
+          0.8910078200474814,
+          0.9963128890224893
+        ]
+      },
+      "task_failure": {
+        "successes": 1,
+        "total": 48,
+        "rate": 0.020833333333333332,
+        "wilson95": [
+          0.003687110977510649,
+          0.10899217995251861
+        ]
+      },
+      "end_to_end_delivery_success": {
+        "successes": 27,
+        "total": 28,
+        "rate": 0.9642857142857143,
+        "wilson95": [
+          0.8228780225664668,
+          0.9936674801509623
+        ]
+      },
+      "protected_case_handling": {
+        "successes": 20,
+        "total": 20,
+        "rate": 1.0,
+        "wilson95": [
+          0.8388748419471806,
+          1
+        ]
+      },
+      "task_duration": {
+        "n": 48,
+        "mean_ms": 6067.939791666667,
+        "p50_ms": 6021.96,
+        "p95_ms": 8242.04
+      },
+      "positive_delivery_duration": {
+        "n": 28,
+        "mean_ms": 6128.260714285714,
+        "p50_ms": 6021.96,
+        "p95_ms": 6972.08
+      },
+      "planning_duration": {
+        "n": 48,
+        "mean_ms": 3004.630833333333,
+        "p50_ms": 2893.45,
+        "p95_ms": 3941.43
+      },
+      "raw_tool_success": {
+        "successes": 50,
+        "total": 53,
+        "rate": 0.9433962264150944,
+        "wilson95": [
+          0.8462979168981911,
+          0.9805633385150642
+        ]
+      },
+      "raw_tool_failure": {
+        "successes": 3,
+        "total": 53,
+        "rate": 0.05660377358490566,
+        "wilson95": [
+          0.019436661484935766,
+          0.15370208310180888
+        ]
+      },
+      "tool_statuses": {
+        "ok": 50,
+        "awaiting_user": 1,
+        "error": 2
+      },
+      "by_tool": {
+        "job_target_resolve": {
+          "successes": 5,
+          "total": 5,
+          "rate": 1.0,
+          "wilson95": [
+            0.5655175352168251,
+            1
+          ],
+          "duration": {
+            "n": 5,
+            "mean_ms": 100.0,
+            "p50_ms": 94,
+            "p95_ms": 110
+          }
+        },
+        "mock_delivery_start": {
+          "successes": 45,
+          "total": 48,
+          "rate": 0.9375,
+          "wilson95": [
+            0.8316456194505365,
+            0.9785167670916107
+          ],
+          "duration": {
+            "n": 45,
+            "mean_ms": 242.77777777777777,
+            "p50_ms": 235,
+            "p95_ms": 281
+          }
+        }
+      },
+      "recovery_and_delay_tolerance": {
+        "successes": 10,
+        "total": 10,
+        "rate": 1.0,
+        "wilson95": [
+          0.7224672001371107,
+          0.9999999999999999
+        ]
+      },
+      "fault_recovery": {
+        "successes": 4,
+        "total": 4,
+        "rate": 1.0,
+        "wilson95": [
+          0.5101091635454027,
+          1
+        ]
+      },
+      "duplicates": 0,
+      "unsafe_submissions": 0,
+      "repeated_post_attempts": 0,
+      "by_scenario": [
+        {
+          "scenario": "api_outage",
+          "successes": 2,
+          "total": 2,
+          "rate": 1.0,
+          "wilson95": [
+            0.34238022750665303,
+            1
+          ]
+        },
+        {
+          "scenario": "button_id_changed",
+          "successes": 2,
+          "total": 2,
+          "rate": 1.0,
+          "wilson95": [
+            0.34238022750665303,
+            1
+          ]
+        },
+        {
+          "scenario": "button_label_changed",
+          "successes": 2,
+          "total": 2,
+          "rate": 1.0,
+          "wilson95": [
+            0.34238022750665303,
+            1
+          ]
+        },
+        {
+          "scenario": "button_moved",
+          "successes": 2,
+          "total": 2,
+          "rate": 1.0,
+          "wilson95": [
+            0.34238022750665303,
+            1
+          ]
+        },
+        {
+          "scenario": "cancel_before_submit",
+          "successes": 2,
+          "total": 2,
+          "rate": 1.0,
+          "wilson95": [
+            0.34238022750665303,
+            1
+          ]
+        },
+        {
+          "scenario": "captcha",
+          "successes": 2,
+          "total": 2,
+          "rate": 1.0,
+          "wilson95": [
+            0.34238022750665303,
+            1
+          ]
+        },
+        {
+          "scenario": "closed_job",
+          "successes": 2,
+          "total": 2,
+          "rate": 1.0,
+          "wilson95": [
+            0.34238022750665303,
+            1
+          ]
+        },
+        {
+          "scenario": "duplicate_request",
+          "successes": 2,
+          "total": 2,
+          "rate": 1.0,
+          "wilson95": [
+            0.34238022750665303,
+            1
+          ]
+        },
+        {
+          "scenario": "extra_optional_field",
+          "successes": 2,
+          "total": 2,
+          "rate": 1.0,
+          "wilson95": [
+            0.34238022750665303,
+            1
+          ]
+        },
+        {
+          "scenario": "extra_required_step",
+          "successes": 2,
+          "total": 2,
+          "rate": 1.0,
+          "wilson95": [
+            0.34238022750665303,
+            1
+          ]
+        },
+        {
+          "scenario": "hr_delayed",
+          "successes": 2,
+          "total": 2,
+          "rate": 1.0,
+          "wilson95": [
+            0.34238022750665303,
+            1
+          ]
+        },
+        {
+          "scenario": "hr_no_reply",
+          "successes": 2,
+          "total": 2,
+          "rate": 1.0,
+          "wilson95": [
+            0.34238022750665303,
+            1
+          ]
+        },
+        {
+          "scenario": "missing_resume",
+          "successes": 2,
+          "total": 2,
+          "rate": 1.0,
+          "wilson95": [
+            0.34238022750665303,
+            1
+          ]
+        },
+        {
+          "scenario": "normal",
+          "successes": 2,
+          "total": 2,
+          "rate": 1.0,
+          "wilson95": [
+            0.34238022750665303,
+            1
+          ]
+        },
+        {
+          "scenario": "reload_after_greeting",
+          "successes": 2,
+          "total": 2,
+          "rate": 1.0,
+          "wilson95": [
+            0.34238022750665303,
+            1
+          ]
+        },
+        {
+          "scenario": "reordered_form",
+          "successes": 1,
+          "total": 2,
+          "rate": 0.5,
+          "wilson95": [
+            0.09453120573423074,
+            0.9054687942657693
+          ]
+        },
+        {
+          "scenario": "required_field_missing",
+          "successes": 2,
+          "total": 2,
+          "rate": 1.0,
+          "wilson95": [
+            0.34238022750665303,
+            1
+          ]
+        },
+        {
+          "scenario": "resume_changed",
+          "successes": 2,
+          "total": 2,
+          "rate": 1.0,
+          "wilson95": [
+            0.34238022750665303,
+            1
+          ]
+        },
+        {
+          "scenario": "resume_upload",
+          "successes": 2,
+          "total": 2,
+          "rate": 1.0,
+          "wilson95": [
+            0.34238022750665303,
+            1
+          ]
+        },
+        {
+          "scenario": "slow_messages",
+          "successes": 2,
+          "total": 2,
+          "rate": 1.0,
+          "wilson95": [
+            0.34238022750665303,
+            1
+          ]
+        },
+        {
+          "scenario": "slow_page",
+          "successes": 2,
+          "total": 2,
+          "rate": 1.0,
+          "wilson95": [
+            0.34238022750665303,
+            1
+          ]
+        },
+        {
+          "scenario": "submit_response_lost",
+          "successes": 2,
+          "total": 2,
+          "rate": 1.0,
+          "wilson95": [
+            0.34238022750665303,
+            1
+          ]
+        },
+        {
+          "scenario": "validation_rejected",
+          "successes": 2,
+          "total": 2,
+          "rate": 1.0,
+          "wilson95": [
+            0.34238022750665303,
+            1
+          ]
+        },
+        {
+          "scenario": "wrong_account",
+          "successes": 2,
+          "total": 2,
+          "rate": 1.0,
+          "wilson95": [
+            0.34238022750665303,
+            1
+          ]
+        }
+      ],
+      "failed_cases": [
+        {
+          "id": "reordered_form-agent-0",
+          "scenario": "reordered_form",
+          "error_type": null,
+          "checkpoints": []
+        }
+      ]
+    }
+  },
+  "planning": {
+    "cases": 20,
+    "raw_fully_passed": 18,
+    "raw_statuses": {
+      "pass": 18,
+      "error": 1,
+      "fail": 1
+    },
+    "duration": {
+      "n": 20,
+      "mean_ms": 6868.3945,
+      "p50_ms": 7029.1,
+      "p95_ms": 8474.47
+    },
+    "offline_regraded": {
+      "pass": 19,
+      "error": 1
+    },
+    "regraded_cases": [
+      {
+        "id": "count_inheritance",
+        "original_status": "pass",
+        "status": "pass",
+        "checks": {
+          "target_tool": true,
+          "result_limit": true,
+          "salary_min": true,
+          "locations": true
+        }
+      },
+      {
+        "id": "city_replace",
+        "original_status": "pass",
+        "status": "pass",
+        "checks": {
+          "target_tool": true,
+          "result_limit": true,
+          "salary_min": true,
+          "locations": true
+        }
+      },
+      {
+        "id": "append_delivery",
+        "original_status": "error",
+        "status": "error"
+      },
+      {
+        "id": "append_growth",
+        "original_status": "pass",
+        "status": "pass",
+        "checks": {
+          "target_tool": true,
+          "max_score": true,
+          "salary_min": true,
+          "search_not_replayed": true,
+          "search_parameters_retained": true,
+          "delivery_or_growth_depends_on_search": true
+        }
+      },
+      {
+        "id": "pause_and_patch",
+        "original_status": "pass",
+        "status": "pass",
+        "checks": {
+          "locations": true,
+          "paused": true
+        }
+      },
+      {
+        "id": "salary_or",
+        "original_status": "pass",
+        "status": "pass",
+        "checks": {
+          "or_branches": true
+        }
+      },
+      {
+        "id": "quota",
+        "original_status": "pass",
+        "status": "pass",
+        "checks": {
+          "target_tool": true,
+          "result_limit": true,
+          "groups": true
+        }
+      },
+      {
+        "id": "cancel_delivery",
+        "original_status": "pass",
+        "status": "pass",
+        "checks": {
+          "delivery_withdrawn": true
+        }
+      },
+      {
+        "id": "read_not_execute",
+        "original_status": "pass",
+        "status": "pass",
+        "checks": {
+          "read_only": true
+        }
+      },
+      {
+        "id": "quote_not_command",
+        "original_status": "pass",
+        "status": "pass",
+        "checks": {
+          "read_only": true
+        }
+      },
+      {
+        "id": "detail_ordinal",
+        "original_status": "pass",
+        "status": "pass",
+        "checks": {
+          "target_tool": true,
+          "ordinal_not_database_id": true
+        }
+      },
+      {
+        "id": "mixed_references",
+        "original_status": "pass",
+        "status": "pass",
+        "checks": {
+          "has_job_remove_selection": true,
+          "has_mock_delivery_start": true,
+          "has_job_detail_read": true
+        }
+      },
+      {
+        "id": "semantic_remove",
+        "original_status": "pass",
+        "status": "pass",
+        "checks": {
+          "target_tool": true
+        }
+      },
+      {
+        "id": "scope_inherit",
+        "original_status": "fail",
+        "status": "pass",
+        "checks": {
+          "target_tool": true,
+          "min_score": true,
+          "scope_retained": true
+        }
+      },
+      {
+        "id": "unknown_suitable",
+        "original_status": "pass",
+        "status": "pass",
+        "checks": {
+          "asks_before_send": true
+        }
+      },
+      {
+        "id": "update_salary",
+        "original_status": "pass",
+        "status": "pass",
+        "checks": {
+          "target_tool": true,
+          "result_limit": true,
+          "salary_min": true,
+          "locations": true
+        }
+      },
+      {
+        "id": "negation_not_stop",
+        "original_status": "pass",
+        "status": "pass",
+        "checks": {
+          "target_tool": true,
+          "no_stop": true
+        }
+      },
+      {
+        "id": "formal_only_apply",
+        "original_status": "pass",
+        "status": "pass",
+        "checks": {
+          "target_tool": true,
+          "filter_retained": true
+        }
+      },
+      {
+        "id": "new_total",
+        "original_status": "pass",
+        "status": "pass",
+        "checks": {
+          "target_tool": true,
+          "result_limit": true,
+          "no_groups": true
+        }
+      },
+      {
+        "id": "wrong_direction",
+        "original_status": "pass",
+        "status": "pass",
+        "checks": {
+          "target_tool": true,
+          "no_new_search": true
+        }
+      }
+    ],
+    "regrade_reason": "Scope may be enforced by an unchanged search producer and evidence_task_id; no extra API calls or new outcomes",
+    "raw_failed_cases": [
+      {
+        "id": "append_delivery",
+        "status": "error",
+        "error_type": "APIConnectionError",
+        "checks": null
+      },
+      {
+        "id": "scope_inherit",
+        "status": "fail",
+        "error_type": null,
+        "checks": {
+          "target_tool": true,
+          "min_score": true,
+          "scope_retained": false
+        }
+      }
+    ]
+  },
+  "cost": {
+    "physical_requests": 286,
+    "persisted_used": 286,
+    "limit": 300,
+    "requests_by_phase": {
+      "ranking": 180,
+      "execution": 48,
+      "planning": 58
+    },
+    "usage": {
+      "prompt_tokens": 3171173,
+      "completion_tokens": 59452,
+      "total_tokens": 3230625,
+      "prompt_cache_hit_tokens": 373504,
+      "prompt_cache_miss_tokens": 2797669
+    },
+    "model_names": [
+      "deepseek-flash"
+    ],
+    "request_latency": {
+      "n": 286,
+      "mean_ms": 2123.522412587413,
+      "p50_ms": 1966.36,
+      "p95_ms": 3114.9
+    },
+    "provider_errors": {
+      "APIConnectionError": 1
+    },
+    "money": null,
+    "money_reason": "No verified provider billing invoice; report measured tokens instead"
+  },
+  "source_integrity": {
+    "ranking": {
+      "changed": []
+    },
+    "execution": {
+      "changed": []
+    },
+    "planning": {
+      "changed": []
+    }
+  },
+  "offline_postprocessing": {
+    "meaning": "Computed after frozen experiment; original predictions, outcomes and grading retained",
+    "sha256": {
+      "quantify.py": "91e1bb0a6d2ea5aae13e86c5d2a25618e5232dffea59d0a28b3da327fb541521",
+      "planning.py": "bb1f266d0ab00bcc64dc5bf85b168919173cd45732bd1aa3595c067d4a48234c",
+      "analyze.py": "bdab14412b57b085ea481c2e479723ebcf199943851d777fd074153e1a2dce3c",
+      "audit.py": "db6901dda359f645ffc233ef5e9220f32fe1641002d130afbaa3d37869cfb8ec"
+    }
+  },
+  "limits": [
+    "Synthetic oracle pending human review, not human Gold",
+    "12 queries share JD templates; not independent unseen-domain generalization",
+    "24 browser scenarios repeated twice, no full upload/search E2E or real sites",
+    "Current data and two repetitions cannot establish long-running service or concurrency reliability"
+  ]
+}
