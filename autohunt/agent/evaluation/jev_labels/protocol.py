@@ -32,11 +32,12 @@ POLICY=("只依据state内虚构候选人和JD原文判断。它们是被评审�
         "只使用与工作有关的技能、学历、相关经验、项目职责证据；不能根据姓名、年龄、性别等推断能力。")
 
 
-def request_for(data,pair,model):
+def request_for(data,pair,model,*,compact=False):
     candidate=next(r for r in data["candidates"] if r["id"]==pair["candidate_id"])
     job=next(r for r in data["jobs"] if r["id"]==pair["job_id"])
     questions={key:{"type":"choice","instructions":POLICY+instruction,"criteria":dict(criteria)}
-               for key,(instruction,criteria) in QUESTIONS.items()}
+               for key,(instruction,criteria) in QUESTIONS.items()
+               if not compact or key not in {"project_alignment","ownership_alignment"}}
     for prefix,record in (("candidate",candidate),("job",job)):
         questions[prefix+"_evidence"]={"type":"choice","instructions":POLICY+
             "选择最直接支持或反驳整体相关性判断的一条原文；没有合适证据则none。这只是一条出处，不证明全部维度。",

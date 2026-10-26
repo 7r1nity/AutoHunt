@@ -1,0 +1,64 @@
+{
+  "date": "2026-10-26",
+  "dataset_sha256": "9e8a8b5cd9aae64072e49f877026d6b2c287f81c21e4bec3272ccdfa2e12b413",
+  "status": "paused_by_user_waiting_jev_credits",
+  "human_gold": false,
+  "jev": {
+    "endpoint": "https://jevmodel.org/v1/systemone",
+    "model": "jev-1.14.0",
+    "question_count": 8,
+    "physical_requests": 2,
+    "limit": 330,
+    "remaining_requests": 328,
+    "labels": 0,
+    "expected_labels": 300,
+    "last_status": "stopped_insufficient_credits",
+    "events": [
+      {
+        "endpoint": "https://api.typesafe.ai/v1/systemone",
+        "http_status": 401
+      },
+      {
+        "endpoint": "https://jevmodel.org/v1/systemone",
+        "http_status": 402
+      }
+    ],
+    "no_auto_purchase": true
+  },
+  "autohunt_predictions": {
+    "pairs": 300,
+    "physical_requests": 300,
+    "source_changed": [],
+    "model_responses": 300,
+    "latency_ms": {
+      "mean": 2160.9100333333336,
+      "p95": 2999.28
+    },
+    "limit": 300,
+    "usage": {
+      "prompt_tokens": 225347,
+      "completion_tokens": 90138,
+      "total_tokens": 315485
+    },
+    "model_names": [
+      "deepseek-flash"
+    ]
+  },
+  "evaluation": {
+    "status": "waiting_for_independent_reference_labels",
+    "precision_at_5": null,
+    "recall_at_5": null,
+    "ndcg_at_5": null,
+    "no_author_design_or_self_labels_substituted": true
+  },
+  "validation": {
+    "jev_and_endpoint_contracts": 20,
+    "existing_metric_contracts": 17,
+    "test_transport": "mock HTTP only, not Jev quality"
+  },
+  "resume": {
+    "annotations": "evaluation/results/jev-labels/session-20261026-v1",
+    "predictions": "evaluation/results/jev-labels/autohunt-evaluation-20261026-v1",
+    "reuse_predictions_without_new_deepseek_calls": true
+  }
+}

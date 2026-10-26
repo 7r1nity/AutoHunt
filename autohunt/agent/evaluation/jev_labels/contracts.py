@@ -178,5 +178,41 @@ class RunnerContracts(unittest.IsolatedAsyncioTestCase):
         budget=PhysicalBudget(self.path/"new.json",330,ceiling=330)
         self.assertEqual(budget.state()["limit"],330)
 
+    async def test_proxy_endpoint_uses_eight_questions_and_preserves_failed_budget(self):
+        old=await runner.annotate(self.path,CONFIG,limit=3,consented=True,transport=self.transport(401))
+        self.assertEqual(old["physical_requests"],1)
+        proxy={**CONFIG,"endpoint":runner.PROXY_ENDPOINT}
+        def handle(req):
+            self.assertEqual(str(req.url),runner.PROXY_ENDPOINT)
+            body=json.loads(req.content)
+            self.assertEqual(len(body["questions"]),8)
+            self.assertNotIn("project_alignment",body["questions"])
+            self.assertIn("Idempotency-Key",req.headers)
+            return httpx.Response(200,json=response(body))
+        result=await runner.annotate(self.path,proxy,limit=3,consented=True,transport=httpx.MockTransport(handle),endpoint_migration=True)
+        self.assertEqual(result["physical_requests"],3)
+        self.assertEqual(result["annotated_pairs"],2)
+        history=json.loads((self.path/"manifest-revisions.jsonl").read_text(encoding="utf-8").splitlines()[0])
+        self.assertEqual(history["physical_used_preserved"],1)
+        self.assertEqual(history["old"]["endpoint"],runner.ENDPOINT)
+        self.assertEqual(history["new"]["endpoint"],runner.PROXY_ENDPOINT)
+
+    async def test_credits_stop_and_successful_labels_cannot_switch_endpoint(self):
+        credits=await runner.annotate(self.path/"empty",CONFIG,limit=3,consented=True,transport=self.transport(402))
+        self.assertEqual(credits["physical_requests"],1)
+        self.assertEqual(credits["status"],"stopped_insufficient_credits")
+        valid=self.path/"valid"
+        await runner.annotate(valid,CONFIG,limit=1,consented=True,transport=self.transport())
+        with self.assertRaises(ValueError): runner.migrate_endpoint(valid,{**CONFIG,"endpoint":runner.PROXY_ENDPOINT},1)
+
+    async def test_prediction_input_is_sourced_and_partial_reference_has_no_metrics(self):
+        from .evaluate import matcher_input,checked_labels
+        data=corpus.load(); request=matcher_input(data["candidates"][0],data["jobs"][0])
+        self.assertTrue(all(s in data["candidates"][0]["text"] for s in request.candidate_facts["documents"].values()))
+        runner.prepare(self.path,CONFIG,1)
+        budget=PhysicalBudget(self.path/"budget.json",1)
+        runner.save_summary(data,self.path,budget,{},status="awaiting_api_key")
+        with self.assertRaises(ValueError): checked_labels(data,self.path)
+
 
 if __name__=="__main__": unittest.main()

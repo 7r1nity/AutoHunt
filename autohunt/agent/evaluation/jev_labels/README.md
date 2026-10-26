@@ -30,15 +30,16 @@
 JEV_API_KEY=
 JEV_MODEL=jev-1.14.0
 JEV_TIMEOUT_SECONDS=45
+JEV_ENDPOINT=https://api.typesafe.ai/v1/systemone
 ```
 
 填入个人TypeSafe Key，仅用于本地评测。也兼容 `TYPESAFE_API_KEY`，以非空JEV_API_KEY优先。模板见[.env.example](../../.env.example)。Key不进入前端、不写入日志、不提交Git；不需要改变生产模型配置。
 
-使用官方固定地址 `POST https://api.typesafe.ai/v1/systemone`，Bearer认证。固定版本默认jev-1.14.0，不使用随时间变化的latest别名；返回版本改变时停止，不混用不同版本标签。
+默认使用官方地址 `POST https://api.typesafe.ai/v1/systemone`，Bearer认证。另支持本次用户明确提供的 `https://jevmodel.org/v1/systemone`；该服务需要它自己的Key，其网站自述并非TypeSafe运营，报告必须保留实际Endpoint，不能冒称官方直连。固定版本默认jev-1.14.0，不使用随时间变化的latest别名；返回版本改变时停止，不混用不同版本标签。
 
 官方资料（2026-10-26核对）：[HTTP协议](https://docs.typesafe.ai/api/system-one)、[Choice](https://docs.typesafe.ai/primitives/choice)、[模型版本](https://docs.typesafe.ai/models)、[置信度](https://docs.typesafe.ai/confidence)、[限流与错误](https://docs.typesafe.ai/api/errors)。
 
-Jev的Score可以返回小数，本集需要离散0/1/2，因此用Choice三选一而不直接四舍五入Score。每对在一次物理请求里提出10个独立问题：相关性、硬条件总体、学历、相关经验、必需技能、必需项目、项目对应、职责对应，以及两条候选人/JD出处选择。出处从完整原文行中选择，不要求Jev生成解释文字；单条出处不能证明全部维度。
+Jev的Score可以返回小数，本集需要离散0/1/2，因此用Choice三选一而不直接四舍五入Score。官方地址每对一次请求提出10个问题：相关性、硬条件总体、学历、相关经验、必需技能、必需项目、项目对应、职责对应及两条出处。jevmodel.org最多8个问题，因此省略项目对应/职责对应两项辅助标签；整体相关性仍核对这两个方面，一对仍只发一次请求。出处从原文行选择，不要求生成解释文字；单条出处不证明全部维度。
 
 置信度是分布集中程度，不等同于业务正确率。默认0.7只用于标记待复核，**尚未用人工集校准**；低置信、证据缺失及维度矛盾都会保留原始标签和概率并进入needs_review，不悄悄修改为设计答案。所有结果仍是银标，human_gold=false。
 
@@ -64,6 +65,24 @@ python -m evaluation.jev_labels.runner annotate --output evaluation/results/jev-
 一次请求最多处理一对，含重试都先扣持久预算；默认单进程串行。429/529/5xx和连接/超时最多三次尝试，指数退避；401/403或请求配置错误立即停止，连续三对无有效响应也停止。HTTP传输自动重试关闭，不自动跟随重定向。
 
 运行目录有独占OS锁；预算使用跨进程文件锁。响应先写journal，再派生annotations，崩溃后可从已存响应恢复，不重复付费请求。硬中断导致已扣预算但未存响应的次数仍占预算。损坏账本不自动重置。更换模型、语料、判定标准或预算时拒绝覆盖已有运行。
+
+只有尚无有效标注响应、并且用户明确改接入地址时，才可使用 `annotate --migrate-endpoint`。它保存旧manifest和已消耗计数，只调整Endpoint及对应问题数量；不能清零预算，也不能混合两个服务已产生的标签。jevmodel.org重试附带稳定Idempotency-Key；返回402立即停止，不自动购买额度。
+
+本轮已保留一次官方地址401和一次用户地址402，共2/330次、0个有效标签，用户选择先保留断点。实际配置已在本地.env指向用户地址；补充可用额度后继续原目录即可，不需要再次迁移或重跑DeepSeek。
+
+接入服务文档：[Endpoint/8问题上限/错误码](https://jevmodel.org/docs/)。这与TypeSafe官方协议的上限不同，不能共用Key或忽略服务端限制。
+
+## AutoHunt预测与独立标签测评
+
+另获用户批准的DeepSeek300次预算只用于生产 `match_job`：已冻结300对预测、300次有效模型响应，不读取Jev标签、作者设计分或人工答案。独立预算及预测位于 `evaluation/results/jev-labels/autohunt-evaluation-20261026-v1/`。
+
+Jev完整标注后，在后端目录执行下列**零模型调用**评分：
+
+```powershell
+python -m evaluation.jev_labels.evaluate score --annotations evaluation/results/jev-labels/session-20261026-v1 --predictions evaluation/results/jev-labels/autohunt-evaluation-20261026-v1 --output evaluation/results/jev-labels/evaluation-20261026-v1
+```
+
+评分先从原始类型化响应核验Jev标签与摘要，并要求同池完整300对，不丢掉低置信难例。随后报告开发/测试/全量的同分期望Precision@5、候选池Recall@5、NDCG@5、高匹配@5、硬条件失败@5及资格判断一致性；主评估是7个测试候选人。没有Jev参考标签时明确拒绝出分，不能用作者设计分或模型自己的输出替代参考。
 
 ## 输出与人工复核
 

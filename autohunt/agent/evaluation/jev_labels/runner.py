@@ -19,6 +19,7 @@ from .corpus import ROOT,load,digest
 from .protocol import RUBRIC_VERSION,request_for,annotation
 
 ENDPOINT="https://api.typesafe.ai/v1/systemone"
+PROXY_ENDPOINT="https://jevmodel.org/v1/systemone"
 CEILING=330
 
 
@@ -30,7 +31,38 @@ def configuration():
     if model not in {"jev-1.14.0","jev-1.13.0"}: raise ValueError("Pin a documented versioned Jev model, not a moving alias")
     timeout=float(get("JEV_TIMEOUT_SECONDS","45"))
     if not 1<=timeout<=120: raise ValueError("Jev timeout must be 1..120 seconds")
-    return {"api_key":key,"model":model,"timeout":timeout}
+    endpoint=get("JEV_ENDPOINT",ENDPOINT)
+    if endpoint not in {ENDPOINT,PROXY_ENDPOINT}: raise ValueError("Endpoint is not one of the explicitly supported destinations")
+    return {"api_key":key,"model":model,"timeout":timeout,"endpoint":endpoint}
+
+
+def label_request(data,pair,config):
+    return request_for(data,pair,config["model"],compact=config.get("endpoint",ENDPOINT)==PROXY_ENDPOINT)
+
+
+def manifest_for(data,config,limit):
+    endpoint=config.get("endpoint",ENDPOINT)
+    if endpoint not in {ENDPOINT,PROXY_ENDPOINT}: raise ValueError("Unsupported endpoint")
+    return {"dataset_sha256":digest(data),"rubric_version":RUBRIC_VERSION,"endpoint":endpoint,
+            "model":config["model"],"physical_limit":limit,
+            "question_digest":digest(label_request(data,data["pairs"][0],config)["questions"]),
+            "human_gold":False,"data_scope":"frozen AI-authored synthetic corpus only"}
+
+
+def migrate_endpoint(output,config,limit):
+    """Explicit operator migration before any labels; never reset the ledger."""
+    path=output/"manifest.json"
+    if not path.exists() or not (output/"budget.json").exists(): raise ValueError("Existing manifest and budget are required")
+    old=json.loads(path.read_text(encoding="utf-8")); data=load(); new=manifest_for(data,config,limit)
+    if old==new: return
+    if {k:v for k,v in old.items() if k not in {"endpoint","question_digest"}}!={k:v for k,v in new.items() if k not in {"endpoint","question_digest"}}:
+        raise ValueError("Endpoint migration cannot change model, data, rubric or request limit")
+    budget=PhysicalBudget(output/"budget.json",limit,ceiling=CEILING)
+    if any(c.get("response") and c.get("http_status")==200 for c in saved_calls(output)):
+        raise ValueError("Cannot mix endpoints after annotation responses; preserve the reference run")
+    append(output/"manifest-revisions.jsonl",{"at":datetime.now(UTC).isoformat(),"reason":"explicit_user_endpoint_migration",
+        "physical_used_preserved":budget.state()["used"],"old":old,"new":new})
+    write(path,new)
 
 
 def result_path(output):
@@ -63,10 +95,7 @@ def lease(output):
 def prepare(output,config,limit=330):
     data=load(); output=result_path(output); output.mkdir(parents=True,exist_ok=True)
     if not 1<=limit<=CEILING: raise ValueError("Call limit must be within separately approved ceiling 330")
-    manifest={"dataset_sha256":digest(data),"rubric_version":RUBRIC_VERSION,"endpoint":ENDPOINT,
-              "model":config["model"],"physical_limit":limit,
-              "question_digest":digest(request_for(data,data["pairs"][0],config["model"])["questions"]),
-              "human_gold":False,"data_scope":"frozen AI-authored synthetic corpus only"}
+    manifest=manifest_for(data,config,limit)
     path=output/"manifest.json"
     if path.exists() and json.loads(path.read_text(encoding="utf-8"))!=manifest:
         raise ValueError("Cannot change dataset, model, rubric or request budget inside an existing run")
@@ -81,7 +110,7 @@ def prepare(output,config,limit=330):
             pool=[p for p in data["pairs"] if p["candidate_id"]==candidate["id"] and p["split"]=="development"]
             for kind,n in (("close",2),("transfer",1),("depth",1),("ownership",1),("tenure",1),("missing",1),("untrusted",1)):
                 for pair in sorted([p for p in pool if intended[p["id"]]["case_family"]==kind],key=lambda x:x["id"])[:n]:
-                    request=request_for(data,pair,config["model"])
+                    request=label_request(data,pair,config)
                     chosen.append({"pair_id":pair["id"],"split":"development",**request["state"],
                         "reviewer_a":{"relevance":None,"eligibility":None,"evidence":[],"reviewer":None},
                         "reviewer_b":{"relevance":None,"eligibility":None,"evidence":[],"reviewer":None},
@@ -103,8 +132,9 @@ def restore(data,output,config,threshold):
     annotations={}; pairs={p["id"]:p for p in data["pairs"]}
     for ident,call in previous.items():
         if ident not in pairs: raise ValueError("Saved response is outside frozen corpus")
-        request=request_for(data,pairs[ident],config["model"])
+        request=label_request(data,pairs[ident],config)
         if call["input_digest"]!=digest(request): raise ValueError("Saved response belongs to a different input")
+        if call.get("endpoint")!=config.get("endpoint",ENDPOINT): raise ValueError("Saved response belongs to a different endpoint")
         if not isinstance(call["response"],dict) or call["response"].get("model")!=config["model"]: continue
         try: annotations[ident]=annotation(call["response"],request,pairs[ident],threshold=threshold)
         except ValueError: pass
@@ -138,10 +168,13 @@ def save_summary(data,output,budget,annotations,*,status,errors=None,review_thre
     return result
 
 
-async def annotate(output,config,*,consented=False,limit=330,threshold=.7,transport=None,sleep=asyncio.sleep):
+async def annotate(output,config,*,consented=False,limit=330,threshold=.7,transport=None,sleep=asyncio.sleep,endpoint_migration=False):
     output=result_path(output)
     if not 0<=threshold<=1: raise ValueError("Review threshold must be 0..1")
     with lease(output):
+        if endpoint_migration:
+            if not consented: raise ValueError("Endpoint migration requires explicit destination consent")
+            migrate_endpoint(output,config,limit)
         data,budget=prepare(output,config,limit)
         labels=restore(data,output,config,threshold)
         if not consented: return save_summary(data,output,budget,labels,status="awaiting_model_consent",review_threshold=threshold)
@@ -151,19 +184,24 @@ async def annotate(output,config,*,consented=False,limit=330,threshold=.7,transp
                 timeout=config["timeout"],follow_redirects=False,trust_env=False) as client:
             for pair in data["pairs"]:
                 if pair["id"] in labels: continue
-                request=request_for(data,pair,config["model"])
+                request=label_request(data,pair,config)
                 token=CASE.set("jev_annotation:"+pair["id"])
                 try:
                     for attempt in range(3):
                         if budget.state()["used"]>=limit: break
                         number=budget.reserve(); start=time.perf_counter(); retry=False
                         entry={"call":number,"pair_id":pair["id"],"attempt":attempt+1,"input_digest":digest(request),
-                               "request":request,"endpoint":ENDPOINT,"at":datetime.now(UTC).isoformat()}
+                               "request":request,"endpoint":config.get("endpoint",ENDPOINT),"at":datetime.now(UTC).isoformat()}
                         try:
-                            response=await client.post(ENDPOINT,json=request,headers={"Authorization":"Bearer "+config["api_key"]})
+                            headers={"Authorization":"Bearer "+config["api_key"]}
+                            if config.get("endpoint")==PROXY_ENDPOINT:
+                                headers["Idempotency-Key"]="autohunt-"+digest({"request":request,"pair":pair["id"]})
+                            response=await client.post(config.get("endpoint",ENDPOINT),json=request,headers=headers)
                             entry["http_status"]=response.status_code
                             if response.status_code in {401,403}:
                                 fatal="authentication"; entry["error_type"]="AuthenticationOrPermissionError"
+                            elif response.status_code==402:
+                                fatal="insufficient_credits"; entry["error_type"]="InsufficientCredits"
                             elif response.status_code==429 or response.status_code==529 or 500<=response.status_code<600:
                                 retry=True; entry["error_type"]="TransientHTTPError"
                             elif response.status_code!=200:
@@ -204,13 +242,14 @@ def main():
     p=argparse.ArgumentParser(); p.add_argument("command",choices=["prepare","annotate"])
     p.add_argument("--output",type=Path,required=True); p.add_argument("--models-consented",action="store_true")
     p.add_argument("--call-limit",type=int,default=330); p.add_argument("--review-threshold",type=float,default=.7)
+    p.add_argument("--migrate-endpoint",action="store_true")
     args=p.parse_args(); config=configuration(); output=result_path(args.output)
     if args.command=="prepare":
         with lease(output):
             data,budget=prepare(output,config,args.call_limit)
             result=save_summary(data,output,budget,restore(data,output,config,args.review_threshold),status="prepared_awaiting_jev",review_threshold=args.review_threshold)
     else:
-        result=asyncio.run(annotate(output,config,consented=args.models_consented,limit=args.call_limit,threshold=args.review_threshold))
+        result=asyncio.run(annotate(output,config,consented=args.models_consented,limit=args.call_limit,threshold=args.review_threshold,endpoint_migration=args.migrate_endpoint))
     print(json.dumps({k:v for k,v in result.items() if k!="actual_pools"},ensure_ascii=False,indent=2))
     return 0 if result["status"] in {"completed","prepared_awaiting_jev"} else 2
 
