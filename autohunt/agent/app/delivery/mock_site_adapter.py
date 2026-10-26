@@ -20,6 +20,7 @@ class MockApplyObservation:
     hr_reply_text: str | None = None
     application_submitted: bool = False
     direct_apply: bool = False
+    page_state: str = "ready"
 
 
 @dataclass(frozen=True)
@@ -28,6 +29,8 @@ class MockSubmitResult:
     duplicate: bool
     detail: str
     await_reply: bool = False
+    attempted: bool = False
+    page_state: str = "unknown"
 
 
 @dataclass(frozen=True)
@@ -46,7 +49,7 @@ class MockJobSiteAdapter:
     """
 
     submit_timeout_seconds = 8.0
-    selector_version = "mock-job-site-v3"
+    selector_version = "mock-job-site-v4"
     allowed_hosts = {"127.0.0.1", "localhost"}
     allowed_ports = {8080}
 
@@ -77,7 +80,12 @@ class MockJobSiteAdapter:
             """() => {
               const visible = el => !!el && getComputedStyle(el).display !== 'none' &&
                 !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
-              const button = document.querySelector('#resume-btn');
+              const gate = document.querySelector('#resume-gate') || document.querySelector('#resume-select')?.parentElement;
+              const candidates = Array.from((gate || document.createElement('div')).querySelectorAll('button,[role=button]'))
+                .filter(el => /^(发送简历|提交申请简历|提交简历|申请职位|已发送|已投递)$/.test(el.textContent?.trim() || ''));
+              const fixed = document.querySelector('#resume-btn');
+              const button = fixed && /^(发送简历|提交申请简历|提交简历|申请职位|已发送|已投递)$/.test(fixed.textContent?.trim() || '')
+                ? fixed : (candidates.length === 1 ? candidates[0] : null);
               const directButton = document.querySelector('#direct-apply-btn');
               const directStatus = document.querySelector('#direct-status-bar');
               const mfa = document.querySelector('#mfa-row, #mfa-box');
@@ -127,8 +135,7 @@ class MockJobSiteAdapter:
             resume_ready = bool(raw.get("buttonExists")) and not bool(raw.get("buttonDisabled"))
             waiting_for_reply = (
                 authenticated
-                and bool(raw.get("buttonExists"))
-                and bool(raw.get("buttonDisabled"))
+                and not bool(raw.get("hrReplyText"))
                 and "回复" in str(raw.get("gateText") or "")
             )
             button_text = str(raw.get("buttonText") or "")
@@ -141,7 +148,36 @@ class MockJobSiteAdapter:
             hr_reply_text=str(raw.get("hrReplyText") or "") or None,
             application_submitted=application_submitted,
             direct_apply=direct_apply,
+            page_state="verification" if reason else "submitted" if application_submitted else "waiting_for_reply" if waiting_for_reply
+                       else "ready" if resume_ready else "missing_control",
         )
+
+    async def submit_button(self,page,direct=False):
+        if direct:
+            return page.locator("#direct-apply-btn")
+        fixed=page.locator("#resume-btn")
+        if await fixed.count()==1 and re.fullmatch(r"发送简历|提交申请简历|提交简历|申请职位|已发送|已投递",(await fixed.inner_text()).strip()):
+            return fixed
+        # A unique semantic control in the bound resume region only. Never use
+        # a global '发送' button (it could send chat text or another form).
+        region=page.locator("#resume-gate")
+        if not await region.count():
+            region=page.locator("#resume-select").locator("..")
+        return region.get_by_role("button",name=re.compile(r"^(发送简历|提交申请简历|提交简历|申请职位|已发送|已投递)$"))
+
+    async def auxiliary_confirmation(self,page,binding):
+        """Advance one explicit local confirmation; never fill missing facts."""
+        await self._binding_evidence(page,binding)
+        buttons=page.get_by_role("button",name=re.compile(r"^(?:确认(?:当前)?(?:岗位|申请|简历)?(?:后继续)?|下一步|继续申请)$"))
+        if await buttons.count()!=1 or not await buttons.is_visible() or not await buttons.is_enabled():
+            return False
+        # Detect unresolved required inputs rather than invent their values.
+        missing=await page.locator('input[required],textarea[required],select[required]').evaluate_all(
+            "nodes => nodes.some(n => !n.disabled && n.getClientRects().length && !n.value)")
+        if missing:
+            return False
+        await buttons.click(timeout=3000)
+        return True
 
     @staticmethod
     async def _chat_open(page: Page) -> bool:
@@ -273,27 +309,55 @@ class MockJobSiteAdapter:
             return MockSubmitResult(False, False, before.intervention_reason)
         if before.application_submitted:
             return MockSubmitResult(False, False, "页面与投递记录不一致，需人工核对")
-        selector = "#direct-apply-btn" if before.direct_apply else "#resume-btn"
-        button = page.locator(selector)
-        if not await button.count() or await button.is_disabled():
-            return MockSubmitResult(False, False, "投递按钮不可用")
+        button = await self.submit_button(page,before.direct_apply)
+        if await button.count()!=1 or await button.is_disabled():
+            return MockSubmitResult(False, False, "投递按钮缺失、歧义或不可用；未点击",page_state="missing_control")
         if before_click is not None:
             before_click()
+        posted=False
+        def observe(request):
+            nonlocal posted
+            if request.method=="POST" and urlparse(request.url).path in {"/api/applications","/api/applications/direct"}:
+                posted=True
+        page.on("request",observe)
         try:
-            await button.click(timeout=8_000)
-        except Exception:
-            pass  # Click may already have reached the site. Reconcile, never click again.
-        deadline = time.monotonic() + self.submit_timeout_seconds
-        while time.monotonic() < deadline:
             try:
-                evidence = await self._binding_evidence(page, binding)
-                observation = await self.inspect(page)
+                await button.click(timeout=8_000)
             except Exception:
-                return MockSubmitResult(False, False, "提交后无法核实账号、简历或投递记录，禁止自动重试")
-            if evidence["submitted"]:
-                return MockSubmitResult(bool(evidence["matches"]), False,
-                    "模拟站已确认授权简历投递成功" if evidence["matches"] else "投递记录的简历不符，需人工核对", before.direct_apply)
-            if observation.intervention_reason:
-                return MockSubmitResult(False, False, "提交后出现验证，投递结果待核实")
-            await asyncio.sleep(0.1)
-        return MockSubmitResult(False, False, "提交后未取得成功证据，禁止自动重试")
+                # A failed click may already have submitted. Never advance forms
+                # after ambiguous actionability/transport errors.
+                posted=True
+            advanced=False
+            deadline=time.monotonic()+self.submit_timeout_seconds
+            while time.monotonic()<deadline:
+                try:
+                    evidence=await self._binding_evidence(page,binding)
+                    observation=await self.inspect(page)
+                except Exception:
+                    return MockSubmitResult(False,False,"提交后无法核实账号、简历或投递记录，禁止自动重试",attempted=True)
+                if evidence["submitted"]:
+                    return MockSubmitResult(bool(evidence["matches"]),False,
+                        "模拟站已确认授权简历投递成功" if evidence["matches"] else "投递记录的简历不符，需人工核对",
+                        before.direct_apply,attempted=True,page_state="submitted")
+                if observation.intervention_reason:
+                    return MockSubmitResult(False,False,"提交后出现验证，投递结果待核实",attempted=True,page_state="verification")
+                if not posted:
+                    validation=page.get_by_text(re.compile(r"缺少必填|请填写必填|请补充必填"))
+                    if await validation.count() and await validation.first.is_visible():
+                        return MockSubmitResult(False,False,"申请表缺少用户尚未提供的必填信息，请人工补充；没有重发",attempted=True,page_state="needs_input")
+                if not posted and not advanced and await self.auxiliary_confirmation(page,binding):
+                    advanced=True
+                    # The first click opened an explicit intermediate step and
+                    # no application request was sent. Confirm the same binding;
+                    # at most one advancement, and no replay after any POST.
+                    await self._binding_evidence(page,binding)
+                    if not posted:
+                        button=await self.submit_button(page,before.direct_apply)
+                        if await button.count()==1 and await button.is_enabled():
+                            if before_click: before_click()
+                            try: await button.click(timeout=3000)
+                            except Exception: posted=True
+                await asyncio.sleep(.1)
+            return MockSubmitResult(False,False,"提交后未取得成功证据，禁止自动重试",attempted=True)
+        finally:
+            page.remove_listener("request",observe)

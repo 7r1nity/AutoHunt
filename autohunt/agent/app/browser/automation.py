@@ -28,6 +28,7 @@ from ..core.models import BrowserMode, BrowserSearchRequest, BrowserTaskStatus, 
 from ..core.job_filters import evaluate_filter
 from ..delivery.mock_site_adapter import MockJobSiteAdapter as MockDeliveryAdapter
 from ..jobs.analysis import KNOWN_SKILLS, analyze_job
+from ..jobs.candidate_facts import match_facts
 from ..jobs.store import JobStore
 from ..llm.manager import LLMManager
 from ..memory.candidate_state import CandidateStateStore
@@ -361,6 +362,7 @@ class BrowserAutomationService:
                 return
 
             candidate_skills, target_roles, excluded_keywords = self._candidate_match_context(queries)
+            candidate_facts=match_facts(self.resume_workspace,self.candidate_state)
             previous_counts = self.store.get_task(task_id)
             stored, duplicates, matched = previous_counts.stored, previous_counts.duplicates, previous_counts.matched
 
@@ -460,6 +462,7 @@ class BrowserAutomationService:
                         target_roles=target_roles,
                         excluded_keywords=excluded_keywords,
                         search_queries=queries,
+                        candidate_facts=candidate_facts,
                     )
                     pending.append((detail, url, match_request, asyncio.create_task(guarded_match(match_request, detail))))
             except asyncio.CancelledError:
@@ -588,6 +591,7 @@ class BrowserAutomationService:
             return
 
         candidate_skills, target_roles, excluded_keywords = self._candidate_match_context(queries)
+        candidate_facts=match_facts(self.resume_workspace,self.candidate_state)
         verdicts = await pre_screen_cards(
             self.llm.generate,
             cards,
@@ -636,6 +640,7 @@ class BrowserAutomationService:
                     target_roles=target_roles,
                     excluded_keywords=excluded_keywords,
                     search_queries=queries,
+                    candidate_facts=candidate_facts,
                 )
                 try:
                     analysis = await self._match_and_filter(task_id, detail, match_request, request)
@@ -1322,6 +1327,8 @@ class BrowserAutomationService:
             "decision": analysis.decision,
             "stage": "rejected" if analysis.decision == "SKIP" else "review",
             "reasoning": analysis.reasoning,
+            "qualification_evidence":analysis.qualification or {"status":"unknown","assessed":False,
+                "requirements":[],"resume_digest":match_facts(getattr(self,"resume_workspace",None),getattr(self,"candidate_state",None)).get("digest")},
             "source_tags": detail.get("source_tags", list(detail.get("tags") or [])),
             "tags": sorted(set(detail["tags"] + analysis.matched_skills + analysis.missing_skills))[:10],
         })

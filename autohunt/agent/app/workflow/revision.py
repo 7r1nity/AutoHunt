@@ -31,6 +31,9 @@ class RevisionDraft(BaseModel):
     invalidated_steps: list[str] = Field(default_factory=list, max_length=8)
     goals: list[Goal] = Field(default_factory=list, max_length=MAX_PLAN_STEPS)
     questions: list[str] | None = Field(default=None, max_length=8)
+    # Observation only, never execution authority. The planner overwrites this
+    # after independently reviewing changed conditions.
+    scope_review: dict | None = None
 
 
 def edited_plan(plan: dict, edit: RevisionDraft, registry, *, stamp: str, session_id: str, message: str) -> dict:
@@ -275,4 +278,6 @@ def edited_plan(plan: dict, edit: RevisionDraft, registry, *, stamp: str, sessio
         "updated_steps": sorted(seen), "added_steps": added_ids,
         "removed_steps": sorted(removed), "paused": paused})
     result["revision_history"][-1]["invalidated_steps"] = sorted(invalidated)
+    from .scope_review import apply_review
+    apply_review(result,edit.scope_review)
     return result

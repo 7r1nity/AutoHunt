@@ -24,6 +24,7 @@ MODULES = (
     "delivery_scheduling_contract", "background_polling_contract", "special_salary_contract",
     "delivery_evidence_contract",
     "recovery_memory_contract",
+    "systemic_repair_contract",
 )
 
 

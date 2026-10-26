@@ -233,6 +233,7 @@ class MockWorkflowCoordinator:
         if explicit and any(target_hashes.get(str(job["id"])) and target_hashes[str(job["id"])] != self.jobs.review_fingerprint(job) for job in evidence):
             raise PreflightRefused("定位后岗位内容变化，未加入投递队列，请重新查看")
         eligible, already_delivered, not_applicable = [], 0, 0
+        qualification_unknown=qualification_failed=0
         for item in evidence:
             job = self.jobs.get_job(item["id"])
             if item.get("score", 0) < min_score:
@@ -244,6 +245,14 @@ class MockWorkflowCoordinator:
             if not self.delivery.supports(item["source_url"]):
                 not_applicable += 1
                 continue
+            from ..jobs.candidate_facts import qualification_status
+            qualification=qualification_status(job,document_digest)
+            if qualification=="fail":
+                qualification_failed+=1
+                continue
+            if qualification=="unknown" and not explicit:
+                qualification_unknown+=1
+                continue
             if item.get("filter_status", "pass") != "pass" and not (explicit and item.get("filter_status") == "unknown"):
                 not_applicable += 1
                 continue
@@ -251,7 +260,7 @@ class MockWorkflowCoordinator:
                 already_delivered += 1
                 continue
             eligible.append(job)
-        scope_evidence, excluded, unknown = {}, 0, 0
+        scope_evidence, excluded, unknown = {}, qualification_failed, qualification_unknown
         if filters is not None:
             from ..core.job_filters import evaluate_filter, validate_filter
             filters = validate_filter(filters).model_dump(mode="json")
@@ -268,8 +277,8 @@ class MockWorkflowCoordinator:
             async with asyncio.TaskGroup() as group:
                 for job in eligible:
                     group.create_task(judge(job))
-            excluded = sum(item["status"] == "fail" for item in scope_evidence.values())
-            unknown = sum(item["status"] == "unknown" for item in scope_evidence.values())
+            excluded += sum(item["status"] == "fail" for item in scope_evidence.values())
+            unknown += sum(item["status"] == "unknown" for item in scope_evidence.values())
             eligible = [job for job in eligible if scope_evidence[job["id"]]["status"] == "pass"]
         for job in eligible:
             scope_evidence.setdefault(job["id"], {}).update(delivery_flow="gated")
@@ -329,7 +338,7 @@ class MockWorkflowCoordinator:
                        "仅处理当前简历的已搜索职位，不启用每日任务，也不自动添加未来职位。可说「停止自动投递」。")
         elif reason == "insufficient_evidence":
             message = (f"已找到候选岗位，但其中 {insufficient} 个缺少投递所需证据"
-                       "（分数、薪资、JD 或筛选状态），无法确认是否符合；本批次未入队。"
+                       "（分数、薪资、JD、学历/年限等资历或筛选状态），无法确认是否符合；本批次未入队。"
                        "请选择：刷新已有结果、补一次最小范围搜索，或明确接受未知条件。")
         elif reason == "no_search_evidence":
             message = "当前简历还没有可用的已完成搜索结果；请先搜索，或指定 source_task_id。"

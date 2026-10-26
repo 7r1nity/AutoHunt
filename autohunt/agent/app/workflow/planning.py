@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import inspect
 import re
 import time
 import uuid
@@ -160,14 +161,19 @@ async def plan_request(llm, registry, message: str, *, dialogue: dict, condition
                 owned_sources.append({**reference, "search_status": metadata["status"]})
         sources = owned_sources
     if live_plan:
-        live_plan = {key: live_plan.get(key) for key in ("id", "revision", "original", "status", "paused")} | {
+        live_plan = {key: live_plan.get(key) for key in ("id", "revision", "original", "status", "paused", "scope_review")} | {
             "steps": [{key: step.get(key) for key in ("id", "tool", "arguments", "staged_arguments", "missing_slots", "questions", "status", "depends_on", "task_id", "effect", "execution_phase", "failure")}
                       for step in live_plan["steps"]]}
     from .revision import RevisionDraft
+    revision_schema=RevisionDraft.model_json_schema()
+    for internal in ("scope_review","plan_id","expected_revision"):
+        revision_schema["properties"].pop(internal,None)
+    revision_schema["required"]=[key for key in revision_schema.get("required",[]) if key not in {"plan_id","expected_revision"}]
     request = LLMRequest(
         instructions=(
             "你是AutoHunt任务解释器，只输出符合schema的JSON，不调用工具。"
             "active_plan是正在执行的原计划。用户追加后续动作或修改条件时operation=revise，revision按revision_schema输出。"
+            "plan_id与expected_revision由应用按本次读取的计划快照绑定，你不要填写或推测；dialogue.revision是对话版本，不是计划版本。只描述需要修改的步骤与参数。"
             "已有步骤改参数用updates，更新未执行步骤的前置关系用updates.depends_on，追加动作用add_steps；原任务只有搜索也可追加投递/分析/成长计划，并依赖原搜索完成。不要重复原已执行步骤。"
             "正在搜索时更新参数会暂存并暂停；继续时安全结束旧只读搜索并按新参数启动，保留旧结果，不会原地修改旧浏览器请求。"
             "active_plan的staged_arguments是已确认但暂未激活的最新条件；继续修改时继承它，不回退到旧arguments。"
@@ -182,8 +188,10 @@ async def plan_request(llm, registry, message: str, *, dialogue: dict, condition
             "关键词的语义提取完全由你负责：queries只含简短通用岗位名/行业方向，绝不能把整句命令、城市、数量、薪资或筛选条件作为关键词。"
             "用户未指定岗位时继承conditions.queries（来自当前简历或本会话）；没有方向就问岗位或简历，不编造默认职业。"
             "所有数量、薪资、城市、分数和条件作用域都由你解析；中文数字与k/万换算成数值。省略参数继承会话，明确取消才能清除。"
-            "薪资用filters中带salary的叶节点：unit=monthly/daily/negotiable，minimum/maximum单位元。15k以上或面议用any(monthly minimum=15000,negotiable)，两个叶节点mode=require，不是软allow。"
+            "薪资用filters中带salary的叶节点：unit=monthly/daily/negotiable，minimum/maximum单位元。只给数值门槛只能生成对应数值条件，绝不能添加面议、实习或其它例外；仅当有效用户需求明确允许相应备选时才用any组合，不是软allow。"
+            "组合节点说明放label，约束全部放children；condition不得含子节点，all/any至少一个，not恰好一个；组合节点mode仅require且无salary。"
             "月薪15k-40k默认range_mode=contained且说明区间完整落入；用户明确有交集用overlap。单独15k未说明最低或期望且上下文不能消歧时询问，不猜精确匹配。"
+            "只给最低/以上薪资也按岗位区间下限判断，默认contained，不用overlap；最低15K不能接受10-20K。"
             "实习日薪低于300不要，用salary(unit=daily,minimum=300,applies_to=internship)，非实习岗位不受限制。未知不等于面议，日薪不折算月薪。"
             "完整薪资条件树优先于旧salary_min快捷字段，必须保留各分支作用域和OR例外。生成计划仅max_score/min_score/salary_min等schema字段，不搬动搜索门槛。"
             "同义岗位词不必逐字出现于用户原文，可依据专业/简历方向提取。模糊但可执行的表达不要求固定口令。"
@@ -216,7 +224,7 @@ async def plan_request(llm, registry, message: str, *, dialogue: dict, condition
             "任意搜索条件使用filters条件树condition/all/any/not；叶text是完整语义，quote仅作审计，不要求机械复制。"
             "先区分准入范围、每个备选方案的硬条件和排序偏好。叶mode=require表示岗位必须满足的事实，prefer仅排序，allow只是允许包含，不需要JD证明接受。"
             "也可以/也接受是在扩大范围，不得放在all中作为新增require。A或B分别有条件时用any(all(A,A的条件),all(B,B的条件))，共同条件才放在外层all。"
-            "例如正式岗有月薪门槛或面议、实习有独立日薪门槛：any(all(正式岗位,any(月薪门槛,面议)),all(实习岗位,日薪门槛))，门槛金额只能来自有效用户请求或conditions。"
+            "正式岗与实习有不同门槛时，按用户实际给定的各分支用any连接，不增添用户未给的备选。门槛金额只能来自有效用户请求或conditions。"
             "系统说明和schema里的示例数值不是用户条件，不得复制。用户没有提出日薪门槛且会话也没有该门槛时，绝不能增加日薪条件。没有提出独立实习门槛时只添加allow，不得自行创建带门槛的实习备选分支。"
             "这里正式岗位/实习岗位是当前岗位的类型事实，不是公司是否接受实习生；不要生成‘接受实习岗位’的require叶。仅说实习也可且没有独立实习门槛时用allow，不额外限制正式岗位。"
             "校招/应届/社招是招聘对象，不等于正式/实习岗位性质；应届实习及有转正机会的实习仍计入实习组，不能仅凭月薪认定正式。"
@@ -233,13 +241,36 @@ async def plan_request(llm, registry, message: str, *, dialogue: dict, condition
             "输出schema：" + json.dumps(RequestDraft.model_json_schema(), ensure_ascii=False)
         ),
         user_message=json.dumps({"message": message, "pending_request": previous,
-            "active_plan": live_plan, "result_sources": sources, "revision_schema": RevisionDraft.model_json_schema(),
+            "active_plan": live_plan, "result_sources": sources, "revision_schema": revision_schema,
             "conditions": conditions, "dialogue": dialogue, "capabilities": schemas},
             ensure_ascii=False),
         context="解释归模型；校验检查结构；审批绑定实际动作范围。", fast=True,
         json_output=True, max_output_tokens=4096)
-    return await _draft_with_repair(llm, request, validator=lambda draft: validate_draft(
-        draft, registry, message, dialogue=dialogue, conditions=conditions, stamp=stamp, previous=previous))
+    review_deadline=time.monotonic()+PLANNING_TIMEOUT
+    async def validate_and_review(draft):
+        if (draft.operation=="revise" or draft.revision) and live_plan:
+            current=context.plan_reader() if context and context.plan_reader else None
+            if current and (current["id"],current.get("revision",0))!=(live_plan["id"],live_plan["revision"]):
+                raise PlanValidationError("concurrent_plan_update","推理期间计划已被另一请求更新，请基于最新执行记录接续；未覆盖新版本",category="clarify")
+            draft=draft.model_copy(deep=True)
+            draft.revision={**(draft.revision or {}),"plan_id":live_plan["id"],"expected_revision":live_plan["revision"]}
+            emit("plan_revision_bound",plan_id=live_plan["id"],expected_revision=live_plan["revision"],source="application_snapshot")
+        validated=validate_draft(draft,registry,message,dialogue=dialogue,conditions=conditions,stamp=stamp,previous=previous)
+        if any(s.get("unresolved_arguments") for s in validated.get("steps",[])):
+            return validated  # Repair structure before asking a semantic reviewer.
+        from .scope_review import review, apply_review
+        reviewed,metadata,_=await review(llm,draft,message=message,live_plan=live_plan,
+                                         conditions=conditions,previous_request=previous,
+                                         timeout_seconds=min(18,max(.001,review_deadline-time.monotonic()-2)))
+        if metadata:
+            # All corrected values re-enter the same compiler and action binding.
+            validated=validate_draft(reviewed,registry,message,dialogue=dialogue,conditions=conditions,stamp=stamp,previous=previous)
+            if validated.get("operation")=="revise":
+                validated["revision"]["scope_review"]=metadata
+            else:
+                apply_review(validated,metadata)
+        return validated
+    return await _draft_with_repair(llm, request, validator=validate_and_review)
 
 
 def contextual_draft(message: str, previous: dict | None, schemas: list[dict]) -> RequestDraft | None:
@@ -283,6 +314,7 @@ def _validate_draft(draft: RequestDraft, registry, message: str, *, dialogue: di
         if not target:
             raise PlanValidationError("missing_active_plan", "没有唯一可修改的执行中任务，请明确任务对象", category="clarify")
         revision = copy.deepcopy(draft.revision or {})
+        revision.pop("scope_review",None)
         revision.setdefault("plan_id", target["id"])
         revision.setdefault("expected_revision", target.get("revision", 0))
         if revision.get("questions") is None:
@@ -667,7 +699,11 @@ async def _draft_with_repair(llm, request: LLMRequest, *, validator=None):
                 return candidate
             try:
                 validated = validator(candidate)
-                unresolved = [step for step in validated.get("steps", []) if step.get("unresolved_arguments")]
+                if inspect.isawaitable(validated):
+                    validated = await validated
+                semantic_waits=(validated.get("scope_review") or {}).get("waits",{})
+                unresolved = [step for step in validated.get("steps", [])
+                              if step.get("unresolved_arguments") and step["id"] not in semantic_waits]
                 if unresolved and semantic_repair_count < MAX_SEMANTIC_REPAIRS:
                     # Technical predicate defects are the planner's responsibility.
                     # Try the existing bounded repair before asking the user. If

@@ -182,7 +182,7 @@ def encoding_schema(schema: dict) -> dict:
     Value bounds and required slots are checked after authoritative normalization;
     their absence here is not permission to execute an incomplete candidate.
     """
-    limits = {"required", "minimum", "maximum", "minLength", "maxLength", "minItems", "maxItems"}
+    limits = {"required", "minimum", "maximum", "minLength", "maxLength", "minItems", "maxItems", "oneOf"}
     result = {key: value for key, value in schema.items() if key not in limits}
     if "properties" in result:
         result["properties"] = {key: encoding_schema(value) for key, value in result["properties"].items()}

@@ -43,6 +43,10 @@ MATCH_INSTRUCTIONS = (
     "评分权重：用户本轮搜索方向 50%，简历技能证据 30%，简历目标岗位 10%，JD 信息完整度 10%。"
     "80 分及以上 APPLY，50-79 分 REVIEW，低于 50 分 SKIP。排除关键词是硬约束；"
     "与本轮搜索方向一致的职位不得仅因技能重合度低而 SKIP，应进入 REVIEW 供人工审核。"
+    "额外输出requirements数组，逐项核对JD明确要求的学历、年限、资格等硬条件；无此类硬条件时返回[]。"
+    "每项为{name,status:pass|fail|unknown,job_quote:JD连续原文,candidate_evidence:[{field:提供的证据字段名,quote:候选人连续原文}],reason}。"
+    "candidate_facts.documents是最小化候选人证据；不能从技能、方向推断学历年限。"
+    "pass和fail都需双方直接证据，未体现不能当作不会或不满足，应unknown；匹配分与硬条件分开。"
 )
 
 
@@ -147,6 +151,7 @@ def detail_request_from_card(
     target_roles: list[str] | None = None,
     excluded_keywords: list[str] | None = None,
     search_queries: list[str] | None = None,
+    candidate_facts: dict | None = None,
 ) -> JobAnalysisRequest:
     """Build the detail-page match request from a card plus the scraped JD."""
     return JobAnalysisRequest(
@@ -157,12 +162,14 @@ def detail_request_from_card(
         target_roles=target_roles or [],
         excluded_keywords=excluded_keywords or [],
         search_queries=search_queries or [],
+        candidate_facts=candidate_facts or {},
     )
 
 
 async def match_job(generate: GenerateFn, request: JobAnalysisRequest) -> JobAnalysis:
     """Single-job LLM match (fast mode); falls back to the rule scorer."""
     rule_analysis = analyze_job(request)
+    from ..jobs.candidate_facts import verify_requirements
     text_to_check = f"{request.title} {request.description}".casefold()
     if any(term.strip().casefold() in text_to_check for term in request.excluded_keywords if term.strip()):
         # A model recommendation must never override the user's hard exclusions.
@@ -179,6 +186,7 @@ async def match_job(generate: GenerateFn, request: JobAnalysisRequest) -> JobAna
                         "excluded_keywords": request.excluded_keywords,
                         "search_queries": request.search_queries,
                         "job_description": request.description[:12_000],
+                        "candidate_facts": request.candidate_facts,
                     },
                     ensure_ascii=False,
                 ),
@@ -188,15 +196,16 @@ async def match_job(generate: GenerateFn, request: JobAnalysisRequest) -> JobAna
         text = result.text.strip()
         if text.startswith("```"):
             text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.IGNORECASE)
-        llm_analysis = JobAnalysis.model_validate(json.loads(text))
+        payload=json.loads(text)
+        llm_analysis = verify_requirements(JobAnalysis.model_validate(payload),request,assessed="requirements" in payload)
         # The deterministic policy is the safety floor: a role aligned with the
         # user's current search must reach human review even if the LLM weighs
         # sparse resume overlap too heavily. Hard exclusions still return SKIP.
         if llm_analysis.decision == "SKIP" and rule_analysis.decision in DETAIL_DECISIONS:
-            return rule_analysis
+            return verify_requirements(rule_analysis.model_copy(update={"requirements":llm_analysis.requirements}),request,assessed="requirements" in payload)
         return llm_analysis
     except Exception:
-        return analyze_job(request)
+        return verify_requirements(analyze_job(request),request,assessed=False)
 
 
 async def match_many(

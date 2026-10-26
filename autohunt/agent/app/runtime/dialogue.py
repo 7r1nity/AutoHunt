@@ -355,6 +355,19 @@ def apply_operation(saved: dict | None, operation: dict, *, clock: float | None 
 
 def resolve_reference(saved: dict, *, kind: str, selector: str, snapshot_id: str | None = None,
                       clock: float | None = None, read_only: bool = False) -> dict:
+    if isinstance(selector,dict):
+        from .job_references import JobReference
+        ref=JobReference.model_validate(selector)
+        if kind!="job" or snapshot_id and ref.snapshot_id and snapshot_id!=ref.snapshot_id:
+            raise ValueError("岗位引用的列表快照不一致")
+        resolved=resolve_reference(saved,kind=kind,selector=f"第{ref.ordinal}个",snapshot_id=ref.snapshot_id or snapshot_id,
+                                   clock=clock,read_only=read_only)
+        compact=lambda value:re.sub(r"\s+","",str(value or "")).casefold()
+        for key in ("title","company","location"):
+            expected=getattr(ref,key)
+            if expected and not all(compact(expected) in compact(item.get(key)) for item in resolved["items"]):
+                raise ValueError("序号与岗位限定字段不一致，请核对原列表；没有改选其他岗位")
+        return resolved
     qualifier = ""
     explicit_job_id = None
     state = DialogueState.model_validate(saved)
@@ -420,9 +433,10 @@ def resolve_reference(saved: dict, *, kind: str, selector: str, snapshot_id: str
         if len(selected) != 1:
             raise ValueError("名称不存在或有多个同名对象，请说明序号")
     if qualifier:
-        compact = lambda value: re.sub(r"\s+", "", str(value or "")).casefold()
-        if not all(any(compact(qualifier) in compact(item.get(key)) for key in ("title", "company")) for item in selected):
-            raise ValueError("序号与岗位名称/公司不一致，请核对原列表；没有改选其他岗位")
+        from .job_references import qualifier_matches
+        if not all(qualifier_matches(qualifier,item) for item in selected):
+            from .job_references import UnresolvedQualifier
+            raise UnresolvedQualifier(selected)
     return {"snapshot_id": snapshot.id, "source": snapshot.source, "version": snapshot.version,
             "kind": kind, "items": selected}
 

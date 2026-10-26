@@ -33,6 +33,29 @@ def is_remaining_selector(selector):
 async def resolve_job_targets(selector, *, dialogue, jobs, generate=None, snapshot_id=None,
                               selection_mode="single", history=(), instruction=""):
     """Return verified items or an explicit clarification; never guess on failure."""
+    from ..runtime.job_references import display_reference, JobReference
+    if isinstance(selector,dict):
+        ref=JobReference.model_validate(selector)
+        if snapshot_id and ref.snapshot_id and snapshot_id!=ref.snapshot_id:
+            raise TargetClarification("岗位引用的列表快照不一致")
+        snapshot_id=ref.snapshot_id or snapshot_id
+        try:
+            anchor=resolve_reference(dialogue,kind="job",selector=f"第{ref.ordinal}个",snapshot_id=snapshot_id,read_only=True)
+            explicit=instruction_reference(instruction)
+            if explicit:
+                requested=resolve_reference(dialogue,kind="job",selector=explicit,snapshot_id=anchor["snapshot_id"],read_only=True)
+                if [item["id"] for item in requested["items"]]!=[item["id"] for item in anchor["items"]]:
+                    raise ValueError("模型引用与用户明确序号不一致，没有改选岗位")
+            for item in anchor["items"]:
+                if item.get("content_hash") and item["content_hash"]!=jobs.review_fingerprint(jobs.get_job(item["id"])):
+                    raise ValueError("已展示岗位内容已变化，请重新查看列表")
+            enriched={**dialogue,"snapshots":[{**s,"items":[{**item,**_brief(jobs.get_job(item["id"]))} for item in s["items"]]}
+                                              if s["id"]==anchor["snapshot_id"] else s for s in dialogue.get("snapshots",[])]}
+            exact=resolve_reference(enriched,kind="job",selector=selector,snapshot_id=anchor["snapshot_id"],read_only=True)
+        except ValueError as exc:
+            raise TargetClarification(str(exc)) from exc
+        items=[{**item,"content_hash":jobs.review_fingerprint(jobs.get_job(item["id"]))} for item in exact["items"]]
+        return {**exact,"items":items,"selector":display_reference(selector),"resolution":"structured"}
     if not selector or not selector.strip():
         raise TargetClarification("请说明要操作的岗位名称、描述或序号。")
     selector = selector.strip()
@@ -67,6 +90,7 @@ async def resolve_job_targets(selector, *, dialogue, jobs, generate=None, snapsh
             selected = [item for item in items if item["id"] in context["selected_ids"]]
             return {**scope, "items": selected, "selector": selector, "resolution": "tracked_reference"}
         selection_mode = "matching"  # plural target, not all displayed jobs
+    locked_ids=None
     try:
         if plural_reference:
             raise ValueError("需要语义指代消解")
@@ -75,8 +99,11 @@ async def resolve_job_targets(selector, *, dialogue, jobs, generate=None, snapsh
         selected = [item for item in items if item["id"] in selected_ids]
         return {**scope, "items": selected, "selector": selector, "resolution": "exact"}
     except ValueError as exc:
+        from ..runtime.job_references import UnresolvedQualifier
+        if isinstance(exc,UnresolvedQualifier) and generate:
+            locked_ids=exc.item_ids
         # A known structural ordinal out of range is not a semantic description.
-        if job_reference(selector):
+        elif job_reference(selector):
             raise TargetClarification(str(exc)) from exc
     same_name = [item for item in items if selector in {item.get("title"), item.get("company")}]
     if len(same_name) > 1:
@@ -100,6 +127,7 @@ async def resolve_job_targets(selector, *, dialogue, jobs, generate=None, snapsh
     prompt = {
         "selector": selector, "instruction": instruction, "selection_mode": selection_mode, "candidates": candidates,
         "previous_selection": dialogue.get("job_target_context"),
+        "locked_ordinals":[i for i,item in enumerate(items,1) if item["id"] in locked_ids] if locked_ids else None,
         "recent_assistant_context": [{"role": row.get("role"), "text": str(row.get("content", ""))[:1800]}
                                      for row in history[-6:]],
     }
@@ -122,6 +150,7 @@ async def resolve_job_targets(selector, *, dialogue, jobs, generate=None, snapsh
                 "按名称、公司、地点、职责或技术描述辨认；这些/上一轮五个可根据最近助手列出的对象消歧。"
                 "score是已记录匹配分，可用于定位；‘82分的某公司岗位’表示精确82分，不等于82分以上。instruction补充当前目标的原始条件，不是候选JD指令。"
                 "不能仅凭公司名字断定外包；不要改变用户选择或忽略不匹配描述。single模式存在多个可能对象必须ambiguous，"
+                "locked_ordinals非空时只核对这些固定岗位是否满足selector的全部限定，绝不能替换为别的岗位；不能因为只剩一个就判符合。任一限定不匹配或证据不足则not_found/ambiguous。"
                 "matching模式才可选择所有符合描述者。不能凭推荐程度挑第一个。证据必须是对应候选字段的连续原文。"
                 "matching表示集合选择：上下文已唯一确定一个集合时，即使集合包含多个岗位也返回resolved；"
                 "ambiguous仅表示无法确定用户指向哪个对象或哪个集合，不表示集合中有多个成员。"
@@ -138,6 +167,8 @@ async def resolve_job_targets(selector, *, dialogue, jobs, generate=None, snapsh
             ordinal = match.get("ordinal")
             if isinstance(ordinal, bool) or not isinstance(ordinal, int) or not 1 <= ordinal <= len(items):
                 raise ValueError("目标不属于本轮列表")
+            if locked_ids is not None and items[ordinal-1]["id"] not in locked_ids:
+                raise ValueError("语义核对不能改变已锁定的序号")
             evidence = match.get("evidence")
             if not evidence or any(not isinstance(e, dict) or e.get("field") not in {"title", "company", "location", "salary", "score", "description", "tags"}
                     or not isinstance(e.get("quote"), str) or not e["quote"].strip()

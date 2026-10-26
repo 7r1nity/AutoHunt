@@ -155,6 +155,7 @@ class JobAnalysisRequest(BaseModel):
     target_roles: list[str] = Field(default_factory=list, max_length=50)
     excluded_keywords: list[str] = Field(default_factory=list, max_length=50)
     search_queries: list[str] = Field(default_factory=list, max_length=10)
+    candidate_facts: dict[str, Any] = Field(default_factory=dict)
 
 
 class JobAnalysis(BaseModel):
@@ -163,6 +164,8 @@ class JobAnalysis(BaseModel):
     matched_skills: list[str]
     missing_skills: list[str]
     reasoning: str
+    requirements: list[dict[str, Any]] = Field(default_factory=list, max_length=30)
+    qualification: dict[str, Any] | None = None
 
 
 class TaskRecord(BaseModel):
@@ -325,6 +328,7 @@ class CandidateProfileView(BaseModel):
     industries: list[str] = Field(default_factory=list, max_length=20)
     seniority: str | None = Field(default=None, max_length=50)
     years_experience: float | None = Field(default=None, ge=0, le=80)
+    qualification_facts: list[dict[str, Any]] = Field(default_factory=list,max_length=20)
     summary: str = Field(default="尚未上传简历", max_length=1000)
     resume_draft_override: str | None = Field(default=None, max_length=40_000)
     evidence: list[CandidateEvidenceItem] = Field(default_factory=list, max_length=100)

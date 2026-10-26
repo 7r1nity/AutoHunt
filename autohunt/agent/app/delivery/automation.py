@@ -399,14 +399,13 @@ class DeliveryAutomationService:
             observation = await self.adapter.inspect(page)
             if not observation.application_submitted and not observation.resume_ready:
                 raise RuntimeError("授权主简历已同步，但发送按钮尚不可用；请核对招聘方回复和页面状态")
-            submit_started = True
-            self._update(
-                DeliveryTaskStatus.RUNNING,
-                "即将执行已授权的简历提交动作",
-                url=page.url,
-                checkpoint="submit_started",
-            )
-            result = await self.adapter.submit(page, binding=binding, before_click=self._authorized_resume_payload)
+            def before_submit():
+                nonlocal submit_started
+                self._authorized_resume_payload()
+                submit_started = True
+                self._update(DeliveryTaskStatus.RUNNING,"即将执行已授权的简历提交动作",
+                             url=page.url,checkpoint="submit_started")
+            result = await self.adapter.submit(page, binding=binding, before_click=before_submit)
             if result.confirmed:
                 if result.await_reply:
                     detail = "模拟网站已确认直接投递；后台将持续监测招聘方回复"
@@ -417,8 +416,14 @@ class DeliveryAutomationService:
                 self.jobs.mark_delivery_completed(job_id, detail)
                 self._update(DeliveryTaskStatus.COMPLETED, detail, url=page.url, submitted=True, checkpoint="submission_confirmed")
                 return
-            self.jobs.mark_outcome_indeterminate(job_id, result.detail)
-            self._update(DeliveryTaskStatus.OUTCOME_INDETERMINATE, result.detail, url=page.url, checkpoint="submission_unconfirmed")
+            if result.page_state=="needs_input":
+                self._update(DeliveryTaskStatus.WAITING_FOR_USER,result.detail,url=page.url,checkpoint="form_input_required")
+            elif not submit_started and not result.attempted:
+                self.jobs.mark_delivery_failed(job_id,result.detail)
+                self._update(DeliveryTaskStatus.FAILED,result.detail,url=page.url,checkpoint="preflight_failed")
+            else:
+                self.jobs.mark_outcome_indeterminate(job_id, result.detail)
+                self._update(DeliveryTaskStatus.OUTCOME_INDETERMINATE, result.detail, url=page.url, checkpoint="submission_unconfirmed")
         except asyncio.CancelledError:
             raise
         except Exception as exc:

@@ -2,8 +2,53 @@
 from __future__ import annotations
 
 import re
+from pydantic import BaseModel, ConfigDict, Field
 
 NUMBER = r"[零〇一二两三四五六七八九十百\d]+"
+
+
+class JobReference(BaseModel):
+    """An ordinal anchors identity; qualifiers only verify that same item."""
+    model_config = ConfigDict(extra="forbid")
+    ordinal: int = Field(ge=1, le=100)
+    snapshot_id: str | None = Field(default=None,max_length=128)
+    title: str | None = Field(default=None,max_length=200)
+    company: str | None = Field(default=None,max_length=200)
+    location: str | None = Field(default=None,max_length=200)
+
+
+class UnresolvedQualifier(ValueError):
+    def __init__(self,items):
+        super().__init__("序号与岗位限定描述可能不一致，需要核对；没有改选其他岗位")
+        self.item_ids={item["id"] for item in items}
+
+
+def qualifier_matches(text, item):
+    compact=lambda value:re.sub(r"[\s·|｜,，、:：()（）]+","",str(value or "")).casefold()
+    remainder=compact(text)
+    if not remainder:
+        return True
+    if any(remainder in compact(item.get(key)) for key in ("title","company","location") if item.get(key)):
+        return True
+    matched=False
+    # Only consume observed whole field values, never arbitrary word overlap.
+    for value in sorted({compact(item.get(key)) for key in ("title","company","location")},key=len,reverse=True):
+        if value and value in remainder:
+            remainder=remainder.replace(value,"",1)
+            matched=True
+    return matched and not remainder
+
+
+def selector_schema():
+    return {"anyOf":[{"type":"string","minLength":1,"maxLength":500},JobReference.model_json_schema()],
+            "description":"优先使用{ordinal,snapshot_id,title,company,location}分字段引用；兼容序号/名称/描述字符串。序号不是数据库ID。"}
+
+
+def display_reference(value):
+    if isinstance(value,dict):
+        ref=JobReference.model_validate(value)
+        return " ".join([f"第{ref.ordinal}个",*[part for part in (ref.title,ref.company,ref.location) if part]])
+    return value
 
 
 def job_reference(text: str) -> tuple[str, str] | None:

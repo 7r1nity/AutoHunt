@@ -17,13 +17,13 @@ from evaluation.stateful_scenarios import Harness, STAMP
 from .common import CASE, append, write
 
 
-def salary_accepts(arguments, amount=None, *, negotiable=False):
+def salary_accepts(arguments, amount=None, *, negotiable=False,salary=None):
     from app.core.job_filters import validate_filter, combine
     from app.core.salary_conditions import normalized_search_filters, judge_salary
     tree=normalized_search_filters(arguments.get("filters"),arguments.get("salary_min"))
     if not tree: return True
     expression=validate_filter(tree)
-    facts={"salary":"面议" if negotiable else str(amount)+"元/月","employment_kind":"regular"}
+    facts={"salary":salary if salary is not None else "面议" if negotiable else str(amount)+"元/月","employment_kind":"regular"}
     values=[]
     for leaf in expression.leaves():
         if leaf.salary: values.append(judge_salary(leaf.salary,facts)["status"])
@@ -32,7 +32,9 @@ def salary_accepts(arguments, amount=None, *, negotiable=False):
 
 
 def salary_scope_exact(arguments,floor):
-    return salary_accepts(arguments,floor) and not salary_accepts(arguments,floor-1) and not salary_accepts(arguments,negotiable=True)
+    return (salary_accepts(arguments,floor) and not salary_accepts(arguments,floor-1)
+            and not salary_accepts(arguments,negotiable=True)
+            and not salary_accepts(arguments,salary=f"{max(0,floor-1000)}-{floor+1000}元/月"))
 
 
 def check_plan(plan,expected,conditions,old):

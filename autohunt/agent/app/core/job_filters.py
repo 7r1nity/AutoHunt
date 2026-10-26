@@ -6,12 +6,14 @@ through boolean composition, including NOT; absence is not negative evidence.
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import json
 import re
+from functools import lru_cache
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_serializer, model_validator
 
 from ..llm.base import LLMRequest
 from .task_semantics import condition_mode
@@ -23,27 +25,67 @@ PUBLIC_FILTER_DEPTH = 6
 MAX_FILTER_DEPTH = PUBLIC_FILTER_DEPTH + 2
 MAX_FILTER_NODES = 256
 MAX_FILTER_CHILDREN = 32
-FILTER_POLICY_VERSION = 2
+FILTER_POLICY_VERSION = 3
+
+# One structural contract is shared by runtime validation and the model schema.
+NODE_CHILDREN = {"condition": (0, 0), "all": (1, MAX_FILTER_CHILDREN),
+                 "any": (1, MAX_FILTER_CHILDREN), "not": (1, 1)}
+
+
+def node_branches():
+    branches=[]
+    for op,(minimum,maximum) in NODE_CHILDREN.items():
+        branch={"properties":{"op":{"const":op},"children":{"minItems":minimum,"maxItems":maximum}},"required":["op"]}
+        if op=="condition":
+            branch["required"].append("text")
+            branch["properties"]["text"]={"pattern":r"\S"}
+        else:
+            branch["required"].append("children")
+            branch["properties"].update(salary={"type":"null"},mode={"const":"require"})
+        branches.append(branch)
+    return branches
 
 
 class FilterExpression(BaseModel):
     model_config = ConfigDict(extra="forbid")
     op: Literal["condition", "all", "any", "not"]
     text: str = Field(default="", max_length=400)
+    label: str = Field(default="", max_length=400)
     quote: str = Field(default="", max_length=1000)
     mode: Literal["require", "prefer", "allow"] = "require"
     salary: SalaryPredicate | None = None
     children: list[FilterExpression] = Field(default_factory=list, max_length=MAX_FILTER_CHILDREN)
 
+    @classmethod
+    def __get_pydantic_json_schema__(cls,core_schema,handler):
+        schema=handler.resolve_ref_schema(handler(core_schema))
+        schema["oneOf"]=node_branches()
+        return schema
+
+    @model_serializer(mode="wrap")
+    def serialize(self, handler):
+        value = handler(self)
+        if not self.label:
+            value.pop("label", None)  # Preserve legacy fingerprints for unchanged trees.
+        return value
+
     @model_validator(mode="after")
     def bounded_tree(self):
+        minimum, maximum = NODE_CHILDREN[self.op]
+        if not minimum <= len(self.children) <= maximum:
+            raise ValueError(f"{self.op}节点需要{minimum}至{maximum}个子节点")
         if self.op == "condition":
-            if not self.text.strip() or self.children:
+            if not self.text.strip():
                 raise ValueError("筛选叶节点需要用户条件原文，不能包含子节点")
-        elif self.salary is not None or self.mode != "require" or self.text or not self.children:
+        elif self.salary is not None or self.mode != "require":
             raise ValueError("组合节点仅包含子节点")
-        if self.op == "not" and len(self.children) != 1:
-            raise ValueError("否定节点必须明确一个子表达式")
+        elif self.text:
+            # Older models put a redundant group caption in text. Preserve it as
+            # annotation; only children carry predicates. Never promote/delete a
+            # child to repair shape. Semantic scope review checks their meaning.
+            if self.label and self.label != self.text:
+                raise ValueError("组合节点包含冲突的说明，请保留一个label")
+            self.label, self.text = self.text, ""
         # Budget the losslessly normalized tree at every entry point, including
         # browser/persistence model_validate calls. Never delete constraints or
         # flatten heterogeneous Boolean operators to meet an execution budget.
@@ -67,11 +109,11 @@ def _canonical_expression(node):
     if node.op == "condition":
         return node
     children = [_canonical_expression(child) for child in node.children]
-    if node.op in {"all", "any"} and not node.quote:
+    if node.op in {"all", "any"} and not node.quote and not node.label:
         if len(children) == 1:
             return children[0]
         flattened = [item for child in children for item in
-                     (child.children if child.op == node.op and not child.quote else [child])]
+                     (child.children if child.op == node.op and not child.quote and not child.label else [child])]
         if len(flattened) <= MAX_FILTER_CHILDREN:
             children = flattened
     return node.model_copy(update={"children": children})
@@ -83,25 +125,21 @@ def _tree_size(node):
 
 
 def filter_schema(depth=PUBLIC_FILTER_DEPTH):
-    properties = {"op": {"type": "string", "enum": ["condition", "all", "any", "not"]},
-                  "text": {"type": "string", "maxLength": 400},
-                  "quote": {"type": "string", "maxLength": 1000, "description": "用户的连续原文；text可补齐此原文中的语义省略，不得增添要求"}}
-    properties["mode"] = {"type": "string", "enum": ["require", "prefer", "allow"],
-        "description": "require=岗位必须满足的事实；prefer=排序偏好；allow=扩大接受范围，不要求JD证明接受，不能作为硬条件。备选方案用any，各方案内部用all；组合节点仅require"}
-    properties["salary"] = {"type": ["object", "null"], "description": "薪资叶节点的确定性结构，金额单位元；月薪或面议必须用any组合，不是软allow。",
-        "properties": {"unit": {"type": "string", "enum": ["monthly", "daily", "negotiable"]},
-            "minimum": {"type": ["integer", "null"], "minimum": 0, "maximum": 10000000},
-            "maximum": {"type": ["integer", "null"], "minimum": 0, "maximum": 10000000},
-            "range_mode": {"type": "string", "enum": ["contained", "overlap"]},
-            "applies_to": {"type": "string", "enum": ["all", "internship"]}},
-        "required": ["unit"], "additionalProperties": False}
-    properties["salary"]["properties"]["origin"] = {"type": "string", "enum": ["model", "legacy"],
-        "description": "模型输出model；legacy仅供应用兼容旧salary_min字段"}
-    if depth > 1:
-        properties["children"] = {"type": "array", "maxItems": MAX_FILTER_CHILDREN, "items": filter_schema(depth - 1)}
-    else:
-        properties["children"] = {"type": "array", "maxItems": 0, "items": {"type": "object"}}
-    return {"type": "object", "properties": properties, "required": ["op"], "additionalProperties": False}
+    return copy.deepcopy(_filter_schema(depth))
+
+
+@lru_cache(maxsize=12)
+def _filter_schema(depth):
+    runtime = FilterExpression.model_json_schema()["$defs"]["FilterExpression"]
+    properties = {key: copy.deepcopy(value) for key, value in runtime["properties"].items()
+                  if key not in {"children", "salary"}}
+    properties["text"]["description"] = "condition的事实条件；旧组合text只作为说明，不承载约束。组合说明请用label，真正条件必须放children。"
+    properties["label"]["description"] = "可选组合说明，不参与条件真假判断，不得只在label中添加要求"
+    properties["salary"] = {"anyOf": [SalaryPredicate.model_json_schema(), {"type": "null"}]}
+    properties["children"] = {"type": "array", "maxItems": MAX_FILTER_CHILDREN if depth > 1 else 0,
+                              "items": _filter_schema(depth - 1) if depth > 1 else {"type": "object"}}
+    return {"type": "object", "properties": properties, "required": ["op"],
+            "oneOf": node_branches(), "additionalProperties": False}
 
 
 def validate_filter(value, sources=()):

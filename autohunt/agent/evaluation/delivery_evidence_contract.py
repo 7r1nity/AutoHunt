@@ -284,13 +284,15 @@ class PersistedFlow(unittest.IsolatedAsyncioTestCase):
         gc.collect()
         self.temp.cleanup()
 
-    async def seed(self):
+    async def seed(self,qualification_statuses=("pass","pass")):
         request = BrowserSearchRequest(query="合成分析师", source="mock", filters=leaf("正式全职"), result_limit=2)
         for i in (1, 2):
             detail = {"title": "校招分析师", "company": f"合成公司{i}", "salary": "19-23K", "location": "深圳",
                 "description": "面向应届生，当前正式全职岗位，签订劳动合同。", "tags": ["SQL"], "external_id": str(i)}
             await self.browser._check_filters("search", detail, request)
-            analysis = JobAnalysis(score=88, decision="APPLY", matched_skills=["Python"], missing_skills=["Graph RAG"], reasoning="合成评分")
+            from app.memory.resume_workspace import resume_document_digest
+            analysis = JobAnalysis(score=88, decision="APPLY", matched_skills=["Python"], missing_skills=["Graph RAG"], reasoning="合成评分",
+                qualification={"status":qualification_statuses[i-1],"assessed":True,"requirements":[],"resume_digest":resume_document_digest(self.document)})
             self.browser._persist_analysis("search", detail, analysis, f"http://127.0.0.1:8080/job.html?id={i}", source="MockJobSite", request=request)
         self.store.update_task("search", status=BrowserTaskStatus.COMPLETED)
 

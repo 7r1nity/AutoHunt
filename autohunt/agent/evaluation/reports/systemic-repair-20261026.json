@@ -1,0 +1,191 @@
+{
+  "date": "2026-10-26",
+  "data": "synthetic specification oracles, not human Gold",
+  "source_manifest_sha256": "f596b620351359ec31fe98ccabcf4d050bf8ec5ca932cc502a4cb70d9b7796f9",
+  "offline_contracts": {
+    "legacy": 715,
+    "specialist": 20,
+    "failures": 0,
+    "errors": 0,
+    "external_model_calls": 0,
+    "combined_runner": "evaluation.context_ledger_regression",
+    "final_combined": {
+      "tests": 735,
+      "failures": 0,
+      "errors": 0,
+      "external_model_calls": 0,
+      "source_changed_during_run": []
+    }
+  },
+  "frozen_planning": {
+    "cases": 20,
+    "pass": 20,
+    "fail": 0,
+    "error": 0,
+    "scope": "production model/planner/revision/runner with synthetic tool effects; not browser E2E",
+    "external_model_calls": 0,
+    "meaning": "Saved response compatibility with scripted scope review; not a fresh LLM evaluation"
+  },
+  "frozen_browser": {
+    "systems": {
+      "fixed_script": {
+        "trials": 48,
+        "task_success": 0.8333333333333334,
+        "delivery_success": 0.8571428571428571,
+        "safe_handling": 0.8,
+        "unsafe_submissions": 0,
+        "p50_ms": 1208.13,
+        "p95_ms": 3202.69
+      },
+      "agent": {
+        "trials": 48,
+        "task_success": 1.0,
+        "delivery_success": 1.0,
+        "safe_handling": 1.0,
+        "unsafe_submissions": 0,
+        "p50_ms": 2919.36,
+        "p95_ms": 5077.79
+      }
+    },
+    "repetitions": 2,
+    "scenarios": 24,
+    "scope": "controlled delivery backend E2E, not full UI->resume->search E2E or real-site success"
+  },
+  "independent_sql_audit": {
+    "fixed_script": {
+      "trials": 48,
+      "successes": 40,
+      "recovery_successes": 10,
+      "recovery_trials": 10,
+      "backend_applications": 24,
+      "duplicate_records": 0,
+      "repeated_application_post_attempts": 0,
+      "submitted_without_prior_hr": 0,
+      "tool_outcomes": {},
+      "tool_ok_rate": null,
+      "original_verdict_changed": [],
+      "both_repetitions_passed": 20
+    },
+    "agent": {
+      "trials": 48,
+      "successes": 48,
+      "recovery_successes": 10,
+      "recovery_trials": 10,
+      "backend_applications": 28,
+      "duplicate_records": 0,
+      "repeated_application_post_attempts": 0,
+      "submitted_without_prior_hr": 0,
+      "tool_outcomes": {
+        "ok": 55,
+        "error": 2
+      },
+      "tool_ok_rate": 0.9649122807017544,
+      "original_verdict_changed": [],
+      "both_repetitions_passed": 24
+    }
+  },
+  "first_postfix_real_model": {
+    "summary": {
+      "planning": {
+        "cases": 10,
+        "pass": 2,
+        "fail": 0,
+        "error": 8,
+        "scope": "production model/planner/revision/runner with synthetic tool effects; not browser E2E"
+      },
+      "matching": {
+        "pass": 0,
+        "fail": 0,
+        "skipped": 4
+      },
+      "physical_requests": 40,
+      "source_changed": []
+    },
+    "planning_error_types": {
+      "PlanValidationError": 6,
+      "BudgetExceeded": 2
+    },
+    "qualification_cases_skipped": 4,
+    "interpretation": "Preserved failed run before application-owned revision binding; not superseded by a success claim"
+  },
+  "final_real_model": {
+    "summary": {
+      "planning": {
+        "cases": 4,
+        "pass": 4,
+        "fail": 0,
+        "error": 0,
+        "scope": "production model/planner/revision/runner with synthetic tool effects; not browser E2E"
+      },
+      "matching": {
+        "pass": 4,
+        "fail": 0,
+        "skipped": 0
+      },
+      "physical_requests": 17,
+      "source_changed": [],
+      "unexpected_scope_waits": []
+    },
+    "model_names": [
+      "deepseek-flash"
+    ],
+    "physical_requests": 17,
+    "request_budget": 20,
+    "unused_budget": 3,
+    "usage": {
+      "prompt_tokens": 292509,
+      "completion_tokens": 3012,
+      "total_tokens": 295521
+    },
+    "planning_case_ids": [
+      "append_delivery",
+      "count_inheritance",
+      "quota",
+      "salary_or"
+    ],
+    "matching_cases": [
+      {
+        "id": "education_fail",
+        "status": "pass",
+        "expected": "fail",
+        "actual": "fail"
+      },
+      {
+        "id": "facts_pass",
+        "status": "pass",
+        "expected": "pass",
+        "actual": "pass"
+      },
+      {
+        "id": "facts_unknown",
+        "status": "pass",
+        "expected": "unknown",
+        "actual": "unknown"
+      },
+      {
+        "id": "years_fail",
+        "status": "pass",
+        "expected": "fail",
+        "actual": "fail"
+      }
+    ],
+    "source_changed_since_validation": []
+  },
+  "local_artifacts": {
+    "final_real_model": "evaluation\\results\\systemic-repair\\real-model-20-final",
+    "first_real_model": "evaluation\\results\\systemic-repair\\real-model-40",
+    "browser_replay": "evaluation\\results\\systemic-repair\\browser-replay-1",
+    "frozen_planning": "evaluation\\results\\systemic-repair\\planning-replay-final",
+    "specialist_log": "evaluation\\results\\systemic-repair\\specialist-final-5.log",
+    "regression_log": "evaluation\\results\\systemic-repair\\full-regression-final.log",
+    "regression_summary": "evaluation\\results\\context-ledger-regression\\20261026T112715.111885Z\\summary.json"
+  },
+  "limits": [
+    "Frozen planner outputs and scripted scope reviews are not fresh semantic accuracy",
+    "Browser trials are isolated delivery E2E, not frontend/resume/search E2E",
+    "Only four fresh two-turn planning cases and four qualification probes",
+    "No real-site submission or user data/queue tests",
+    "No rerun of full 450-pair ranking or human-labeled evaluation",
+    "Older profiles without sourced qualification quotes stay unknown until reparsed"
+  ]
+}

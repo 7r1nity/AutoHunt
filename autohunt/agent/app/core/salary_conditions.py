@@ -17,6 +17,16 @@ class SalaryPredicate(BaseModel):
     applies_to: Literal["all", "internship"] = "all"
     origin: Literal["model", "legacy"] = "model"
 
+    @classmethod
+    def __get_pydantic_json_schema__(cls,core_schema,handler):
+        schema=handler.resolve_ref_schema(handler(core_schema))
+        schema["oneOf"]=[
+            {"properties":{"unit":{"const":"negotiable"},"minimum":{"type":"null"},"maximum":{"type":"null"}}},
+            {"properties":{"unit":{"enum":["monthly","daily"]}},"anyOf":[
+                {"required":["minimum"],"properties":{"minimum":{"type":"integer"}}},
+                {"required":["maximum"],"properties":{"maximum":{"type":"integer"}}}]}]
+        return schema
+
     @model_validator(mode="after")
     def valid_bounds(self):
         if self.unit == "negotiable" and (self.minimum is not None or self.maximum is not None):

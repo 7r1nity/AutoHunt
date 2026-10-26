@@ -33,6 +33,9 @@ def draft(steps, roots):
 class Model:
     def __init__(self, payload): self.payload, self.requests = payload, []
     async def generate(self, request):
+        if request.context=="条件语义核对，不产生执行授权":
+            payload=json.loads(request.user_message)
+            return LLMResult(json.dumps({"scopes":[{"step_id":item["step_id"],"status":"pass","reason":"合成契约中条件已明确","changes":{}} for item in payload["scopes"]]}),"scripted","scope-contract")
         self.requests.append(json.loads(request.user_message))
         return LLMResult(json.dumps(self.payload, ensure_ascii=False), "scripted", "goal-graph")
 

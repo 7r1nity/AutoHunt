@@ -32,6 +32,7 @@ class LLMProfilePayload(BaseModel):
     industries: list[str] = Field(default_factory=list, max_length=20)
     seniority: str | None = Field(default=None, max_length=50)
     years_experience: float | None = Field(default=None, ge=0, le=80)
+    qualification_facts: list[dict] = Field(default_factory=list,max_length=20)
     summary: str = Field(default="", max_length=1000)
 
 
@@ -346,6 +347,8 @@ class CandidateProfileExtractor:
                     "不得输出姓名、邮箱、电话、住址或其他联系方式。只输出 JSON 对象，字段为："
                     "skills(字符串数组)、role_suggestions(岗位数组)、industries(行业数组)、"
                     "seniority(字符串或null)、years_experience(数字或null)、summary(中文短句)。"
+                    "另返回qualification_facts数组，仅提取学历education和明确工作年限years_experience，"
+                    "每项{field,value,quote}，quote为长度不超过200的连续原文；未披露则不返回，不从技能、项目年数或毕业时间推断工作年限。"
                     "只提取简历有证据支持的信息，不要推测用户求职意愿。"
                 ),
                 user_message=(
@@ -369,6 +372,9 @@ class CandidateProfileExtractor:
                 industries=_clean_values(payload.industries, limit=20),
                 seniority=redact_text(payload.seniority).strip()[:50] if payload.seniority else None,
                 years_experience=payload.years_experience,
+                qualification_facts=[{**fact,"quote":redact_text(fact["quote"])} for fact in payload.qualification_facts
+                    if fact.get("field") in {"education","years_experience"} and isinstance(fact.get("quote"),str)
+                    and 2<=len(fact["quote"])<=200 and fact["quote"] in text and isinstance(fact.get("value"),(str,int,float))],
                 summary=redact_text(payload.summary).strip() or fallback.summary,
                 extractor=f"{result.provider}/{result.model}",
             )
@@ -563,6 +569,7 @@ class CandidateStateStore:
         profile.industries = []
         profile.seniority = None
         profile.years_experience = None
+        profile.qualification_facts = []
         profile.summary = profile.evidence[0].summary[:1000] if profile.evidence else "尚未上传简历"
         profile.resume_draft_override = None
         profile.extractor = "multi-source-evidence" if profile.evidence else "deterministic"

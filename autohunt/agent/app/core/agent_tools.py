@@ -23,6 +23,7 @@ from .search_contract import missing_search_message
 from .result_groups import groups_schema
 from .job_filters import filter_schema
 from .job_targets import TargetClarification, resolve_job_targets
+from ..runtime.job_references import selector_schema, display_reference
 from ..workflow.result_sources import ResultSourceClarification, resolve_search_source
 from ..runtime.resilience import PreflightRefused, classify_failure, safe_retry
 from ..security.decisions import ActionPolicy, ActionDecision, Decision
@@ -213,14 +214,14 @@ class AgentToolRegistry:
             AgentToolSpec("job_review_selection", "按本轮明确审核命令审核已展示职位；只保存本地审核标记，不授权沟通或投递。执行器绑定最近已展示快照；可省略 snapshot_id，不接受任意库ID或未展示对象。",
                 obj({"snapshot_id": {"type": "string"}, "selector": {"type": "string", "maxLength": 120}}, ["selector"]), "write", self._review_selection),
             AgentToolSpec("job_detail_read", "按已展示职位简表的稳定序号或名称读取完整 JD 与原始链接；只读，不重新搜索，不投递。",
-                obj({"selector": {"type": "string", "maxLength": 120}, "snapshot_id": {"type": "string"},
+                obj({"selector": selector_schema(), "snapshot_id": {"type": "string"},
                     "view": {"type": "string", "enum": ["brief", "detail", "link"]}}, ["selector"]), "read", self._job_detail_read),
             AgentToolSpec("job_target_resolve", "只定位并冻结用户要保留/投递的岗位，不执行写入。按分数、公司、描述或序号选择；不明确时返回可点击候选。投递某岗位且移除其他的，必须先此步骤，再让移除exclude_target_step_id和投递target_step_id引用此步骤，不能把某公司全部当保留集合。",
-                obj({"selector": {"type": "string", "minLength": 1, "maxLength": 500},
+                obj({"selector": selector_schema(),
                      "snapshot_id": {"type": "string"}, "scope": {"type": "string", "enum": ["displayed", "board"]},
                      "selection_mode": {"type": "string", "enum": ["single", "matching"]}}, ["selector"]), "read", self._job_target_resolve),
             AgentToolSpec("job_remove_selection", "移出申请看板并取消选中岗位未发送的投递。移除其余岗位必须exclude_target_step_id引用先完成的job_target_resolve，按冻结范围减去选中ID，不由公司名猜补集。保留JD与全部历史。",
-                obj({"selector": {"type": "string", "minLength": 1, "maxLength": 500},
+                obj({"selector": selector_schema(),
                      "snapshot_id": {"type": "string"},
                      "exclude_target_step_id": {"type": "string", "pattern": "^[a-zA-Z0-9_-]{1,40}$"},
                      "selection_mode": {"type": "string", "enum": ["single", "matching"], "description": "single定位唯一岗位；matching仅用于明确选择所有符合描述的岗位。"}}, ["selector"]),
@@ -350,7 +351,7 @@ class AgentToolRegistry:
                 AgentToolSpec("mock_delivery_start", "将用户要求范围内的已搜索模拟站职位加入有限投递队列。批量补投默认继承上一批完整条件，scope_mode=new用于用户明确另起或替换范围；指定岗位不继承旧批量条件。filters为投递独立条件，可复用搜索判断。内部生成逐职位预览与一次性授权，快速逐个沟通、并行等待HR回复、回复后发送简历；不支持真实网站。",
                     obj({"min_score": {"type": "integer", "minimum": 0, "maximum": 100},
                          "scope_mode": {"type": "string", "enum": ["inherit", "new"], "description": "默认inherit，补投/漏投继承同一搜索和简历的上一批条件，新条件取交集、分数不降低。用户明确取消/替换旧限制或开启独立范围时new。不是授权令牌。"},
-                         "selector": {"type": "string", "minLength": 1, "maxLength": 500, "description": "指定已展示岗位的序号、名称、公司地点、职责描述、这些或移除后的剩余岗位。必须保留目标，不能退化为批量范围。"},
+                         "selector": selector_schema(),
                          "selection_mode": {"type": "string", "enum": ["single", "matching"]},
                          "target_step_id": {"type": "string", "pattern": "^[a-zA-Z0-9_-]{1,40}$", "description": "引用本计划已完成job_target_resolve的稳定选择，不重新按名称定位"},
                          "snapshot_id": {"type": "string"},
@@ -873,10 +874,10 @@ class AgentToolRegistry:
             result = {**result, "snapshot_id": state["snapshots"][-1]["id"]}
         if not result["items"] and not args.get("exclude_target_step_id"):
             raise TargetClarification("本次选择没有剩余可操作岗位；没有进行批量操作。")
-        dialogue_change("job_targets", snapshot_id=result["snapshot_id"], selector=args["selector"],
+        dialogue_change("job_targets", snapshot_id=result["snapshot_id"], selector=display_reference(args["selector"]),
                         job_ids=[item["id"] for item in result["items"]], action="resolved")
         emit("job_targets_resolved", snapshot_id=result["snapshot_id"], job_ids=[item["id"] for item in result["items"]],
-             selector=args["selector"], resolution=result["resolution"])
+             selector=display_reference(args["selector"]), resolution=result["resolution"])
         return result
 
     async def _job_remove_selection(self, args):
@@ -892,7 +893,7 @@ class AgentToolRegistry:
         else:
             result = self.jobs.remove_selection(resolved["items"], session_id=context.session_id, run_id=context.run_id)
             effect_checkpoint("committed")
-        dialogue_change("job_targets", snapshot_id=resolved["snapshot_id"], selector=args["selector"],
+        dialogue_change("job_targets", snapshot_id=resolved["snapshot_id"], selector=display_reference(args["selector"]),
                         job_ids=result["removed_ids"], action="removed")
         note = "部分发送结果仍待核验，不会重复发送。" if result.get("uncertain_ids") else ""
         return {**result, "message": f"已将 {len(result['removed_ids'])} 个选中岗位移出申请看板，并停止其未完成投递；已发送内容和全部历史保留。{note}"}
@@ -961,15 +962,32 @@ class AgentToolRegistry:
     @staticmethod
     def validate_arguments(schema: dict, value: Any, path="arguments") -> None:
         """Validate the JSON-schema subset used by this registry, including nested action args."""
+        if value is None and "null" in schema.get("type", []):
+            return
+        for kind in ("anyOf", "oneOf"):
+            if kind in schema:
+                matches = 0
+                for branch in schema[kind]:
+                    try:
+                        AgentToolRegistry.validate_arguments(branch, value, path)
+                        matches += 1
+                    except ValueError:
+                        pass
+                if not matches or kind == "oneOf" and matches != 1:
+                    raise ValueError(f"{path} 不符合{kind}节点结构；请核对op和该节点的字段/子节点数量")
+        if "const" in schema and value != schema["const"]:
+            raise ValueError(f"{path} 必须为{schema['const']}")
         types = schema.get("type")
         types = types if isinstance(types, list) else [types] if types else []
-        tests = {"object": isinstance(value, dict), "array": isinstance(value, list),
+        tests = {"object": isinstance(value, dict), "array": isinstance(value, list), "number": isinstance(value, (int,float)) and not isinstance(value,bool),
             "string": isinstance(value, str), "integer": isinstance(value, int) and not isinstance(value, bool),
             "boolean": isinstance(value, bool), "null": value is None}
         if types and not any(tests.get(kind, False) for kind in types):
             raise ValueError(f"{path} 类型错误")
         if "enum" in schema and value not in schema["enum"]:
             raise ValueError(f"{path} 不在允许值中")
+        if isinstance(value, str) and schema.get("pattern") and not re.search(schema["pattern"], value):
+            raise ValueError(f"{path} 格式错误")
         if isinstance(value, dict):
             props = schema.get("properties", {})
             if schema.get("additionalProperties") is False and not value.keys() <= props.keys():
@@ -984,8 +1002,8 @@ class AgentToolRegistry:
             if len(value) < schema.get(lo, 0) or len(value) > schema.get(hi, float("inf")):
                 raise ValueError(f"{path} 长度超出范围")
             if isinstance(value, list):
-                for item in value:
-                    AgentToolRegistry.validate_arguments(schema.get("items", {}), item, path)
+                for index, item in enumerate(value):
+                    AgentToolRegistry.validate_arguments(schema.get("items", {}), item, f"{path}[{index}]")
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             if value < schema.get("minimum", -float("inf")) or value > schema.get("maximum", float("inf")):
                 raise ValueError(f"{path} 数值超出范围")
@@ -1047,15 +1065,14 @@ class AgentToolRegistry:
         if reference:
             query = {**query, "selector": reference}
         view = explicit["view"] if explicit else args.get("view", "detail")
-        try:
-            resolved = resolve_reference(context.dialogue or {}, kind="job", read_only=True, **query)
-        except ValueError as exc:
-            raise TargetClarification(str(exc)) from exc
+        provider=self.response_llm or getattr(self.browser,"llm",None)
+        resolved=await resolve_job_targets(query["selector"],dialogue=context.dialogue or {},jobs=self.jobs,
+            snapshot_id=query.get("snapshot_id"),generate=getattr(provider,"generate",None),instruction=context.user_message)
         if len(resolved["items"]) != 1:
             raise ValueError("详情查询需要指定一个职位")
         job = self.jobs.get_job(int(resolved["items"][0]["id"]))
         previous_focus = (context.dialogue or {}).get("selected_job")
-        selector = query["selector"]
+        selector = display_reference(query["selector"])
         if selector in {"它", "那个", "这个"} and previous_focus:
             selector = previous_focus["selector"]
         dialogue_change("select_job", snapshot_id=resolved["snapshot_id"], job_id=job["id"], selector=selector)
