@@ -1,0 +1,67 @@
+{
+  "version": "autohunt-ranking-v2-20261026",
+  "dataset_sha256": "17148fe909debb9c6d631a175f663c75c461bbe05f6b2a98552d42795dcf4768",
+  "queries": 40,
+  "pairs": 800,
+  "label_source": "synthetic_specification_oracle_pending_human_review",
+  "label_diagnostics": {
+    "grades": {"0": 400, "1": 40, "2": 40, "3": 160, "4": 160},
+    "relevant_per_query": 10,
+    "hard_fail_per_query": 6,
+    "unknown_per_query": 1,
+    "distinct_label_values": 5,
+    "queries_with_fewer_than_5_relevant": 0
+  },
+  "rubric_sensitivity": {
+    "definition": "lenient rubric drops seniority and delivery scope; its ordering is scored against the strict labels",
+    "exact_agreement": 0.75,
+    "quadratic_weighted_kappa": 0.9619482496,
+    "lenient_ordering_ndcg_at_5": 0.7885101524
+  },
+  "anchors_40_queries": {
+    "random_expected": {"precision_at_5": 0.5, "useful_precision_at_5": 0.45, "recall_at_5_pool": 0.25, "ndcg_at_5": 0.3297, "ndcg_at_10": 0.4234, "high_precision_at_5": 0.4, "hard_fail_at_5": 0.3, "unknown_at_5": 0.05, "at_ceiling": 0},
+    "keyword_overlap": {"precision_at_5": 0.8354, "useful_precision_at_5": 0.7975, "recall_at_5_pool": 0.4177, "ndcg_at_5": 0.5565, "ndcg_at_10": 0.735, "high_precision_at_5": 0.661, "hard_fail_at_5": 0.1646, "unknown_at_5": 0.0332, "at_ceiling": 0, "dominance_strong": 0.8556},
+    "shallow_field_reader": {"precision_at_5": 1.0, "useful_precision_at_5": 1.0, "recall_at_5_pool": 0.5, "ndcg_at_5": 0.7527, "ndcg_at_10": 0.841, "high_precision_at_5": 0.875, "hard_fail_at_5": 0.0, "unknown_at_5": 0.0, "at_ceiling": 0, "dominance_strong": 0.9037},
+    "production_rule": {"precision_at_5": 0.6087, "useful_precision_at_5": 0.5869, "recall_at_5_pool": 0.3044, "ndcg_at_5": 0.4269, "ndcg_at_10": 0.5482, "high_precision_at_5": 0.5217, "hard_fail_at_5": 0.3912, "unknown_at_5": 0.0652, "at_ceiling": 0, "dominance_strong": 0.702},
+    "label_oracle": {"precision_at_5": 1.0, "useful_precision_at_5": 1.0, "recall_at_5_pool": 0.5, "ndcg_at_5": 1.0, "ndcg_at_10": 1.0, "high_precision_at_5": 1.0, "hard_fail_at_5": 0.0, "unknown_at_5": 0.05, "at_ceiling": 40, "dominance_strong": 1.0}
+  },
+  "model": {
+    "model": "deepseek-flash",
+    "queries": 14,
+    "pairs": 280,
+    "calls_ok": 280,
+    "calls_failed": 0,
+    "selection": "fourteen evenly spaced queries out of forty; anchors recomputed on the same fourteen",
+    "summary": {"precision_at_5": 1.0, "useful_precision_at_5": 1.0, "recall_at_5_pool": 0.5, "ndcg_at_5": 0.8229, "ndcg_at_10": 0.8999, "high_precision_at_5": 1.0, "hard_fail_at_5": 0.0, "unknown_at_5": 0.1003, "ndcg_at_5_ci95": [0.8035, 0.8453], "realized_ndcg_at_5": 0.8083, "dominance_strong": 0.9723, "dominance_weak": 0.8942, "at_ceiling": 0},
+    "paired_delta_vs_shallow_field_reader": {"queries": 14, "delta": 0.0703, "ci95": [0.0509, 0.0926]},
+    "subset_systems": {
+      "keyword_overlap": {"precision_at_5": 0.842, "useful_precision_at_5": 0.7834, "recall_at_5_pool": 0.421, "ndcg_at_5": 0.5452, "high_precision_at_5": 0.656, "hard_fail_at_5": 0.158, "unknown_at_5": 0.0336},
+      "shallow_field_reader": {"precision_at_5": 1.0, "useful_precision_at_5": 1.0, "recall_at_5_pool": 0.5, "ndcg_at_5": 0.7527, "high_precision_at_5": 0.875, "hard_fail_at_5": 0.0, "unknown_at_5": 0.0},
+      "production_rule": {"precision_at_5": 0.6107, "useful_precision_at_5": 0.5839, "recall_at_5_pool": 0.3054, "ndcg_at_5": 0.4251, "high_precision_at_5": 0.519, "hard_fail_at_5": 0.3893, "unknown_at_5": 0.0649}
+    },
+    "score_granularity": {
+      "distinct_scores": 13,
+      "largest_bucket": {"score": 88, "pairs": 80, "grade_3": 42, "grade_4": 38},
+      "tied_top5_slots": "68/70",
+      "tie_order_ndcg_at_5": {"mean": 0.8234, "p05": 0.6743, "p95": 0.978, "min": 0.577, "max": 1.0}
+    },
+    "qualification_consistency": {
+      "top5_status": {"pass": 59, "unknown": 11, "fail": 0},
+      "oracle_fail_model_pass": {"pairs": 16, "ranks": "9-11"},
+      "oracle_pass_model_fail": {"pairs": 42, "min_rank": 11, "median_rank": 16}
+    }
+  },
+  "cost": {
+    "physical_requests": 280,
+    "limit": 300,
+    "usage": {"prompt_tokens": 193523, "completion_tokens": 101119, "total_tokens": 294642, "prompt_cache_hit_tokens": 35840, "prompt_cache_miss_tokens": 157683},
+    "money": null,
+    "money_reason": "No verified provider billing invoice; measured tokens only"
+  },
+  "limits": [
+    "Synthetic specification labels, not human gold; human review still pending",
+    "Fixed twenty-job pools: reranking quality, not full-corpus retrieval recall",
+    "Model measured on fourteen of forty queries (280-request budget); anchors on all forty",
+    "Delivery, task success and recovery metrics belong to the separate 24-scenario harness"
+  ]
+}
