@@ -86,6 +86,8 @@ python -m evaluation.jev_labels.evaluate score --annotations evaluation/results/
 
 ## 输出与人工复核
 
+需要人工标注时，可启动独立的[人工标注工作台](../human_annotation/README.md)：在后端目录运行 `python -m uvicorn evaluation.human_annotation.web:app --host 127.0.0.1 --port 8011`，打开 `http://127.0.0.1:8011/`。支持材料/JD并排、原文证据、A/B盲审、第三人仲裁、本机断点保存及JSON/CSV导出；不调用模型或恢复暂停的Jev任务。
+
 - `manifest.json`：语料、问题/标准摘要、模型、目的地和预算，均无Key。
 - `budget.json`：物理调用预扣记录，失败也计入。
 - `model-calls.jsonl`：原始合成请求、类型化响应、用量、状态与耗时；不记录Authorization或异常正文。
