@@ -29,6 +29,36 @@ agent/.venv/Scripts/python.exe -m playwright install chromium
 
 ## 启动
 
+### Windows 一键启动
+
+在仓库根目录双击 `start-local.cmd`，就绪后自动打开 `http://127.0.0.1:3000`。双击 `stop-local.cmd` 关闭本启动器管理的前后端。关闭启动窗口或网页不会停止后台服务。
+
+首次使用需要已安装 **Python 3.12+ 和 Node.js 20.9+**，并可联网下载依赖。启动器会创建缺失的虚拟环境、安装项目依赖和 Playwright Chromium、补齐缺失的本地配置；已经准备好的环境可直接启动。未安装 pnpm 时通过 npm 调用仓库指定版本。也可以用 `AUTOHUNT_PYTHON`、`AUTOHUNT_NODE` 指定解释器路径。
+
+启动器使用当前开发模式（Next.js Webpack），首次页面编译可能需要一两分钟；这是源码一键运行入口，不是独立安装包。配置、模型设置、数据库和简历保留；遇到已有数据但丢失加密密钥、前后端 Token 不一致时，会停止并给出提示，避免替换原配置。
+
+- 启动顺序：检查端口与环境 → 后端就绪 → 前端代理连通 → 打开工作台。
+- 重复启动复用本启动器的实例；端口被其他服务占用时明确报错，不结束外部进程。
+- 停止先请求后端正常关闭并保存运行状态；超过等待期限才关闭本实例的进程树。下一次启动沿用项目原有的任务恢复规则。
+- 日志位于 `autohunt/.runlogs/launcher/`：`supervisor.log`、`backend.log`、`frontend.log`。进程标识与依赖缓存也保存在该忽略目录。
+- 本入口启动 AutoHunt 前后端。模拟招聘站仍单独启动；专用 Chrome 可按下文脚本启动，登录/MFA 沿用现有流程。
+
+从仓库根目录也可以运行：
+
+```powershell
+# 不自动打开浏览器
+.\start-local.cmd -NoBrowser
+# 查看运行状态
+powershell -NoProfile -ExecutionPolicy Bypass -File .\autohunt\scripts\launch-local.ps1 -Action status
+# 只准备环境
+powershell -NoProfile -ExecutionPolicy Bypass -File .\autohunt\scripts\launch-local.ps1 -Action prepare
+# 默认端口被占用时指定其他端口（只对本次运行生效）
+.\start-local.cmd -BackendPort 8100 -FrontendPort 3100
+.\stop-local.cmd
+```
+
+### 手动启动
+
 终端一，从 `autohunt/` 启动后端：
 
 ```powershell
