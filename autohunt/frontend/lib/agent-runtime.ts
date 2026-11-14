@@ -1,7 +1,7 @@
 export type AgentRun = {
   id: string; session_id: string; kind: "chat" | "learning_plan" | "delivery" | "job_analysis" | "browser"; status: string;
   result: Record<string, unknown> | null; error: string | null; can_resume: boolean;
-  browser_id: string | null; created_at: string;
+  browser_id: string | null; created_at: string; updated_at?: string;
   plan_steps?: Array<{ id: string; tool: string; depends_on: string[]; status: string; detail?: string }>;
   approvals?: Array<{ id: string; tool: string; arguments: Record<string, unknown>; detail: string }>;
   target_choices?: TargetChoice[];

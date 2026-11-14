@@ -137,6 +137,7 @@ cd agent
 - [完整技术报告（2026-10-23）](docs/technical-report-2026-10-23.md)
 - [源码技术索引](docs/technical-reference.md)
 - [上下文预算与执行账本](docs/context-ledger-refactor.md)
+- [验收与指标面板](docs/metrics-dashboard.md)：每轮执行状态、调用/token/耗时、失败原因与历史评测报告。
 - [恢复、对账与长期记忆](docs/recovery-reconciliation-memory.md)
 - [岗位定位与移除](docs/job-target-actions.md)
 - [筛选证据与投递范围](docs/delivery-evidence-reuse.md)

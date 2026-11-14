@@ -66,7 +66,7 @@ function Steps({ run }: { run: AgentRun }) {
   </details>;
 }
 
-export function RuntimePanel({ runtime, notice, showSession = true }: { runtime: ReturnType<typeof useAgentRuntime>; notice: (text: string) => void; showSession?: boolean }) {
+export function RuntimePanel({ runtime, notice, showSession = true, onInspect }: { runtime: ReturnType<typeof useAgentRuntime>; notice: (text: string) => void; showSession?: boolean; onInspect?: (runId: string) => void }) {
   const [deciding, setDeciding] = useState<string | null>(null);
   async function decide(run: AgentRun, approvalId: string, approve: boolean) {
     setDeciding(approvalId);
@@ -140,6 +140,7 @@ export function RuntimePanel({ runtime, notice, showSession = true }: { runtime:
           </div>
         </div>)}
         <div className="runtime-actions">
+          {onInspect && <button className="button secondary compact" onClick={() => onInspect(run.id)}>查看本轮指标</button>}
           {!terminalRun(run.status) && <button className="button secondary compact" disabled={runtime.stopping} onClick={() => void runtime.interrupt().then(() => notice("已核验当前会话及投递队列停止")).catch((error) => notice(error.message))}>停止当前会话</button>}
           {run.can_resume && !run.target_choices?.length && <button className="button primary compact" onClick={() => void runtime.control(run, "resume").catch((error) => notice(error.message))}>{run.status === "waiting_user" ? "确认登录，继续" : run.status === "waiting_reply" ? "检查回复" : "恢复执行"}</button>}
           {!terminalRun(run.status) && <button className="text-button" onClick={() => runtime.observe(run)}>重新连接</button>}

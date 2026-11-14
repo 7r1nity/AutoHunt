@@ -4,6 +4,7 @@ import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from "re
 import { ImportedResume, ImportedResumeEditor } from "@/components/imported-resume";
 import { useAgentRuntime } from "@/lib/use-agent-runtime";
 import { RuntimePanel } from "@/components/runtime-panel";
+import { MetricsDashboard } from "@/components/metrics-dashboard";
 import { JobTargetChoices } from "@/components/job-target-choices";
 import { WorkspaceIcon } from "@/components/workspace-icon";
 import { interruptionCommand, terminalRun } from "@/lib/agent-runtime";
@@ -31,6 +32,7 @@ const navItems = [
   ["board", "▦", "申请看板"],
   ["profile", "◫", "简历"],
   ["insights", "⌗", "统计"],
+  ["metrics", "✓", "验收与指标"],
   ["plans", "✓", "成长计划"],
   ["settings", "⚙", "模型设置"],
 ] as const;
@@ -41,6 +43,7 @@ const viewDescriptions = {
   board: "筛选合适的岗位，跟进每一次申请。",
   profile: "让你的简历和真实经历，成为 Agent 理解你的起点。",
   insights: "从已核对的职位中，了解薪资与岗位要求。",
+  metrics: "查看每轮执行的状态与开销，追溯异常和历史评测。",
   plans: "把岗位差距转化为学习与实践。",
   settings: "管理模型配置与模拟站的工作方式。",
 };
@@ -374,6 +377,8 @@ function summarizeSearch(task: BrowserTask, report: SearchReport | null) {
 export default function Home() {
   const runtime = useAgentRuntime();
   const [activeView, setActiveView] = useState<(typeof navItems)[number][0]>("overview");
+  const [metricsRunId, setMetricsRunId] = useState<string | null>(null);
+  function openMetrics(runId?: string) { setMetricsRunId(runId ?? null); setActiveView("metrics"); }
   const [conversationLoading, setConversationLoading] = useState(true);
   const [chatDetailsOpen, setChatDetailsOpen] = useState(false);
   const [agentStatus, setAgentStatus] = useState<AgentStatus>("idle");
@@ -1706,7 +1711,7 @@ export default function Home() {
         </div>
         <nav aria-label="工作区导航">
           {navItems.map(([id, , label]) => (
-            <button key={id} className={activeView === id ? "nav-item active" : "nav-item"} aria-current={activeView === id ? "page" : undefined} onClick={() => setActiveView(id)}>
+            <button key={id} className={activeView === id ? "nav-item active" : "nav-item"} aria-current={activeView === id ? "page" : undefined} onClick={() => { if (id === "metrics") setMetricsRunId(null); setActiveView(id); }}>
               <WorkspaceIcon name={id} /><span className="nav-label">{label}</span>
               {id === "board" && counts.review > 0 && <b className="nav-count">{counts.review}</b>}
             </button>
@@ -1743,7 +1748,7 @@ export default function Home() {
           </div>
         </header>
 
-        {activeView !== "chat" && <div className="notice" role="status"><span aria-hidden="true">i</span>{notice}</div>}
+        {activeView !== "chat" && activeView !== "metrics" && <div className="notice" role="status"><span aria-hidden="true">i</span>{notice}</div>}
 
         {activeView !== "chat" && browserTask && browserTask.status !== "idle" && <details className="browser-evidence panel browser-evidence-disclosure" open={browserTask.status === "waiting_for_user"}>
           <summary>搜索执行信息<span>{({ starting: "准备中", running: "搜索中", paused: "已暂停", waiting_for_user: "需要你接管", completed: "已完成", failed: "未完成", stopped: "已停止" })[browserTask.status]}</span></summary>
@@ -1804,6 +1809,7 @@ export default function Home() {
                       {runtime.sessions.length ? runtime.sessions.map((session) => <option key={session.id} value={session.id}>{session.title}</option>) : <option value="default">默认会话</option>}
                     </select>
                     <button className="button secondary compact" onClick={() => void runtime.newSession().catch((error) => setNotice(error.message))}>新会话</button>
+                    <button className="button secondary compact" onClick={() => openMetrics()}>本轮指标</button>
                     <span className="model-badge">{llmProvider === "deepseek" ? llmModel.replace("deepseek-", "DeepSeek ") : "Mock"}</span>
                     <button className="button secondary compact chat-details-toggle" aria-expanded={chatDetailsOpen} aria-controls="chat-runtime-panel" onClick={() => setChatDetailsOpen((open) => !open)}>{chatDetailsOpen ? "收起详情" : "任务与上下文"}</button>
                   </div>
@@ -1938,7 +1944,7 @@ export default function Home() {
                 </div>
                 <aside className="chat-runtime-sidebar" id="chat-runtime-panel" aria-label="任务与上下文" hidden={!chatDetailsOpen}>
                   <div className="chat-runtime-heading"><div><h2>任务与上下文</h2></div><button type="button" className="chat-inspector-close" aria-label="关闭任务详情" onClick={() => setChatDetailsOpen(false)}>×</button></div>
-                  <RuntimePanel runtime={runtime} notice={setNotice} showSession={false} />
+                  <RuntimePanel runtime={runtime} notice={setNotice} showSession={false} onInspect={openMetrics} />
                   <div className="chat-runtime-status" role="status"><small>最近状态</small><p>{notice}</p></div>
                   {browserTask && browserTask.status !== "idle" && <section className="chat-task-evidence"><h3>浏览器任务</h3><dl><div><dt>搜索词</dt><dd>{browserTask.query || "—"}</dd></div><div><dt>状态</dt><dd>{browserTask.detail || browserTask.status}</dd></div><div><dt>恢复点</dt><dd>{browserTask.checkpoint || "—"}</dd></div><div><dt>登录证据</dt><dd>{browserTask.login_evidence?.authenticated_signal ? "登录已确认" : browserTask.takeover_reason || "尚未确认"}</dd></div><div><dt>Adapter</dt><dd>{browserTask.adapter_version || browserTask.selector_version || "—"}</dd></div></dl></section>}
                   {deliveryTask && deliveryTask.status !== "idle" && <section className="chat-task-evidence"><h3>投递任务</h3><p>{deliveryTask.detail}</p><p>{deliveryTask.recruiter_reply || "尚未收到招聘方回复"}</p>{["waiting_for_user", "waiting_for_reply"].includes(deliveryTask.status) && <button className="button secondary compact" onClick={resumeDelivery}>{deliveryTask.status === "waiting_for_user" ? "验证完成，继续" : "检查回复并继续"}</button>}</section>}
@@ -2068,6 +2074,8 @@ export default function Home() {
           </section>
         )}
 
+        {activeView === "metrics" && <MetricsDashboard runtime={runtime} initialRunId={metricsRunId} />}
+
         {activeView === "insights" && (
           <section className="detail-layout">
             <div className="panel report-hero">
@@ -2130,7 +2138,7 @@ export default function Home() {
 
         {activeView === "plans" && (
           <section className="detail-layout learning-page">
-            <RuntimePanel runtime={runtime} notice={setPlanNotice} />
+            <RuntimePanel runtime={runtime} notice={setPlanNotice} onInspect={openMetrics} />
             <div className="panel plan-header">
               <div><span className="eyebrow">依据当前简历与岗位要求</span><h2>成长计划</h2><p>对照当前主简历与真实 JD，优先分析专业技术、行业知识和实习方向。明确点击后才调用模型生成计划；岗位原文可追溯，完成时需提交实践证据。</p></div>
               <div className="plan-generate"><input aria-label="计划关注方向" value={planFocus} maxLength={400} onChange={(event) => setPlanFocus(event.target.value)} placeholder="可选：本次优先关注的岗位或方向" /><button className="button primary" disabled={planBusy || !candidateState?.profile.resume_id} onClick={() => void generateLearningPlan()}>{planBusy ? "处理中…" : "分析差距并生成计划"}</button></div>

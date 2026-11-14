@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 MODULES = (
+    "metrics_dashboard_contract",
     "context_ledger_contract", "model_trace_contract", "workflow_execution_contract",
     "loosening_contract", "approval_contract", "goal_graph_contract", "action_contract",
     "command_recovery_contract", "recovery_contract", "salary_revision_contract",

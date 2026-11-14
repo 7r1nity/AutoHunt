@@ -6,6 +6,7 @@ const paths = {
   board: "M3 4h18v16H3z M9 4v16 M15 4v16 M5.5 8h1 M11.5 8h1 M17.5 8h1 M5.5 12h1 M11.5 12h1",
   profile: "M6 3h8l4 4v14H6z M14 3v5h4 M9 12h6 M9 16h6",
   insights: "M4 3v17h17 M8 16v-5 M13 16V7 M18 16V4",
+  metrics: "M4 3h16v18H4z M8 7h8 M8 12l2 2 4-4 M8 18h8",
   plans: "M4 5h16v16H4z M8 3v4 M16 3v4 M8 14l3 3 5-6",
   settings: "M4 6h16 M4 12h16 M4 18h16 M9 3v6 M16 9v6 M8 15v6",
   arrow: "M4 12h16 M14 6l6 6-6 6",

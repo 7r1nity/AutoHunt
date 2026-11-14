@@ -53,7 +53,7 @@ def execution_ledger(runs: list[dict], events: list[dict], *, model_rates: dict 
     requests, responses, tools = {}, {}, {}
     retries = Counter()
     budgets, decisions = [], Counter()
-    external, seen_events = {}, set()
+    external, seen_events, issues = {}, set(), []
     for event in events:
         kind, data = event.get("kind"), event.get("data") or {}
         run_id = event.get("run_id") or data.get("run_id")
@@ -63,6 +63,17 @@ def execution_ledger(runs: list[dict], events: list[dict], *, model_rates: dict 
                 continue
             seen_events.add(event_id)
         key = (run_id, data.get("call_id"))
+        failure = data.get("failure") if isinstance(data.get("failure"), dict) else {}
+        if (kind == "model_response" and data.get("status") in {"error", "cancelled"}
+                or kind in {"plan_failed", "watchdog_expired"}
+                or kind in {"tool_finished", "plan_step"} and (
+                    failure or data.get("status") in {"error", "failed", "blocked", "outcome_indeterminate"})):
+            issues.append({"run_id": run_id, "seq": event.get("seq"), "kind": kind,
+                           "tool": data.get("tool"), "step_id": data.get("step_id"),
+                           "status": data.get("status"),
+                           "code": failure.get("code") or data.get("error_type") or data.get("code"),
+                           "detail": str(data.get("detail") or "")[:1000],
+                           "uncertain": bool(failure.get("uncertain"))})
         if kind == "model_request" and key[1]:
             requests.setdefault(key, data)
         elif kind == "model_response" and key[1]:
@@ -101,7 +112,8 @@ def execution_ledger(runs: list[dict], events: list[dict], *, model_rates: dict 
         calls.append({"run_id": key[0], "call_id": key[1], **{name: metadata.get(name) for name in
             ("session_id", "plan_id", "revision", "step_id", "execution_id", "operation")},
             "provider": provider, "model": model, "status": response.get("status", "incomplete"),
-            "latency_ms": number(response.get("latency_ms")), "prompt_tokens": prompt, "completion_tokens": completion,
+            "latency_ms": number(response.get("latency_ms")), "error_type": response.get("error_type"),
+            "prompt_tokens": prompt, "completion_tokens": completion,
             "cost": call_cost(usage, model_rates.get(f"{provider}/{model}"), prompt, completion)})
     invocations = []
     for key, record in tools.items():
@@ -132,6 +144,8 @@ def execution_ledger(runs: list[dict], events: list[dict], *, model_rates: dict 
     except (KeyError, ValueError, TypeError):
         span = None
     return {"version": 1, "run_id": current["id"], "status": current.get("status"),
+        "created_at": current.get("created_at"), "updated_at": current.get("updated_at"),
+        "error": current.get("error"), "issues": issues,
         "covered_run_ids": [r["id"] for r in runs], "calls": calls, "tools": invocations,
         "steps": steps, "external_tasks": list(external.values()),
         "accounting": {"recorded_model_calls": len(calls), "model_statuses": dict(Counter(c["status"] for c in calls)),
@@ -143,6 +157,7 @@ def execution_ledger(runs: list[dict], events: list[dict], *, model_rates: dict 
             "known_cost_by_currency": known_costs, "cost_complete": cost_complete,
             "total_cost": next(iter(known_costs.values())) if cost_complete and len(known_costs) == 1 else None,
             "model_time_sum_ms": sum(c["latency_ms"] or 0 for c in calls), "persisted_run_span_ms": span,
+            "calls_without_latency": sum(c["latency_ms"] is None for c in calls),
             "calls_without_step_binding": sum(not c["execution_id"] for c in calls),
             "step_statuses": dict(Counter(s["status"] for s in steps)), "action_decisions": dict(decisions)},
         "context": {"observations": len(budgets), "exceeded": sum(b.get("status") == "exceeded" for b in budgets),

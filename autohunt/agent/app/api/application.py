@@ -346,6 +346,24 @@ async def run_ledger(run_id: str, include_parents: bool = False) -> dict:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
+@app.get("/api/v1/evaluation-reports")
+def list_evaluation_reports() -> list[dict]:
+    from ..runtime.evaluation_reports import catalog
+    return catalog()
+
+
+@app.get("/api/v1/evaluation-reports/{report_id}")
+def read_evaluation_report(report_id: str) -> dict:
+    from ..runtime.evaluation_reports import report_detail
+    from ..core.security import redact
+    try:
+        return redact(report_detail(report_id))
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="评测报告不存在") from exc
+    except (ValueError, OSError, TypeError) as exc:
+        raise HTTPException(status_code=422, detail="报告无法读取，文件可能不完整或格式无效") from exc
+
+
 @app.post("/api/v1/runs/{run_id}/target-choice")
 async def choose_job_target(run_id: str, payload: TargetChoiceDecision) -> dict:
     try:
