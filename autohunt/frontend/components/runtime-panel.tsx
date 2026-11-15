@@ -125,7 +125,7 @@ export function RuntimePanel({ runtime, notice, showSession = true, onInspect }:
         <small>{new Date(run.created_at).toLocaleString("zh-CN")} · {run.id.slice(0, 8)}</small>
         <p role="status">{runtime.progress[run.id] ?? run.error ?? "步骤已保存"}</p>
         {!!run.plan_steps?.length && <ol>{run.plan_steps.map((step) => <li key={step.id}>
-          {step.tool} · {labels[step.status] ?? step.status}{step.depends_on.length > 0 && ` · 依赖 ${step.depends_on.join("、")}`}
+          {step.tool} · {labels[step.status] ?? step.status}{Array.isArray(step.depends_on) && step.depends_on.length > 0 && ` · 依赖 ${step.depends_on.join("、")}`}
         </li>)}</ol>}
         {typeof run.result?.message === "string" && <details><summary>查看回复</summary><p>{chatDisplay(run.result.message)}</p></details>}
         {run.approvals?.map((approval) => <div key={approval.id} className="runtime-approval">

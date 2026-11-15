@@ -53,7 +53,8 @@ def public_run(run: dict) -> dict:
         "delivery_id": (run["checkpoint"] or {}).get("delivery_id"),
         "daily": ({key: run["payload"].get(key) for key in ("trigger", "scheduled_for", "coalesced_occurrences")}
                   if run["kind"] == "daily" else None),
-        "plan_steps": [{key: step.get(key) for key in ("id", "tool", "depends_on", "status", "detail")}
+        "plan_steps": [{**{key: step.get(key) for key in ("id", "tool", "status", "detail")},
+                        "depends_on": step["depends_on"] if isinstance(step.get("depends_on"), list) else []}
                        for step in progress.get("steps", [])],
         "approvals": [{"id": step["approval_id"], "tool": step["tool"], "arguments": step["arguments"],
                        "detail": step.get("detail", "请核对本次动作范围")}

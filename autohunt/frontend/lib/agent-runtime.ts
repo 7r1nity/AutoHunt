@@ -3,7 +3,7 @@ export type AgentRun = {
   daily?: { trigger: "manual" | "scheduled" | "catch_up"; scheduled_for?: string; coalesced_occurrences?: number } | null;
   result: Record<string, unknown> | null; error: string | null; can_resume: boolean;
   browser_id: string | null; created_at: string; updated_at?: string;
-  plan_steps?: Array<{ id: string; tool: string; depends_on: string[]; status: string; detail?: string }>;
+  plan_steps?: Array<{ id: string; tool: string; depends_on?: string[] | null; status: string; detail?: string }>;
   approvals?: Array<{ id: string; tool: string; arguments: Record<string, unknown>; detail: string }>;
   target_choices?: TargetChoice[];
 };

@@ -9,6 +9,22 @@ from app.runtime.ledger import execution_ledger
 
 
 class DashboardContracts(unittest.TestCase):
+    def test_public_steps_normalize_legacy_and_daily_dependencies_without_mutation(self):
+        import copy
+        from app.runtime.models import public_run
+        for kind, progress in (("daily", "daily_progress"), ("chat", "plan")):
+            for dependency in ({}, {"depends_on": None}, {"depends_on": []},
+                               {"depends_on": ["search"]}, {"depends_on": "invalid"}):
+                with self.subTest(kind=kind, dependency=dependency):
+                    run = {"id": "synthetic", "kind": kind, "status": "completed", "cancel_requested": False,
+                           "payload": {"trigger": "manual"}, "checkpoint": {progress: {"steps": [
+                               {"id": "job", "tool": "synthetic_tool", "status": "completed", **dependency}]}}}
+                    before = copy.deepcopy(run)
+                    result = public_run(run)
+                    expected = dependency.get("depends_on") if isinstance(dependency.get("depends_on"), list) else []
+                    self.assertEqual(result["plan_steps"][0]["depends_on"], expected)
+                    self.assertEqual(run, before)
+
     def test_failed_call_keeps_unknown_usage_and_safe_diagnostics(self):
         run = {"id": "r", "status": "failed", "error": "连接失败", "created_at": "2026-11-14T00:00:00+00:00", "updated_at": "2026-11-14T00:00:02+00:00"}
         events = [
