@@ -80,7 +80,8 @@ class BrowserAutomationService:
         self.resume_workspace = resume_workspace
         self.watch_limits = WatchLimits.configured()
 
-    async def start(self, request: BrowserSearchRequest, *, daily: bool = False) -> BrowserTaskView:
+    async def start(self, request: BrowserSearchRequest, *, daily: bool = False,
+                    task_id: str | None = None) -> BrowserTaskView:
         if daily and (request.source != "mock" or not request.dry_run or request.dry_run_simulate_reply):
             raise ValueError("每日任务仅支持本地模拟站，且不得模拟招聘方回复")
         async with self.lifecycle_lock:
@@ -95,7 +96,7 @@ class BrowserAutomationService:
                 if current.id:
                     self.store.event(current.id, "task_interrupted", "后端重启导致浏览器会话中断")
                     self.store.update_task(current.id, status=BrowserTaskStatus.STOPPED, detail="后端已重启；原浏览器任务已安全停止")
-            task_id = uuid.uuid4().hex
+            task_id = task_id or uuid.uuid4().hex
             self.current_id = task_id
             self.resume_access_check = False
             self.gate.set()

@@ -121,7 +121,7 @@ export function RuntimePanel({ runtime, notice, showSession = true, onInspect }:
     <details className="runtime-history" open={Boolean(runtime.busyRun)}>
       <summary>运行记录{runtime.runs.some((run) => !terminalRun(run.status)) ? " · 有任务进行中" : ""}</summary>
       {runtime.runs.slice(0, 8).map((run) => <article key={run.id} className="runtime-run">
-        <div><strong>{run.kind === "learning_plan" ? "学习计划" : run.kind === "delivery" ? "简历投递" : run.kind === "browser" ? "职位搜索" : run.kind === "job_analysis" ? "职位分析" : "Agent 任务"}</strong><span>{labels[run.status] ?? run.status}</span></div>
+        <div><strong>{run.kind === "daily" ? "每日模拟站任务" : run.kind === "learning_plan" ? "学习计划" : run.kind === "delivery" ? "简历投递" : run.kind === "browser" ? "职位搜索" : run.kind === "job_analysis" ? "职位分析" : "Agent 任务"}</strong><span>{labels[run.status] ?? run.status}</span></div>
         <small>{new Date(run.created_at).toLocaleString("zh-CN")} · {run.id.slice(0, 8)}</small>
         <p role="status">{runtime.progress[run.id] ?? run.error ?? "步骤已保存"}</p>
         {!!run.plan_steps?.length && <ol>{run.plan_steps.map((step) => <li key={step.id}>

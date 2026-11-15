@@ -207,6 +207,7 @@ class JobStore:
             self._ensure_column(db, "mock_workflow_settings", "last_reported_run_id", "TEXT")
             self._ensure_column(db, "mock_workflow_settings", "auto_submit_enabled_at", "TEXT")
             self._ensure_column(db, "mock_workflow_settings", "daily_claim_id", "TEXT")
+            self._ensure_column(db, "mock_workflow_settings", "daily_next_due_at", "TEXT")
             self._ensure_column(db, "delivery_runs", "resume_document_id", "TEXT")
             self._ensure_column(db, "delivery_runs", "target_url", "TEXT")
             self._ensure_column(db, "delivery_runs", "resume_version", "INTEGER")
@@ -299,7 +300,7 @@ class JobStore:
                                       max_contacts: int) -> dict[str, Any]:
         with self.lock, self._connect() as db:
             previous = db.execute(
-                "SELECT auto_submit,auto_submit_enabled_at,daily_enabled,last_run_date "
+                "SELECT auto_submit,auto_submit_enabled_at,daily_enabled,daily_time,last_run_date,daily_next_due_at "
                 "FROM mock_workflow_settings WHERE id=1"
             ).fetchone()
             now_utc = datetime.now(UTC)
@@ -307,15 +308,31 @@ class JobStore:
             enabled_at = (now_utc.replace(tzinfo=None).isoformat() if auto_submit and not previous["auto_submit"]
                           else previous["auto_submit_enabled_at"] if auto_submit else None)
             last_run_date = previous["last_run_date"]
+            next_due = previous["daily_next_due_at"]
+            if not daily_enabled:
+                next_due = None
+            elif not previous["daily_enabled"] or previous["daily_time"] != daily_time:
+                hour, minute = map(int, daily_time.split(":"))
+                due = beijing_now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                if due <= beijing_now:
+                    due += timedelta(days=1)
+                next_due = (due - timedelta(hours=8)).isoformat()
             if daily_enabled and not previous["daily_enabled"] and beijing_now.strftime("%H:%M") >= daily_time:
                 last_run_date = beijing_now.date().isoformat()
             db.execute(
                 "UPDATE mock_workflow_settings SET monitor_enabled=?,auto_submit=?,auto_submit_enabled_at=?,"
-                "daily_enabled=?,daily_time=?,min_score=?,max_contacts=?,last_run_date=?,last_error=NULL WHERE id=1",
+                "daily_enabled=?,daily_time=?,min_score=?,max_contacts=?,last_run_date=?,daily_next_due_at=?,last_error=NULL WHERE id=1",
                 (int(monitor_enabled), int(auto_submit), enabled_at, int(daily_enabled), daily_time,
-                 min_score, max_contacts, last_run_date),
+                 min_score, max_contacts, last_run_date, next_due),
             )
         return self.mock_workflow_settings()
+
+    def advance_daily_schedule(self, expected: str | None, next_due: str, *, run_date: str | None = None) -> bool:
+        with self.lock, self._connect() as db:
+            cursor = db.execute("UPDATE mock_workflow_settings SET daily_next_due_at=?,"
+                "last_run_date=COALESCE(?,last_run_date) WHERE id=1 AND daily_enabled=1 AND daily_next_due_at IS ?",
+                (next_due, run_date, expected))
+        return cursor.rowcount == 1
 
     def bind_mock_applicant(self, applicant_id: int) -> None:
         if applicant_id < 1:

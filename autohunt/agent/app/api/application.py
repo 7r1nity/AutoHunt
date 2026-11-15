@@ -45,7 +45,7 @@ from ..core.dependencies import (
 )
 from ..core.dependencies import router_store
 from ..runtime.history_reset import HistoryResetter, ResetBusy, RESET_PATH
-from ..runtime.models import RunCreate, SessionCreate, ApprovalDecision, TargetChoiceDecision, public_run
+from ..runtime.models import RunCreate, SessionCreate, ApprovalDecision, TargetChoiceDecision, DailyTestRequest, public_run
 from ..delivery.automation import UnsupportedDeliverySite
 from ..jobs.analysis import analyze_job
 from ..core.middleware import (
@@ -884,6 +884,11 @@ async def resume_browser_task() -> BrowserTaskView:
 
 @app.post("/api/v1/browser/tasks/current/stop", response_model=BrowserTaskView)
 async def stop_browser_task() -> BrowserTaskView:
+    if mock_workflow.daily:
+        browser_id = browser_service.current().id
+        for run in mock_workflow.daily.records(active=True):
+            if browser_id and (run["checkpoint"] or {}).get("browser_id") == browser_id:
+                await mock_workflow.daily.cancel(run["id"])
     return await browser_service.stop()
 
 
@@ -926,11 +931,24 @@ async def read_mock_workflow_settings() -> dict:
     return mock_workflow.settings()
 
 
+@app.post("/api/v1/mock-workflow/test", status_code=202)
+async def test_daily_workflow(request: DailyTestRequest) -> dict:
+    try:
+        run = mock_workflow.daily.enqueue(request.request_id)
+        mock_workflow.wakeup.set()
+        await mock_workflow.daily.tick()
+        return public_run(run_store.get(run["id"]))
+    except (ValueError, KeyError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
 @app.put("/api/v1/mock-workflow/settings")
 async def update_mock_workflow_settings(update: MockWorkflowUpdate) -> dict:
     if (update.auto_submit or update.daily_enabled) and not update.monitor_enabled:
         raise HTTPException(status_code=422, detail="自动投递和每日任务要求先开启模拟站会话监测")
-    return job_store.update_mock_workflow_settings(**update.model_dump())
+    job_store.update_mock_workflow_settings(**update.model_dump())
+    mock_workflow.wakeup.set()
+    return mock_workflow.settings()
 
 
 @app.post("/api/v1/mock-workflow/sync")

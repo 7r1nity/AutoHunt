@@ -7,6 +7,10 @@ export type MockWorkflowSettings = {
   auto_submit_enabled_at: string | null;
   daily_enabled: boolean;
   daily_time: string;
+  daily_next_due_at?: string | null;
+  daily_run_id?: string | null;
+  daily_status?: string | null;
+  daily_pending?: boolean;
   min_score: number;
   max_contacts: number;
   last_run_date: string | null;

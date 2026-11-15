@@ -30,6 +30,11 @@ class ApprovalDecision(BaseModel):
     approve: StrictBool
 
 
+class DailyTestRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    request_id: str = Field(pattern=r"^[a-zA-Z0-9_-]{1,80}$")
+
+
 class TargetChoiceDecision(BaseModel):
     model_config = ConfigDict(extra="forbid")
     conversation_id: str = Field(pattern=r"^[a-zA-Z0-9_-]{1,80}$")
@@ -40,13 +45,16 @@ class TargetChoiceDecision(BaseModel):
 
 
 def public_run(run: dict) -> dict:
+    progress = (run["checkpoint"] or {}).get("daily_progress" if run["kind"] == "daily" else "plan") or {}
     # Checkpoints contain model context and are internal, never an HTTP response.
     return redact({key: value for key, value in run.items() if key not in {"payload", "checkpoint", "request_hash"}} | {
         "checkpoint_phase": (run["checkpoint"] or {}).get("phase"),
         "browser_id": (run["checkpoint"] or {}).get("browser_id"),
         "delivery_id": (run["checkpoint"] or {}).get("delivery_id"),
+        "daily": ({key: run["payload"].get(key) for key in ("trigger", "scheduled_for", "coalesced_occurrences")}
+                  if run["kind"] == "daily" else None),
         "plan_steps": [{key: step.get(key) for key in ("id", "tool", "depends_on", "status", "detail")}
-                       for step in ((run["checkpoint"] or {}).get("plan") or {}).get("steps", [])],
+                       for step in progress.get("steps", [])],
         "approvals": [{"id": step["approval_id"], "tool": step["tool"], "arguments": step["arguments"],
                        "detail": step.get("detail", "请核对本次动作范围")}
                       for step in ((run["checkpoint"] or {}).get("plan") or {}).get("steps", [])

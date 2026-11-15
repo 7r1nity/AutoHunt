@@ -65,7 +65,7 @@ def execution_ledger(runs: list[dict], events: list[dict], *, model_rates: dict 
         key = (run_id, data.get("call_id"))
         failure = data.get("failure") if isinstance(data.get("failure"), dict) else {}
         if (kind == "model_response" and data.get("status") in {"error", "cancelled"}
-                or kind in {"plan_failed", "watchdog_expired"}
+                or kind in {"plan_failed", "watchdog_expired", "daily_error"}
                 or kind in {"tool_finished", "plan_step"} and (
                     failure or data.get("status") in {"error", "failed", "blocked", "outcome_indeterminate"})):
             issues.append({"run_id": run_id, "seq": event.get("seq"), "kind": kind,
@@ -134,7 +134,8 @@ def execution_ledger(runs: list[dict], events: list[dict], *, model_rates: dict 
     cost_complete = bool(calls) and not retries["model_retry"] and all(c["cost"]["amount"] is not None and c["cost"]["currency"] for c in calls)
     steps = []
     for run in runs:
-        plan = (run.get("checkpoint") or {}).get("plan") or {}
+        # Fixed daily progress is telemetry, not an editable Agent action plan.
+        plan = (run.get("checkpoint") or {}).get("daily_progress" if run.get("kind") == "daily" else "plan") or {}
         steps.extend({"run_id": run["id"], "plan_id": plan.get("id"), "revision": plan.get("revision"),
                       **{k: step.get(k) for k in ("id", "tool", "status", "execution_id", "execution_phase")}}
                      for step in plan.get("steps", []))

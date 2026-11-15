@@ -80,7 +80,7 @@ function ReportHistory() {
   }, [selected, revision]);
   const report = detail?.id === selected ? detail : null;
   const visibleReports = reports.filter((item) => !category || item.category === category);
-  const status = { recorded: "历史记录", passed: "离线验收通过", failed: "验收未通过", pending: "尚未完成评测" };
+  const status = { recorded: "历史记录", passed: "验收通过", failed: "验收未通过", pending: "尚未完成评测" };
   function download() {
     if (!report) return;
     const url = URL.createObjectURL(new Blob([JSON.stringify(report, null, 2)], { type: "application/json" }));
@@ -165,6 +165,7 @@ export function MetricsDashboard({ runtime, initialRunId = null }: { runtime: Re
       {selected && <>
         <header className="metrics-run-heading"><div><StateBadge status={ledger?.status ?? selected.status} /><h2>{runKind(selected.kind)}</h2><p>开始于 {dateText(selected.created_at)} <span className="metrics-run-id">任务编号 {selected.id}</span></p></div><span className="metrics-live-label">{terminalRun(selected.status) ? "本轮已结束" : "执行记录持续更新"}</span></header>
         {ledgerError && <p className="metrics-error" role="alert">{ledgerError}。账本暂不可用，刷新后重试。</p>}
+        {selected.daily && <p className="metrics-help">触发方式：{selected.daily.trigger === "manual" ? "立即测试" : selected.daily.trigger === "catch_up" ? "错过任务补跑" : "每日定时"}。{selected.daily.scheduled_for && `计划时间：${dateText(selected.daily.scheduled_for)}。`}{(selected.daily.coalesced_occurrences ?? 0) > 1 && `合并了 ${selected.daily.coalesced_occurrences} 次错过的计划，仅执行一轮。`}</p>}
         {!ledger && !ledgerError && <p role="status">正在读取本轮指标…</p>}
         {ledger && <ExecutionDetails ledger={ledger} />}
       </>}

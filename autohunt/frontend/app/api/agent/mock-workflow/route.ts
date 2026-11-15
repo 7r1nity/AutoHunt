@@ -28,4 +28,9 @@ export async function PUT(request: NextRequest) {
   return proxy("/api/v1/mock-workflow/settings", "PUT", await request.json());
 }
 
-export async function POST() { return proxy("/api/v1/mock-workflow/sync", "POST"); }
+export async function POST(request: NextRequest) {
+  if (request.nextUrl.searchParams.get("action") === "test") {
+    return proxy("/api/v1/mock-workflow/test", "POST", await request.json());
+  }
+  return proxy("/api/v1/mock-workflow/sync", "POST");
+}

@@ -57,7 +57,8 @@ def catalog(root: Path = AGENT_ROOT) -> list[dict]:
         if path.is_file():
             entries.append(dict(id=report_id, title=title, date="2026-10-26", category=category,
                                 scope=scope, status="pending" if report_id.startswith("jev-") else "recorded"))
-    for family, title in (("context-ledger-regression", "跨模块工程回归"), ("stateful", "状态驱动场景验收")):
+    for family, title in (("context-ledger-regression", "跨模块工程回归"), ("stateful", "状态驱动场景验收"),
+                          ("daily-site-e2e", "每日任务模拟站端到端验收")):
         base = root / "evaluation" / "results" / family
         if not base.is_dir():
             continue
@@ -67,7 +68,9 @@ def catalog(root: Path = AGENT_ROOT) -> list[dict]:
             if (folder / "summary.json").is_file():
                 entries.append(dict(id=f"local--{family}--{folder.name}", title=title,
                                     date=f"{folder.name[:4]}-{folder.name[4:6]}-{folder.name[6:8]}T{folder.name[9:11]}:{folder.name[11:13]}:{folder.name[13:15]}Z",
-                                    category="离线验收", scope="合成数据与隔离存储；不代表真实模型理解准确率或浏览器端到端成功率。", status="recorded"))
+                                    category="模拟站端到端" if family == "daily-site-e2e" else "离线验收",
+                                    scope=("真实隔离模拟站、浏览器与前端；本地测试模型，无外部调用。" if family == "daily-site-e2e"
+                                           else "合成数据与隔离存储；不代表真实模型理解准确率或浏览器端到端成功率。"), status="recorded"))
     return sorted(entries, key=lambda row: row["date"], reverse=True)
 
 

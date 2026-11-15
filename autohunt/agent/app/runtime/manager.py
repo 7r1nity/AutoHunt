@@ -77,6 +77,7 @@ class AgentRuntime:
         self.slots = asyncio.Semaphore(2)
         self.queue_timeout, self.chat_timeout, self.plan_timeout = queue_timeout, chat_timeout, plan_timeout
         self.delivery = None
+        self.daily = None
         self.stop_jobs: dict[str, asyncio.Task] = {}
         self.stop_lock = asyncio.Lock()
         self.watch_limits = WatchLimits.configured()
@@ -87,6 +88,8 @@ class AgentRuntime:
         self.recover_search_summaries()
         # Re-enqueue only requests which never began. Side effects are not replayed.
         for run in reversed(self.store.list(active=True, limit=None)):
+            if run["kind"] == "daily":
+                continue  # Owned and recovered by DailyWorkflow, using this ledger.
             if run["cancel_requested"]:
                 self.finish(run["id"], "outcome_indeterminate" if run["mutation_started"] else "cancelled", "取消请求已恢复")
             elif run["status"] == "queued":
@@ -1046,6 +1049,8 @@ class AgentRuntime:
     def recover_search_summaries(self) -> None:
         """Backfill confirmed search reports only; never reopen a plan or authority."""
         for run in self.store.list():
+            if run["kind"] == "daily":
+                continue
             browser_id = (run["checkpoint"] or {}).get("browser_id")
             if not browser_id or self.store.has_event(run["id"], "browser_summary"):
                 continue
@@ -1198,6 +1203,9 @@ class AgentRuntime:
                     "uncertain_outcomes": uncertain}
 
     async def _stop_bound_tasks(self, run_id: str):
+        if self.daily and self.store.get(run_id)["kind"] == "daily":
+            await self.daily.cancel(run_id)
+            return
         self.store.invalidate_approvals(run_id)
         task = self.tasks.get(run_id)
         if task:
@@ -1453,6 +1461,8 @@ class AgentRuntime:
         return response
 
     async def resume(self, run_id: str) -> dict:
+        if self.daily and self.store.get(run_id)["kind"] == "daily":
+            return await self.daily.resume(run_id)
         run = self.store.get(run_id)
         if (run["checkpoint"] or {}).get("plan"):
             import uuid

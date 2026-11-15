@@ -65,17 +65,22 @@ class MockWorkflowCoordinator:
         #: Read only to measure whether a candidate falls inside the boundaries the user
         #: set; nothing filters or blocks on it yet (stage (c)).
         self.authorization_scope = None
+        self.daily = None
         #: Observation -> rule matching -> action -> recorded decision.
         self.engine = RuleEngine(build_rules(self))
 
     def settings(self) -> dict:
-        return self.jobs.mock_workflow_settings()
+        return {**self.jobs.mock_workflow_settings(), **(self.daily.info() if self.daily else {})}
 
     async def start(self) -> None:
         if self.worker is None or self.worker.done():
+            if self.daily:
+                await self.daily.recover()
             self.worker = asyncio.create_task(self._loop(), name="mock-workflow-monitor")
 
     async def stop(self) -> None:
+        if self.daily:
+            await self.daily.shutdown()
         if self.worker and not self.worker.done():
             self.worker.cancel()
             await asyncio.gather(self.worker, return_exceptions=True)
@@ -121,6 +126,13 @@ class MockWorkflowCoordinator:
         settings = self.settings() if settings is None else settings
         observation = await collect(self.jobs, settings, with_site=with_site)
         facts = dict(observation.facts)
+        if self.daily:
+            owned = {j.get("delivery_id") for r in self.daily.records()
+                     for j in (r.get("checkpoint") or {}).get("jobs", {}).values()}
+            # Daily recovery owns these capabilities; ordinary retry/submit rules
+            # must not compete for them or consume turns without making progress.
+            for key in ("reply_candidates", "stalled_replied_runs", "exhausted_runs"):
+                facts[key] = [r for r in facts.get(key, []) if r.get("id") not in owned]
         facts["applicant_id"] = settings.get("applicant_id")
         facts["delivery_idle"] = not (self.delivery.worker and not self.delivery.worker.done())
         facts["browser_idle"] = not (self.browser.worker and not self.browser.worker.done())
@@ -419,6 +431,9 @@ class MockWorkflowCoordinator:
         self.stop_epochs[key] = self.stop_epochs.get(key, 0) + 1
         self.stopping_sessions.add(key)
         try:
+            if self.daily and session_id in {None, "default"}:
+                for run in self.daily.records(active=True):
+                    await self.daily.cancel(run["id"])
             # Revoke before yielding: stale observations and restart cannot replay.
             items = [row for row in self.jobs.mock_delivery_queue(session_id=session_id, active_only=False)
                      if row["status"] in {"queued", "dispatched", "blocked"}]
@@ -706,7 +721,7 @@ class MockWorkflowCoordinator:
                             settings["auto_submit"] and job["score"] >= settings["min_score"] and settings["auto_submit_enabled_at"]
                             and _utc_naive(replies[-1].get("created_at")) >= _utc_naive(settings["auto_submit_enabled_at"])
                         )
-                        if authorized_after_reply and await self._start_authorized_delivery(job_id):
+                        if authorized_after_reply and not (self.daily and self.daily.owns_job(job_id)) and await self._start_authorized_delivery(job_id):
                             counters["delivery_started"] += 1
                     else:
                         counters["awaiting_reply"] += 1
@@ -811,6 +826,8 @@ class MockWorkflowCoordinator:
         return bool(await self._operation("default", self._run_daily_if_due))
 
     async def _run_daily_if_due(self) -> bool:
+        if self.daily:
+            return await self.daily.tick()
         settings = self.settings()
         if not settings["daily_enabled"]:
             return False

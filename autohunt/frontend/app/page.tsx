@@ -431,6 +431,7 @@ export default function Home() {
   const [deliveryTask, setDeliveryTask] = useState<DeliveryTask | null>(null);
   const [workflowSettings, setWorkflowSettings] = useState<MockWorkflowSettings | null>(null);
   const [workflowBusy, setWorkflowBusy] = useState(false);
+  const dailyTestRequest = useRef<string | null>(null);
   const [workflowNotice, setWorkflowNotice] = useState("");
   const [automationStats, setAutomationStats] = useState<AutomationStats>({ discovered: 0, stored: 0, duplicates: 0, matched: 0, review: 0, applying: 0, waiting: 0, interview: 0, indeterminate: 0, dry_run_candidates: 0, dry_run_contacted: 0, dry_run_replied: 0, dry_run_submitted: 0, dry_run_waiting_reply: 0, dry_run_failed: 0 });
   const [insights, setInsights] = useState<Insights | null>(null);
@@ -1627,6 +1628,29 @@ export default function Home() {
     }
   }
 
+  async function testDailyWorkflow() {
+    setWorkflowBusy(true);
+    try {
+      const response = await fetch("/api/agent/mock-workflow?action=test", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ request_id: dailyTestRequest.current ??= crypto.randomUUID() }),
+      });
+      const run = await response.json();
+      if (!response.ok) throw new Error(run.detail ?? "每日任务测试启动失败");
+      dailyTestRequest.current = null;
+      runtime.setSessionId("default");
+      runtime.observe(run);
+      setWorkflowSettings((current) => current ? { ...current, daily_run_id: run.id, daily_status: run.status } : current);
+      setWorkflowNotice("测试任务已入队；使用已保存的设置，结果可在“验收与指标”查看。");
+      setMetricsRunId(run.id);
+      setActiveView("metrics");
+    } catch (error) {
+      setWorkflowNotice(error instanceof Error ? error.message : "测试启动失败");
+    } finally {
+      setWorkflowBusy(false);
+    }
+  }
+
   async function saveLlmConfig(event: FormEvent) {
     event.preventDefault();
     setLlmBusy(true);
@@ -2202,6 +2226,8 @@ export default function Home() {
               <div className="field"><label htmlFor="workflow-time">每天执行时间（北京时间）</label><input id="workflow-time" type="time" value={workflowSettings?.daily_time ?? "09:00"} onChange={(event) => setWorkflowSettings((current) => current ? { ...current, daily_time: event.target.value } : current)} /></div>
               <div className="field"><label htmlFor="workflow-score">自动沟通最低匹配分</label><input id="workflow-score" type="number" min="0" max="100" value={workflowSettings?.min_score ?? 75} onChange={(event) => setWorkflowSettings((current) => current ? { ...current, min_score: Number(event.target.value) } : current)} /></div>
               <div className="field"><label htmlFor="workflow-contacts">每天最多联系岗位</label><input id="workflow-contacts" type="number" min="1" max="5" value={workflowSettings?.max_contacts ?? 3} onChange={(event) => setWorkflowSettings((current) => current ? { ...current, max_contacts: Number(event.target.value) } : current)} /></div>
+              <div className="field full"><p>停机错过多天时合并补跑最近一轮；重启后核对检查点与发送回执再接续。</p><small>下一次执行：{workflowSettings?.daily_next_due_at ? new Date(workflowSettings.daily_next_due_at).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false }) + "（北京时间）" : "未启用"}</small></div>
+              <div className="field full"><p>立即测试会按已保存设置实际搜索和沟通；开启自动投递时，HR 回复后会发送主简历。测试单独记录，不占用当天定时任务。</p><div className="settings-actions"><button className="button secondary" type="button" disabled={workflowBusy || !workflowSettings?.monitor_enabled} onClick={testDailyWorkflow}>{workflowBusy ? "处理中…" : "立即测试每日任务"}</button>{workflowSettings?.daily_run_id && <button className="button secondary" type="button" onClick={() => { runtime.setSessionId("default"); openMetrics(workflowSettings.daily_run_id!); }}>查看最近一轮指标</button>}</div></div>
               <div className="field"><small>当前绑定的模拟站求职者账号：{workflowSettings?.applicant_id ?? "未绑定；先登录模拟站并完成一次搜索"}。上次执行：{workflowSettings?.last_run_date ?? "暂无"}。</small>{workflowSettings?.last_error && <small className="workflow-error">最近错误：{workflowSettings.last_error}</small>}</div>
               <div className="settings-actions full"><button className="button primary" disabled={workflowBusy || !workflowSettings} type="submit">保存每日任务设置</button><button className="button secondary" disabled={workflowBusy || !workflowSettings?.applicant_id} type="button" onClick={() => void syncMockWorkflow()}>立即同步一次</button></div>
               {workflowNotice && <p className="workflow-feedback full">{workflowNotice}</p>}

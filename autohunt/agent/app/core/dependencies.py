@@ -111,6 +111,10 @@ agent = AutoHuntAgent(
 )
 run_store = RunStore(settings.data_root / "runtime.db", settings.data_key)
 agent_runtime = AgentRuntime(run_store, agent, job_store, browser_service, learning_plans, resume_workspace_store)
+from ..workflow.daily import DailyWorkflow
+daily_workflow = DailyWorkflow(job_store, run_store, browser_service, delivery_service, candidate_state_store, resume_workspace_store)
+mock_workflow.daily = daily_workflow
+agent_runtime.daily = daily_workflow
 agent_runtime.delivery = delivery_service
 mock_workflow.on_delivery_started = agent_runtime.track_delivery
 mock_workflow.delivery_owner = agent_runtime.delivery_owner

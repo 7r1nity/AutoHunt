@@ -82,7 +82,8 @@ def build_rules(coordinator) -> list[Rule]:
         return "已启动每日模拟站任务" if started else "已检查每日任务，本轮未启动"
 
     def daily_enabled(observation: Observation) -> bool:
-        return bool((observation.get("settings") or {}).get("daily_enabled"))
+        settings = observation.get("settings") or {}
+        return bool(settings.get("daily_enabled") or settings.get("daily_pending"))
 
     return [
         Rule("reconcile_uncertain_delivery", 85,
