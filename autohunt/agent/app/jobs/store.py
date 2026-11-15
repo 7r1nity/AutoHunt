@@ -206,6 +206,7 @@ class JobStore:
             self._ensure_column(db, "jobs", "reply_last_checked_at", "TEXT")
             self._ensure_column(db, "mock_workflow_settings", "last_reported_run_id", "TEXT")
             self._ensure_column(db, "mock_workflow_settings", "auto_submit_enabled_at", "TEXT")
+            self._ensure_column(db, "mock_workflow_settings", "daily_claim_id", "TEXT")
             self._ensure_column(db, "delivery_runs", "resume_document_id", "TEXT")
             self._ensure_column(db, "delivery_runs", "target_url", "TEXT")
             self._ensure_column(db, "delivery_runs", "resume_version", "INTEGER")
@@ -322,24 +323,32 @@ class JobStore:
         with self.lock, self._connect() as db:
             db.execute("UPDATE mock_workflow_settings SET applicant_id=? WHERE id=1", (applicant_id,))
 
-    def claim_daily_mock_run(self, local_date: str) -> bool:
+    def claim_daily_mock_run(self, local_date: str) -> str | None:
+        """Reserve today's launch without losing the previous run/report pointer."""
+        claim_id = secrets.token_hex(16)
         with self.lock, self._connect() as db:
             cursor = db.execute(
-                "UPDATE mock_workflow_settings SET last_run_date=?,last_error=NULL "
+                "UPDATE mock_workflow_settings SET last_run_date=?,daily_claim_id=?,last_error=NULL "
                 "WHERE id=1 AND daily_enabled=1 AND (last_run_date IS NULL OR last_run_date<>?)",
-                (local_date, local_date),
+                (local_date, claim_id, local_date),
+            )
+        return claim_id if cursor.rowcount == 1 else None
+
+    def record_daily_mock_run(self, task_id: str, local_date: str, claim_id: str) -> bool:
+        with self.lock, self._connect() as db:
+            cursor = db.execute(
+                "UPDATE mock_workflow_settings SET last_run_id=?,daily_claim_id=NULL "
+                "WHERE id=1 AND last_run_date=? AND daily_claim_id=?",
+                (task_id, local_date, claim_id),
             )
         return cursor.rowcount == 1
 
-    def record_daily_mock_run(self, task_id: str) -> None:
-        with self.lock, self._connect() as db:
-            db.execute("UPDATE mock_workflow_settings SET last_run_id=? WHERE id=1", (task_id,))
-
-    def release_daily_mock_run(self, local_date: str) -> None:
+    def release_daily_mock_run(self, local_date: str, claim_id: str) -> None:
         with self.lock, self._connect() as db:
             db.execute(
-                "UPDATE mock_workflow_settings SET last_run_date=NULL WHERE id=1 AND last_run_date=? AND last_run_id IS NULL",
-                (local_date,),
+                "UPDATE mock_workflow_settings SET last_run_date=NULL,daily_claim_id=NULL "
+                "WHERE id=1 AND last_run_date=? AND daily_claim_id=?",
+                (local_date, claim_id),
             )
 
     def record_daily_mock_report(self, task_id: str) -> None:

@@ -829,8 +829,10 @@ class MockWorkflowCoordinator:
         if not queries:
             self.jobs.record_mock_workflow_error("未配置目标岗位或有效简历；每日搜索未启动")
             return False
-        if not self.jobs.claim_daily_mock_run(day):
+        claim_id = self.jobs.claim_daily_mock_run(day)
+        if not claim_id:
             return False
+        task = None
         try:
             task = await self.browser.start(BrowserSearchRequest(
                 source="mock", query=queries[0], queries=queries,
@@ -839,11 +841,15 @@ class MockWorkflowCoordinator:
                 dry_run=True, dry_run_min_score=settings["min_score"],
                 dry_run_max_contacts=settings["max_contacts"],
                 dry_run_simulate_reply=False,
-            ))
-            self.jobs.record_daily_mock_run(task.id)
+            ), daily=True)
+            if not self.jobs.record_daily_mock_run(task.id, day, claim_id):
+                raise RuntimeError("每日任务已启动，但启动占位发生变化；保留当天记录以避免重复执行")
             return True
-        except Exception:
-            self.jobs.release_daily_mock_run(day)
+        except (Exception, asyncio.CancelledError):
+            # Release only a failed launch. Once a browser worker exists, a
+            # bookkeeping failure must not permit another side-effecting run.
+            if task is None:
+                self.jobs.release_daily_mock_run(day, claim_id)
             raise
 
     def _report_finished_daily_run(self) -> None:

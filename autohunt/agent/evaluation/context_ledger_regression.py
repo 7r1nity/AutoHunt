@@ -22,7 +22,7 @@ MODULES = (
     "condition_refresh_contract", "result_source_contract", "search_delivery_contract",
     "job_target_contract", "job_choice_contract", "reference_flow_contract",
     "presentation_contract", "reporting_contract", "privacy_contract",
-    "delivery_scheduling_contract", "background_polling_contract", "special_salary_contract",
+    "delivery_scheduling_contract", "daily_workflow_contract", "background_polling_contract", "special_salary_contract",
     "delivery_evidence_contract",
     "recovery_memory_contract",
     "systemic_repair_contract",

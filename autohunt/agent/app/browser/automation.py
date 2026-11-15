@@ -44,6 +44,10 @@ TERMINAL_STATUSES = {
 }
 
 
+class DailySubmissionDisabled(RuntimeError):
+    """The scheduled run has no current automatic resume-submission authority."""
+
+
 class BrowserAutomationService:
     """Serialized browser worker with fail-closed human takeover boundaries."""
 
@@ -76,7 +80,9 @@ class BrowserAutomationService:
         self.resume_workspace = resume_workspace
         self.watch_limits = WatchLimits.configured()
 
-    async def start(self, request: BrowserSearchRequest) -> BrowserTaskView:
+    async def start(self, request: BrowserSearchRequest, *, daily: bool = False) -> BrowserTaskView:
+        if daily and (request.source != "mock" or not request.dry_run or request.dry_run_simulate_reply):
+            raise ValueError("每日任务仅支持本地模拟站，且不得模拟招聘方回复")
         async with self.lifecycle_lock:
             # A terminal DB state can be written just before a worker enters its
             # finally block. Never let a new run replace self.session until that
@@ -103,7 +109,15 @@ class BrowserAutomationService:
                     (ZhaopinAdapter.selector_version if request.source == "zhaopin" else BossAdapter.selector_version)),
                 resume_id=self.candidate_state.read().profile.resume_id,
             )
-            self.store.save_search_request(task_id, request.model_dump(mode="json"))
+            saved_request = request.model_dump(mode="json")
+            if daily:
+                settings = self.store.mock_workflow_settings()
+                # Internal checkpoint, not a user-controlled request field. A
+                # later off/on toggle cannot grant this old run new authority.
+                saved_request["_daily_policy"] = {
+                    "auto_submit_epoch": settings["auto_submit_enabled_at"] if settings["auto_submit"] else None,
+                }
+            self.store.save_search_request(task_id, saved_request)
             source_label = {"mock": "模拟招聘网站", "boss": "BOSS直聘", "zhaopin": "智联招聘"}[request.source]
             self.store.event(task_id, "task_started", f"{source_label} 搜索：{request.query}")
             self.store.event(task_id, "search_constraints", "本次搜索条件（不修改持久化偏好）", sample={
@@ -697,6 +711,14 @@ class BrowserAutomationService:
         )
         self.store.event(task_id, "task_completed", f"模拟网站保存 {stored} 个职位")
 
+    def _check_daily_submission(self, policy: dict | None) -> None:
+        if policy is None:
+            return  # An explicit manual Dry Run has its own batch authorization.
+        settings = self.store.mock_workflow_settings()
+        epoch = policy.get("auto_submit_epoch")
+        if not epoch or not settings["auto_submit"] or settings["auto_submit_enabled_at"] != epoch:
+            raise DailySubmissionDisabled("本轮未获当前自动投递授权，已保留招聘方回复，简历待人工确认")
+
     async def _run_mock_delivery_dry_run(
         self,
         task_id: str,
@@ -705,10 +727,13 @@ class BrowserAutomationService:
     ) -> None:
         """Contact matched simulator jobs and submit only after an observed HR reply.
 
-        The user's explicit Dry Run command is the batch authorization. Each job
+        An explicit Dry Run command is the batch authorization; scheduled runs
+        additionally require the unchanged opt-in setting before binding/clicks. Each job
         still receives a separate preview and single-use capability before any
         browser-side action. Only the local simulator is accepted by the adapter.
         """
+        saved_request = self.store.search_recovery(task_id)["request"] or {}
+        daily_policy = saved_request.get("_daily_policy")
         counters = {
             "dry_run_candidates": len(job_ids),
             "dry_run_contacted": 0,
@@ -812,6 +837,7 @@ class BrowserAutomationService:
                 elif observation.hr_reply_text:
                     self.store.mark_recruiter_reply(job_id, observation.hr_reply_text)
                     counters["dry_run_replied"] += 1
+                    self._check_daily_submission(daily_policy)
                     if self.resume_workspace is None:
                         raise ValueError("没有授权主简历，不能投递")
                     from ..delivery.resume_binding import mock_resume_payload
@@ -823,12 +849,16 @@ class BrowserAutomationService:
                     mock_resume_payload(self.resume_workspace.read_document(),
                         document_id=binding.get("resume_document_id"), version=binding.get("resume_version"),
                         digest=binding.get("resume_digest"))
-                    submit_started = True
-                    self.store.update_task(task_id, checkpoint="mock_dry_run_submit_started")
-                    result = await self.mock_delivery_adapter.submit(page, binding=site_binding,
-                        before_click=lambda: mock_resume_payload(self.resume_workspace.read_document(),
+                    def before_submit_click():
+                        nonlocal submit_started
+                        self._check_daily_submission(daily_policy)
+                        mock_resume_payload(self.resume_workspace.read_document(),
                             document_id=binding.get("resume_document_id"), version=binding.get("resume_version"),
-                            digest=binding.get("resume_digest")))
+                            digest=binding.get("resume_digest"))
+                        self.store.update_task(task_id, checkpoint="mock_dry_run_submit_started")
+                        submit_started = True
+                    result = await self.mock_delivery_adapter.submit(page, binding=site_binding,
+                        before_click=before_submit_click)
                     if result.confirmed:
                         submit_confirmed = True
                         self.store.mark_delivery_completed(job_id, f"Dry Run 已确认点击发送简历；招聘方回复：{observation.hr_reply_text}")
@@ -846,6 +876,16 @@ class BrowserAutomationService:
                     )
                     counters["dry_run_waiting_reply"] += 1
                     report_lines.append(f"- {label}：已发起沟通，等待回复，未发送简历")
+            except DailySubmissionDisabled as exc:
+                detail = str(exc)
+                if submit_started:
+                    self.store.mark_outcome_indeterminate(job_id, "提交途中自动投递授权失效，结果待核验，禁止自动重试")
+                    counters["dry_run_failed"] += 1
+                    report_lines.append(f"- {label}：提交途中授权失效，结果待核验，未自动重试")
+                else:
+                    self.store.mark_job_needs_review(job_id, detail)
+                    report_lines.append(f"- {label}：已收到回复，自动投递未授权或已关闭，未点击发送简历")
+                self.store.event(task_id, "daily_submission_withheld", f"{label}: {detail}")
             except asyncio.CancelledError:
                 if submit_started and not submit_confirmed:
                     self.store.mark_outcome_indeterminate(job_id, "简历提交期间中断/超时，结果未知，禁止自动重试")

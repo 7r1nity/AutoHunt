@@ -78,8 +78,8 @@ def build_rules(coordinator) -> list[Rule]:
 
     # ------------------------------------------------------------- daily reporting
     async def run_daily(observation: Observation) -> str:
-        await coordinator.run_daily_if_due()
-        return "检查并执行了每日汇总"
+        started = await coordinator.run_daily_if_due()
+        return "已启动每日模拟站任务" if started else "已检查每日任务，本轮未启动"
 
     def daily_enabled(observation: Observation) -> bool:
         return bool((observation.get("settings") or {}).get("daily_enabled"))
