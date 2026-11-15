@@ -62,6 +62,72 @@ class Scheduler(unittest.IsolatedAsyncioTestCase):
         await self.daily.execute(ident)
         return self.runs.get(ident)
 
+    def test_search_count_is_persisted_independently_and_omitted_updates_preserve_it(self):
+        from app.jobs.store import JobStore
+        self.assertEqual(self.jobs.mock_workflow_settings()["max_search_jobs"], 30)
+        self.jobs.update_mock_workflow_settings(monitor_enabled=True, auto_submit=True,
+            daily_enabled=True, daily_time="09:00", min_score=75, max_contacts=5, max_search_jobs=2)
+        before = self.jobs.mock_workflow_settings()
+        self.assertEqual(self.daily.snapshot()["request"]["max_jobs"], 2)
+        self.assertEqual(self.daily.snapshot()["max_contacts"], 5)
+        reopened = JobStore(self.root / "jobs.db")
+        self.assertEqual(reopened.mock_workflow_settings()["max_search_jobs"], 2)
+        self.jobs.update_mock_workflow_settings(monitor_enabled=True, auto_submit=True,
+            daily_enabled=True, daily_time="09:00", min_score=80, max_contacts=1)
+        after = self.jobs.mock_workflow_settings()
+        self.assertEqual(after["max_search_jobs"], 2)
+        self.assertEqual(after["max_contacts"], 1)
+        self.assertEqual(after["auto_submit_enabled_at"], before["auto_submit_enabled_at"])
+        self.assertEqual(after["daily_next_due_at"], before["daily_next_due_at"])
+
+    def test_search_count_rejects_invalid_values_before_saving(self):
+        from app.core.models import MockWorkflowUpdate
+        from pydantic import ValidationError
+        settings = dict(monitor_enabled=True, auto_submit=False, daily_enabled=True,
+                        daily_time="09:00", min_score=75, max_contacts=3)
+        for value in (0, 201, -1, 1.5, True, "7", None):
+            with self.subTest(value=value):
+                with self.assertRaises(ValidationError):
+                    MockWorkflowUpdate(**settings, max_search_jobs=value)
+                if value is not None:  # Internal None means keep the stored value.
+                    with self.assertRaises(ValueError):
+                        self.jobs.update_mock_workflow_settings(**settings, max_search_jobs=value)
+        for value in (1, 200):
+            self.jobs.update_mock_workflow_settings(**MockWorkflowUpdate(**settings, max_search_jobs=value).model_dump())
+            self.assertEqual(self.daily.snapshot()["request"]["max_jobs"], value)
+
+    async def test_all_daily_triggers_pass_saved_search_count_to_request(self):
+        self.jobs.update_mock_workflow_settings(monitor_enabled=True, auto_submit=False,
+            daily_enabled=True, daily_time="09:00", min_score=75, max_contacts=5, max_search_jobs=7)
+        observed = []
+        async def search(run_id, cp):
+            observed.append(cp["snapshot"]["request"]["max_jobs"])
+            self.jobs.create_task(cp["browser_id"], "mock", "Synthetic AI")
+            self.jobs.update_task(cp["browser_id"], status=BrowserTaskStatus.COMPLETED)
+            cp["search_complete"] = True
+            self.daily.save(run_id, cp)
+        with patch.object(self.daily, "search", side_effect=search), patch("app.workflow.daily_delivery.deliver", AsyncMock()):
+            for trigger in ("manual", "scheduled", "catch_up"):
+                run, _ = self.runs.create("default", "synthetic-" + trigger, "daily", {"trigger": trigger})
+                self.assertEqual((await self.execute(run["id"]))["status"], "completed")
+        self.assertEqual(observed, [7, 7, 7])
+        self.assertTrue(all("本轮搜索上限为 7 个" in message["content"] for message in
+            self.jobs.conversation_history() if message["run_id"].startswith("daily-search:")))
+        self.assertEqual(self.contacts, 0)
+
+    async def test_recovery_keeps_frozen_count_after_settings_change(self):
+        self.jobs.update_mock_workflow_settings(monitor_enabled=True, auto_submit=True,
+            daily_enabled=True, daily_time="09:00", min_score=75, max_contacts=3, max_search_jobs=7)
+        ident = self.prepared()
+        self.jobs.update_mock_workflow_settings(monitor_enabled=True, auto_submit=True,
+            daily_enabled=True, daily_time="09:00", min_score=75, max_contacts=5, max_search_jobs=18)
+        await self.daily.recover()
+        result = await self.execute(ident)
+        self.assertEqual(result["checkpoint"]["snapshot"]["request"]["max_jobs"], 7)
+        self.assertEqual(result["checkpoint"]["snapshot"]["max_contacts"], 3)
+        self.assertEqual(self.daily.snapshot()["request"]["max_jobs"], 18)
+        self.assertEqual(self.daily.snapshot()["max_contacts"], 5)
+
     async def test_search_summary_is_bound_and_published_before_hr_reply(self):
         ident = self.prepared()
         await self.execute(ident)

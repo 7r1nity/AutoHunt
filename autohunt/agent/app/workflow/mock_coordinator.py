@@ -854,7 +854,7 @@ class MockWorkflowCoordinator:
             task = await self.browser.start(BrowserSearchRequest(
                 source="mock", query=queries[0], queries=queries,
                 locations=state.preferences.locations.values[:3],
-                browser_mode=BrowserMode.CDP, max_jobs=30,
+                browser_mode=BrowserMode.CDP, max_jobs=settings["max_search_jobs"],
                 dry_run=True, dry_run_min_score=settings["min_score"],
                 dry_run_max_contacts=settings["max_contacts"],
                 dry_run_simulate_reply=False,

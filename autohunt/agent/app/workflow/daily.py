@@ -193,7 +193,7 @@ class DailyWorkflow:
         message = (f"每日任务搜索总结：本轮核对 {report['covered_jobs']} 个候选，"
                    f"其中 {threshold} 个达到 {policy['min_score']} 分；"
                    f"自动沟通上限为 {policy['max_contacts']} 个，本轮选中 {len(cp.get('selected', []))} 个。"
-                   "搜索数量与自动沟通数量分别统计。\n\n" +
+                   f"本轮搜索上限为 {policy['request']['max_jobs']} 个，搜索数量与自动沟通数量分别统计。\n\n" +
                    render_search_report(view.model_copy(update={"status": BrowserTaskStatus.COMPLETED}), report))
         self.jobs.add_conversation_message("assistant", message, conversation_id=run["session_id"],
                                            run_id="daily-search:" + run_id)
@@ -236,7 +236,8 @@ class DailyWorkflow:
             raise ValueError("请配置目标岗位并启用主简历，再执行每日任务")
         doc = self.resume_workspace.read_document()
         return {"request": BrowserSearchRequest(source="mock", query=queries[0], queries=queries,
-                    locations=state.preferences.locations.values[:3], browser_mode=BrowserMode.CDP, max_jobs=30).model_dump(mode="json"),
+                    locations=state.preferences.locations.values[:3], browser_mode=BrowserMode.CDP,
+                    max_jobs=settings["max_search_jobs"]).model_dump(mode="json"),
                 "binding": {"resume_document_id": doc.id, "resume_version": doc.version, "resume_digest": resume_document_digest(doc)},
                 "auto_submit_epoch": settings["auto_submit_enabled_at"] if settings["auto_submit"] else None,
                 "applicant_id": settings.get("applicant_id"), "min_score": settings["min_score"], "max_contacts": settings["max_contacts"]}

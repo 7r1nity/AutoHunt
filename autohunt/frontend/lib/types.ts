@@ -13,6 +13,7 @@ export type MockWorkflowSettings = {
   daily_pending?: boolean;
   min_score: number;
   max_contacts: number;
+  max_search_jobs: number;
   last_run_date: string | null;
   last_run_id: string | null;
   last_reported_run_id: string | null;

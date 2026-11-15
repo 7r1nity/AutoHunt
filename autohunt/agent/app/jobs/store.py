@@ -143,6 +143,7 @@ class JobStore:
                     daily_time TEXT NOT NULL DEFAULT '09:00',
                     min_score INTEGER NOT NULL DEFAULT 75,
                     max_contacts INTEGER NOT NULL DEFAULT 3,
+                    max_search_jobs INTEGER NOT NULL DEFAULT 30,
                     last_run_date TEXT,
                     last_run_id TEXT,
                     last_reported_run_id TEXT,
@@ -208,6 +209,7 @@ class JobStore:
             self._ensure_column(db, "mock_workflow_settings", "auto_submit_enabled_at", "TEXT")
             self._ensure_column(db, "mock_workflow_settings", "daily_claim_id", "TEXT")
             self._ensure_column(db, "mock_workflow_settings", "daily_next_due_at", "TEXT")
+            self._ensure_column(db, "mock_workflow_settings", "max_search_jobs", "INTEGER NOT NULL DEFAULT 30")
             self._ensure_column(db, "delivery_runs", "resume_document_id", "TEXT")
             self._ensure_column(db, "delivery_runs", "target_url", "TEXT")
             self._ensure_column(db, "delivery_runs", "resume_version", "INTEGER")
@@ -297,7 +299,9 @@ class JobStore:
 
     def update_mock_workflow_settings(self, *, monitor_enabled: bool, auto_submit: bool,
                                       daily_enabled: bool, daily_time: str, min_score: int,
-                                      max_contacts: int) -> dict[str, Any]:
+                                      max_contacts: int, max_search_jobs: int | None = None) -> dict[str, Any]:
+        if max_search_jobs is not None and (type(max_search_jobs) is not int or not 1 <= max_search_jobs <= 200):
+            raise ValueError("每轮搜索岗位数必须是 1–200 的整数")
         with self.lock, self._connect() as db:
             previous = db.execute(
                 "SELECT auto_submit,auto_submit_enabled_at,daily_enabled,daily_time,last_run_date,daily_next_due_at "
@@ -321,9 +325,10 @@ class JobStore:
                 last_run_date = beijing_now.date().isoformat()
             db.execute(
                 "UPDATE mock_workflow_settings SET monitor_enabled=?,auto_submit=?,auto_submit_enabled_at=?,"
-                "daily_enabled=?,daily_time=?,min_score=?,max_contacts=?,last_run_date=?,daily_next_due_at=?,last_error=NULL WHERE id=1",
+                "daily_enabled=?,daily_time=?,min_score=?,max_contacts=?,max_search_jobs=COALESCE(?,max_search_jobs),"
+                "last_run_date=?,daily_next_due_at=?,last_error=NULL WHERE id=1",
                 (int(monitor_enabled), int(auto_submit), enabled_at, int(daily_enabled), daily_time,
-                 min_score, max_contacts, last_run_date, next_due),
+                 min_score, max_contacts, max_search_jobs, last_run_date, next_due),
             )
         return self.mock_workflow_settings()
 

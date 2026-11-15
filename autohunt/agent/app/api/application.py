@@ -946,7 +946,11 @@ async def test_daily_workflow(request: DailyTestRequest) -> dict:
 async def update_mock_workflow_settings(update: MockWorkflowUpdate) -> dict:
     if (update.auto_submit or update.daily_enabled) and not update.monitor_enabled:
         raise HTTPException(status_code=422, detail="自动投递和每日任务要求先开启模拟站会话监测")
-    job_store.update_mock_workflow_settings(**update.model_dump())
+    values = update.model_dump()
+    # Older clients omit the new field; preserve the saved search limit.
+    if "max_search_jobs" not in update.model_fields_set:
+        values.pop("max_search_jobs")
+    job_store.update_mock_workflow_settings(**values)
     mock_workflow.wakeup.set()
     return mock_workflow.settings()
 

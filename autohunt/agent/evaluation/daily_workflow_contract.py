@@ -138,10 +138,15 @@ class DailyWorkflow(unittest.IsolatedAsyncioTestCase):
         migrated = JobStore(old)
         self.assertEqual(migrated.mock_workflow_settings()["last_run_id"], "previous")
         self.assertIsNone(migrated.mock_workflow_settings()["daily_claim_id"])
+        self.assertEqual(migrated.mock_workflow_settings()["max_search_jobs"], 30)
+        self.assertEqual(migrated.mock_workflow_settings()["max_contacts"], 2)
+        self.assertEqual(migrated.mock_workflow_settings()["min_score"], 80)
         self.assertTrue(migrated.claim_daily_mock_run("2099-01-02"))
 
     async def test_coordinator_retries_failed_start_then_deduplicates(self):
         self.previous_run()
+        self.jobs.update_mock_workflow_settings(monitor_enabled=True, auto_submit=False,
+            daily_enabled=True, daily_time="09:00", min_score=75, max_contacts=3, max_search_jobs=12)
         self.browser.start = AsyncMock(side_effect=[RuntimeError("synthetic startup failure"), NS(id="new")])
         with self.assertRaises(RuntimeError):
             await self.due()
@@ -150,6 +155,7 @@ class DailyWorkflow(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.browser.start.await_count, 2)
         self.assertTrue(self.browser.start.call_args.kwargs["daily"])
         self.assertFalse(self.browser.start.call_args.args[0].dry_run_simulate_reply)
+        self.assertEqual(self.browser.start.call_args.args[0].max_jobs, 12)
         self.assertEqual(self.jobs.mock_workflow_settings()["last_run_id"], "new")
 
     async def test_cancel_before_browser_launch_releases_only_its_claim(self):
