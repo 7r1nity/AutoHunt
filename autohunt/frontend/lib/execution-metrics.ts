@@ -19,6 +19,7 @@ export const dateText = (date: string) => date.length === 10 ? date : new Date(d
 
 export type ExecutionLedger = {
   run_id: string; status: string; created_at: string; updated_at: string; error: string | null;
+  execution_path?: { mode: "local_rule"; reason: string; detail: string; source_browser_id?: string | null } | null;
   calls: Array<{ call_id: string; provider: string | null; model: string | null; operation: string | null;
     status: string; latency_ms: number | null; prompt_tokens: number | null; completion_tokens: number | null; error_type: string | null }>;
   tools: Array<{ tool: string; status: string; duration_ms: number | null; attempts: number | null }>;

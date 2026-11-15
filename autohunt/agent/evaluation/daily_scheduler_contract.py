@@ -51,6 +51,7 @@ class Scheduler(unittest.IsolatedAsyncioTestCase):
         snapshot = self.daily.snapshot()
         self.jobs.create_task("search", "mock", "AI Engineer", resume_id="synthetic")
         self.jobs.update_task("search", status=BrowserTaskStatus.COMPLETED)
+        self.jobs.event("search", "job_stored", "Synthetic receipt", sample={"job_id": self.job_id, "filter_status": "pass"})
         cp = {"phase": "daily", "snapshot": snapshot, "browser_id": "search", "search_complete": True,
               "selected": [self.job_id], "jobs": {str(self.job_id): {"phase": phase}}, "attempts": 0,
               "daily_progress": {"id": run["id"], "revision": 1, "steps": []}}
@@ -60,6 +61,120 @@ class Scheduler(unittest.IsolatedAsyncioTestCase):
     async def execute(self, ident):
         await self.daily.execute(ident)
         return self.runs.get(ident)
+
+    async def test_search_summary_is_bound_and_published_before_hr_reply(self):
+        ident = self.prepared()
+        await self.execute(ident)
+        messages = self.jobs.conversation_history()
+        self.assertEqual(len(messages), 2)
+        self.assertIn("本轮核对 1 个候选", messages[0]["content"])
+        self.assertIn("### 整体薪资与 JD 总结", messages[0]["content"])
+        self.assertIn("Synthetic AI Engineer", messages[0]["content"])
+        self.assertIn("1 个正在等待招聘方回复", messages[1]["content"])
+        state = self.runs.dialogue_state("default")
+        self.assertEqual(state["tasks"]["browser_id"], "search")
+        self.assertEqual(state["snapshots"][-1]["items"][0]["id"], self.job_id)
+        await self.execute(ident)
+        self.assertEqual(len(self.jobs.conversation_history()), 2)
+        self.remote["reply"] = "Synthetic HR reply"
+        await self.execute(ident)
+        self.assertIn("投递 1 个", self.jobs.conversation_history()[-1]["content"])
+        self.assertEqual(len(self.jobs.conversation_history()), 3)
+
+    async def test_contact_limit_does_not_shrink_search_candidate_pool(self):
+        import copy
+        ident = self.prepared()
+        cp = self.runs.get(ident)["checkpoint"]
+        cp["snapshot"]["max_contacts"] = 5
+        self.assertEqual(cp["snapshot"]["request"]["max_jobs"], 30)
+        cp.pop("selected")
+        cp["jobs"] = {}
+        self.daily.save(ident, cp)
+        report = self.jobs.search_report("search")
+        base = report["jobs"][0]
+        report.update(covered_jobs=30, qualified_jobs=30,
+                      jobs=[{**copy.deepcopy(base), "id": i, "score": 90 if i <= 6 else 70} for i in range(1, 31)])
+        with patch.object(self.jobs, "search_report", return_value=report), patch("app.workflow.daily_delivery.deliver", AsyncMock()):
+            run = await self.execute(ident)
+        self.assertEqual(run["checkpoint"]["selected"], [1, 2, 3, 4, 5])
+        message = self.jobs.conversation_history()[0]["content"]
+        self.assertIn("本轮核对 30 个候选，其中 6 个达到 75 分", message)
+        self.assertIn("自动沟通上限为 5 个，本轮选中 5 个", message)
+        self.assertEqual(self.contacts, 0)
+
+    async def test_terminal_recovery_backfills_summary_once_without_reexecution(self):
+        ident = self.prepared()
+        self.runs.update(ident, status="completed")
+        await self.daily.recover()
+        await self.daily.recover()
+        self.assertEqual(len(self.jobs.conversation_history()), 1)
+        self.assertEqual(self.runs.dialogue_state("default")["tasks"]["browser_id"], "search")
+        self.assertEqual(self.runs.get(ident)["status"], "completed")
+        self.assertEqual(self.daily.records(active=True), [])
+        self.assertEqual(self.contacts, 0)
+        self.assertEqual(self.clicks, [])
+
+    async def test_backfill_preserves_another_search_and_session_isolation(self):
+        ident = self.prepared()
+        self.runs.update(ident, status="completed")
+        self.runs.mutate_dialogue("default", {"op": "task", "source": "synthetic", "kind": "browser_id", "id": "newer-search", "bind": True})
+        await self.daily.recover()
+        self.assertEqual(self.runs.dialogue_state("default")["tasks"]["browser_id"], "newer-search")
+        self.assertEqual(self.runs.dialogue_state("default")["snapshots"], [])
+        other = self.runs.create_session("Synthetic other session")["id"]
+        self.assertEqual(self.runs.dialogue_state(other)["tasks"], {})
+        self.assertEqual(self.jobs.conversation_history(conversation_id=other), [])
+
+    async def test_recovery_respects_context_reset_epoch(self):
+        ident = self.prepared()
+        self.runs.update(ident, status="completed")
+        self.runs.mutate_dialogue("default", {"op": "reset", "source": "synthetic"})
+        await self.daily.recover()
+        self.assertEqual(self.jobs.conversation_history(), [])
+        self.assertEqual(self.runs.dialogue_state("default")["tasks"], {})
+
+    async def test_search_publication_crash_does_not_duplicate_persisted_message(self):
+        ident = self.prepared()
+        cp = self.runs.get(ident)["checkpoint"]
+        original = self.runs.event
+        def event(run_id, kind, data):
+            if kind == "browser_summary":
+                raise RuntimeError("synthetic crash before event")
+            return original(run_id, kind, data)
+        with patch.object(self.runs, "event", side_effect=event):
+            with self.assertRaises(RuntimeError):
+                self.daily.publish_search_summary(ident, cp)
+        self.daily.publish_search_summary(ident, cp)
+        self.assertEqual(len(self.jobs.conversation_history()), 1)
+        self.assertTrue(self.runs.has_event(ident, "browser_summary"))
+
+    async def test_followup_summary_reads_daily_results_with_explicit_local_accounting(self):
+        from app.core.main_agent import AutoHuntAgent
+        from app.runtime.context import RunContext, current_run
+        ident = self.prepared()
+        self.daily.publish_search_summary(ident, self.runs.get(ident)["checkpoint"])
+        agent = AutoHuntAgent.__new__(AutoHuntAgent)
+        agent.job_store = self.jobs
+        chat, _ = self.runs.create("default", "summary-followup", "chat", {})
+        token = current_run.set(RunContext(chat["id"], asyncio.current_task(),
+            lambda kind, data: self.runs.event(chat["id"], kind, data), lambda value: None,
+            dialogue=self.runs.dialogue_state("default"),
+            mutate_dialogue=lambda value: self.runs.mutate_dialogue("default", value)))
+        try:
+            result = agent._search_summary_response()
+        finally:
+            current_run.reset(token)
+        self.assertIn("Synthetic AI Engineer", result.message)
+        self.assertNotIn("还没有可核对", result.message)
+        self.runs.update(chat["id"], status="completed")
+        ledger = self.runs.execution_ledger(chat["id"])
+        self.assertEqual(ledger["execution_path"]["mode"], "local_rule")
+        self.assertEqual(ledger["execution_path"]["source_browser_id"], "search")
+        self.assertEqual(ledger["calls"], [])
+        self.assertEqual(len(ledger["tools"]), 1)
+        self.assertEqual(ledger["tools"][0]["tool"], "job_results_read")
+        self.assertIsNotNone(ledger["tools"][0]["duration_ms"])
+        self.assertEqual(self.contacts, 0)
 
     def test_missed_days_coalesce_and_persist_next_occurrence(self):
         self.cursor("2099-01-01T01:00:00+00:00")

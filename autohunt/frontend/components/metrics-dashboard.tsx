@@ -18,15 +18,17 @@ function ExecutionDetails({ ledger }: { ledger: ExecutionLedger }) {
   const knownPrompt = ledger.calls.some((call) => call.prompt_tokens != null);
   const knownCompletion = ledger.calls.some((call) => call.completion_tokens != null);
   const knownTime = ledger.calls.some((call) => call.latency_ms != null);
+  const noCalls = ledger.calls.length === 0;
+  const localOnly = noCalls && !a.model_retries && terminalRun(ledger.status) && ledger.execution_path?.mode === "local_rule";
   return <>
     <dl className="metrics-strip" aria-label="本轮执行指标">
-      <div><dt>模型调用</dt><dd>{numberText(a.recorded_model_calls)}</dd><small>已记录调用；另有 {a.model_retries} 次传输重试</small></div>
+      <div><dt>模型调用</dt><dd>{numberText(a.recorded_model_calls)}</dd><small>{localOnly ? "本地规则处理，未调用模型" : `已记录调用；另有 ${a.model_retries} 次传输重试`}</small></div>
       <div><dt>工具调用</dt><dd>{numberText(ledger.tools.length)}</dd><small>另有 {a.tool_retries} 次工具重试</small></div>
-      <div><dt>输入 / 输出 token</dt><dd className="metrics-token-value">{knownPrompt || knownCompletion ? `${knownPrompt ? numberText(a.known_prompt_tokens) : "未记录"} / ${knownCompletion ? numberText(a.known_completion_tokens) : "未记录"}` : "未记录"}</dd><small>{a.tokens_complete ? "本轮已记录调用的 usage 完整" : "仅汇总已知 usage，数据不完整"}</small></div>
+      <div><dt>输入 / 输出 token</dt><dd className="metrics-token-value">{localOnly ? "0 / 0" : noCalls ? "无调用记录" : knownPrompt || knownCompletion ? `${knownPrompt ? numberText(a.known_prompt_tokens) : "未记录"} / ${knownCompletion ? numberText(a.known_completion_tokens) : "未记录"}` : "未记录"}</dd><small>{localOnly ? "已确认未调用模型，无 token 消耗" : noCalls ? "本轮没有可统计的模型调用" : a.tokens_complete ? "本轮已记录调用的 usage 完整" : "仅汇总已知 usage，数据不完整"}</small></div>
       <div><dt>本轮记录时长</dt><dd>{durationText(a.persisted_run_span_ms)}</dd><small>创建至最后更新，可能包含等待</small></div>
-      <div><dt>模型累计耗时</dt><dd>{knownTime ? durationText(a.model_time_sum_ms) : "未记录"}</dd><small>{a.calls_without_latency ? `${a.calls_without_latency} 次调用缺少耗时` : "并发调用累加，与实际等待时间不同"}</small></div>
+      <div><dt>模型累计耗时</dt><dd>{localOnly ? "0 ms" : knownTime ? durationText(a.model_time_sum_ms) : noCalls ? "无调用记录" : "未记录"}</dd><small>{a.calls_without_latency ? `${a.calls_without_latency} 次调用缺少耗时` : "并发调用累加，与实际等待时间不同"}</small></div>
     </dl>
-    {!a.tokens_complete && <p className="metrics-data-note">token 数据不完整：{a.calls_without_complete_usage} 次调用缺少完整 usage，{a.retry_attempts_without_usage} 次传输重试未取得 usage。未记录的用量不按 0 计；旧任务或任务之外的调用可能不在账本中。</p>}
+    {localOnly ? <p className="metrics-help">{ledger.execution_path?.detail}。本轮对话与每日搜索任务分别记账。</p> : noCalls && !a.model_retries ? <p className="metrics-help">本轮没有模型调用记录，可能由本地规则处理。旧记录缺少执行路径说明时，不把未知用量当作 0。</p> : !a.tokens_complete && <p className="metrics-data-note">token 数据不完整：{a.calls_without_complete_usage} 次调用缺少完整 usage，{a.retry_attempts_without_usage} 次传输重试未取得 usage。未记录的用量不按 0 计；旧任务或任务之外的调用可能不在账本中。</p>}
     <section className="metrics-section" aria-label="失败与异常">
       <div className="metrics-section-heading"><h3>失败与异常</h3><span>{ledger.issues.length} 条过程记录</span></div>
       {ledger.error && <div className="metrics-error" role="status"><strong>本轮结束原因</strong><p>{ledger.error}</p></div>}
@@ -42,7 +44,7 @@ function ExecutionDetails({ ledger }: { ledger: ExecutionLedger }) {
       <p className="metrics-help">工具调用成功或进入队列不等于简历已送达；投递结果请结合申请看板核对。</p>
     </section>
     <details className="metrics-section" open><summary>模型调用明细（{ledger.calls.length}）</summary>
-      {ledger.calls.length ? <div className="metrics-table-wrap"><table><thead><tr><th>模型 / 操作</th><th>状态</th><th>输入 token</th><th>输出 token</th><th>耗时</th></tr></thead><tbody>{ledger.calls.map((call) => <tr key={call.call_id}><td><strong>{call.model || "未记录模型"}</strong><small>{call.provider || ""} {call.operation || ""}</small></td><td><StateBadge status={call.status} />{call.error_type && <small>{call.error_type}</small>}</td><td>{numberText(call.prompt_tokens)}</td><td>{numberText(call.completion_tokens)}</td><td>{durationText(call.latency_ms)}</td></tr>)}</tbody></table></div> : <p className="metrics-empty-inline">本轮没有记录模型调用，可能由规则处理或缺少历史观测数据。</p>}
+      {ledger.calls.length ? <div className="metrics-table-wrap"><table><thead><tr><th>模型 / 操作</th><th>状态</th><th>输入 token</th><th>输出 token</th><th>耗时</th></tr></thead><tbody>{ledger.calls.map((call) => <tr key={call.call_id}><td><strong>{call.model || "未记录模型"}</strong><small>{call.provider || ""} {call.operation || ""}</small></td><td><StateBadge status={call.status} />{call.error_type && <small>{call.error_type}</small>}</td><td>{numberText(call.prompt_tokens)}</td><td>{numberText(call.completion_tokens)}</td><td>{durationText(call.latency_ms)}</td></tr>)}</tbody></table></div> : <p className="metrics-empty-inline">{localOnly ? "本轮通过本地规则读取记录，没有模型调用。" : "本轮没有记录模型调用，可能由规则处理或缺少历史观测数据。"}</p>}
     </details>
     <details className="metrics-section"><summary>工具调用明细（{ledger.tools.length}）</summary>
       {ledger.tools.length ? <div className="metrics-table-wrap"><table><thead><tr><th>工具</th><th>状态</th><th>尝试次数</th><th>耗时</th></tr></thead><tbody>{ledger.tools.map((tool, index) => <tr key={index}><td>{tool.tool}</td><td><StateBadge status={tool.status} /></td><td>{numberText(tool.attempts)}</td><td>{durationText(tool.duration_ms)}</td></tr>)}</tbody></table></div> : <p className="metrics-empty-inline">本轮没有记录工具调用。</p>}
@@ -121,6 +123,8 @@ export function MetricsDashboard({ runtime, initialRunId = null }: { runtime: Re
   const runs = runData?.session === session ? runData.runs : [];
   const selected = picked ? runs.find((run) => run.id === picked) : runs[0];
   const ledger = ledgerData?.run_id === selected?.id ? ledgerData : null;
+  const dailySource = selected?.kind === "chat" ? runs.find((run) => run.kind === "daily" &&
+    (ledger?.execution_path?.source_browser_id ? run.browser_id === ledger.execution_path.source_browser_id : run.created_at <= selected.created_at)) : undefined;
   useEffect(() => { setSession(runtime.sessionId); setPicked(initialRunId ?? ""); }, [runtime.sessionId, initialRunId]);
   // A completed run is published by the existing runtime; refresh immediately,
   // while polling also observes independent browser/delivery tasks.
@@ -166,6 +170,7 @@ export function MetricsDashboard({ runtime, initialRunId = null }: { runtime: Re
         <header className="metrics-run-heading"><div><StateBadge status={ledger?.status ?? selected.status} /><h2>{runKind(selected.kind)}</h2><p>开始于 {dateText(selected.created_at)} <span className="metrics-run-id">任务编号 {selected.id}</span></p></div><span className="metrics-live-label">{terminalRun(selected.status) ? "本轮已结束" : "执行记录持续更新"}</span></header>
         {ledgerError && <p className="metrics-error" role="alert">{ledgerError}。账本暂不可用，刷新后重试。</p>}
         {selected.daily && <p className="metrics-help">触发方式：{selected.daily.trigger === "manual" ? "立即测试" : selected.daily.trigger === "catch_up" ? "错过任务补跑" : "每日定时"}。{selected.daily.scheduled_for && `计划时间：${dateText(selected.daily.scheduled_for)}。`}{(selected.daily.coalesced_occurrences ?? 0) > 1 && `合并了 ${selected.daily.coalesced_occurrences} 次错过的计划，仅执行一轮。`}</p>}
+        {dailySource && <p className="metrics-help">当前查看的是这条对话的指标；每日搜索、沟通和投递在独立轮次中记录。<button className="text-button" onClick={() => { setPicked(dailySource.id); setLedgerData(null); }}>{ledger?.execution_path?.source_browser_id ? "查看对应每日任务指标" : "查看最近每日任务指标"}</button></p>}
         {!ledger && !ledgerError && <p role="status">正在读取本轮指标…</p>}
         {ledger && <ExecutionDetails ledger={ledger} />}
       </>}

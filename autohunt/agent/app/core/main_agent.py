@@ -949,6 +949,28 @@ class AutoHuntAgent:
         )
 
     def _search_summary_response(self) -> ChatResponse:
+        """Deterministic receipt reading has explicit accounting, without an LLM."""
+        import time
+        import uuid
+        execution = uuid.uuid4().hex
+        context = active_run()
+        ident = ((context.dialogue or {}).get("tasks") or {}).get("browser_id") if context else None
+        emit("execution_path", mode="local_rule", reason="search_summary", source_browser_id=ident,
+             detail="读取本会话已保存的搜索记录并生成固定格式总结，无需模型推理")
+        started = time.monotonic()
+        event = {"tool": "job_results_read", "execution_id": execution}
+        emit("tool_started", **event)
+        status = "ok"
+        try:
+            return self._read_search_summary_response()
+        except Exception:
+            status = "failed"
+            raise
+        finally:
+            emit("tool_finished", **event, status=status, attempts=1,
+                 duration_ms=round((time.monotonic() - started) * 1000))
+
+    def _read_search_summary_response(self) -> ChatResponse:
         """Read this session's actual search, never global/default requirements."""
         context = active_run()
         task_id = ((context.dialogue or {}).get("tasks") or {}).get("browser_id") if context else None

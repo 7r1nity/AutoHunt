@@ -23,6 +23,7 @@ export function useAgentRuntime() {
   const [notifications, setNotifications] = useState<Array<{ sessionId: string; runId: string; event: RunEvent }>>([]);
   const currentSession = useRef(sessionId);
   const connections = useRef(new Map<string, AbortController>());
+  const seenRuns = useRef(new Set<string>());
   const mounted = useRef(true);
   const pendingStart = useRef<{ session: string; cancel: boolean; ready: Promise<AgentRun> } | null>(null);
   const controls = useRef(new Map<string, Promise<AgentRun>>());
@@ -41,6 +42,7 @@ export function useAgentRuntime() {
   }, []);
 
   const observe = useCallback((run: AgentRun, onEvent?: (event: RunEvent) => void, onError?: (error: unknown) => void) => {
+    seenRuns.current.add(run.id);
     if (connections.current.has(run.id) && !onEvent) return;
     connections.current.get(run.id)?.abort();
     const controller = new AbortController();
@@ -109,6 +111,7 @@ export function useAgentRuntime() {
       if (!response.ok || currentSession.current !== sessionId) return;
       const items = await response.json() as AgentRun[];
       setRuns(items);
+      items.forEach((run) => seenRuns.current.add(run.id));
       items.filter((run) => !terminalRun(run.status)).forEach((run) => observe(run));
     })();
   }, [sessionId, observe, refresh]);
@@ -119,7 +122,11 @@ export function useAgentRuntime() {
         if (!response.ok || currentSession.current !== sessionId) return;
         const items = await response.json() as AgentRun[];
         setRuns(items);
-        items.filter((run) => !terminalRun(run.status) && !connections.current.has(run.id)).forEach((run) => observe(run));
+        // A short daily run can finish between polls. Read its persisted events
+        // once so completion/summary messages still arrive without a reload.
+        items.filter((run) => !connections.current.has(run.id) &&
+          (!terminalRun(run.status) || run.kind === "daily" && !seenRuns.current.has(run.id))).forEach((run) => observe(run));
+        items.forEach((run) => seenRuns.current.add(run.id));
       }).catch(() => undefined);
     }, 20_000);
     return () => window.clearInterval(timer);

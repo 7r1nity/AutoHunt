@@ -54,6 +54,7 @@ def execution_ledger(runs: list[dict], events: list[dict], *, model_rates: dict 
     retries = Counter()
     budgets, decisions = [], Counter()
     external, seen_events, issues = {}, set(), []
+    execution_path = None
     for event in events:
         kind, data = event.get("kind"), event.get("data") or {}
         run_id = event.get("run_id") or data.get("run_id")
@@ -63,6 +64,8 @@ def execution_ledger(runs: list[dict], events: list[dict], *, model_rates: dict 
                 continue
             seen_events.add(event_id)
         key = (run_id, data.get("call_id"))
+        if kind == "execution_path" and run_id == runs[0]["id"] and data.get("mode") == "local_rule":
+            execution_path = {name: data.get(name) for name in ("mode", "reason", "detail", "source_browser_id")}
         failure = data.get("failure") if isinstance(data.get("failure"), dict) else {}
         if (kind == "model_response" and data.get("status") in {"error", "cancelled"}
                 or kind in {"plan_failed", "watchdog_expired", "daily_error"}
@@ -145,6 +148,7 @@ def execution_ledger(runs: list[dict], events: list[dict], *, model_rates: dict 
     except (KeyError, ValueError, TypeError):
         span = None
     return {"version": 1, "run_id": current["id"], "status": current.get("status"),
+        "execution_path": execution_path,
         "created_at": current.get("created_at"), "updated_at": current.get("updated_at"),
         "error": current.get("error"), "issues": issues,
         "covered_run_ids": [r["id"] for r in runs], "calls": calls, "tools": invocations,

@@ -9,6 +9,22 @@ from app.runtime.ledger import execution_ledger
 
 
 class DashboardContracts(unittest.TestCase):
+    def test_local_route_requires_evidence_for_this_run(self):
+        run = {"id": "chat", "status": "completed"}
+        self.assertIsNone(execution_ledger([run], [])["execution_path"])
+        event = {"seq": 1, "run_id": "other", "kind": "execution_path",
+                 "data": {"mode": "local_rule", "reason": "search_summary", "source_browser_id": "search"}}
+        self.assertIsNone(execution_ledger([run], [event])["execution_path"])
+        event["run_id"] = "chat"
+        result = execution_ledger([run], [event])
+        self.assertEqual(result["execution_path"]["source_browser_id"], "search")
+        self.assertEqual(result["calls"], [])
+        # Route metadata must not hide genuine missing provider usage.
+        result = execution_ledger([run], [event, {"seq": 2, "run_id": "chat", "kind": "model_request", "data": {"call_id": "actual-call"}}])
+        self.assertEqual(len(result["calls"]), 1)
+        self.assertIsNone(result["calls"][0]["prompt_tokens"])
+        self.assertFalse(result["accounting"]["tokens_complete"])
+
     def test_public_steps_normalize_legacy_and_daily_dependencies_without_mutation(self):
         import copy
         from app.runtime.models import public_run

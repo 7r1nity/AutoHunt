@@ -48,6 +48,12 @@ class DailyWorkflow:
 
     async def recover(self):
         self.stopping = False
+        # Older daily runs had receipts but no conversation search summary.
+        # Backfill read-only publication; never execute a terminal run again.
+        for run in self.records():
+            cp = run["checkpoint"] or {}
+            if cp.get("search_complete"):
+                self.publish_search_summary(run["id"], cp)
         for run in self.records(active=True):
             if run["cancel_requested"]:
                 await self.cancel(run["id"])
@@ -153,6 +159,62 @@ class DailyWorkflow:
     def save(self, run_id, cp, **fields):
         return self.runs.update(run_id, checkpoint=cp, **fields)
 
+    def link_search(self, run_id, cp, *, bind=False):
+        run = self.runs.get(run_id)
+        state = self.runs.dialogue_state(run["session_id"])
+        if datetime.fromisoformat(run["created_at"]).timestamp() < state.get("history_epoch", 0):
+            return False
+        ident = cp["browser_id"]
+        current = (state.get("tasks") or {}).get("browser_id")
+        if bind or not current or current == ident:
+            self.runs.mutate_dialogue(run["session_id"], {"op": "task", "source": run_id,
+                "kind": "browser_id", "id": ident, "status": "completed" if cp.get("search_complete") else "running", "bind": True})
+            return True
+        return False
+
+    def publish_search_summary(self, run_id, cp):
+        if "selected" not in cp:
+            return  # Selection and its limit must be durable before publication.
+        run = self.runs.get(run_id)
+        state = self.runs.dialogue_state(run["session_id"])
+        if datetime.fromisoformat(run["created_at"]).timestamp() < state.get("history_epoch", 0):
+            return
+        if self.runs.has_event(run_id, "browser_summary"):
+            return
+        from ..jobs.search_reporting import render_search_report
+        try:
+            view = self.jobs.get_task(cp["browser_id"])
+            report = self.jobs.search_report(cp["browser_id"])
+        except (KeyError, ValueError):
+            return  # Old/deleted receipts cannot be invented or re-searched.
+        linked = self.link_search(run_id, cp)
+        policy = cp["snapshot"]
+        threshold = sum(j["score"] >= policy["min_score"] for j in report["jobs"])
+        message = (f"每日任务搜索总结：本轮核对 {report['covered_jobs']} 个候选，"
+                   f"其中 {threshold} 个达到 {policy['min_score']} 分；"
+                   f"自动沟通上限为 {policy['max_contacts']} 个，本轮选中 {len(cp.get('selected', []))} 个。"
+                   "搜索数量与自动沟通数量分别统计。\n\n" +
+                   render_search_report(view.model_copy(update={"status": BrowserTaskStatus.COMPLETED}), report))
+        self.jobs.add_conversation_message("assistant", message, conversation_id=run["session_id"],
+                                           run_id="daily-search:" + run_id)
+        if linked and report.get("jobs"):
+            self.runs.mutate_dialogue(run["session_id"], {"op": "snapshot", "source": run_id,
+                "topic": "applications", "kind": "job", "version": cp["browser_id"], "displayed": True,
+                "items": [{key: j[key] for key in ("id", "title", "company", "stage", "content_hash")} for j in report["jobs"]]})
+        self.runs.event(run_id, "browser_summary", {"task_id": cp["browser_id"], "message": message,
+            "report": report, "report_rendered": True, "statistics_changed": True})
+
+    def publish_waiting_summary(self, run_id, cp):
+        if self.runs.has_event(run_id, "daily_waiting_summary"):
+            return
+        phases = [j["phase"] for j in cp["jobs"].values()]
+        message = (f"每日任务沟通进度：本轮选中 {len(phases)} 个岗位，"
+                   f"{phases.count('waiting_reply')} 个正在等待招聘方回复，"
+                   f"已核实发送简历 {phases.count('submitted')} 个。后续结果会继续更新到本会话和指标面板。")
+        self.jobs.add_conversation_message("assistant", message, conversation_id="default", run_id="daily-wait:" + run_id)
+        self.runs.event(run_id, "workflow_summary", {"message": message, "daily_stage": "waiting_reply"})
+        self.runs.event(run_id, "daily_waiting_summary", {})
+
     def finish(self, run_id, status, detail):
         run = self.runs.get(run_id)
         if run["status"] in TERMINAL:
@@ -196,6 +258,7 @@ class DailyWorkflow:
             cp["attempts"] += 1
             self.save(run_id, cp, status="running", error=None, error_type=None)
             if not cp.get("search_complete"):
+                self.link_search(run_id, cp, bind=True)
                 await self.search(run_id, cp)
             if "selected" not in cp:
                 report = self.jobs.search_report(cp["browser_id"])
@@ -204,6 +267,7 @@ class DailyWorkflow:
                 cp["selected"] = [j["id"] for j in candidates[:cp["snapshot"]["max_contacts"]]]
                 cp["jobs"] = {str(i): {"phase": "pending"} for i in cp["selected"]}
                 self.save(run_id, cp)
+            self.publish_search_summary(run_id, cp)
             from .daily_delivery import deliver
             # Own the existing browser service while delivery uses its session,
             # so pause/resume, single-browser exclusion and stop remain shared.
@@ -219,6 +283,7 @@ class DailyWorkflow:
                 cp["next_check_at"] = self.clock().timestamp() + 30
                 self.save(run_id, cp, status="waiting_reply")
                 self.runs.event(run_id, "status", {"status": "waiting_reply", "detail": "已沟通，等待招聘方回复；尚未投递的岗位将继续检查"})
+                self.publish_waiting_summary(run_id, cp)
             else:
                 status = "outcome_indeterminate" if "uncertain" in phases else "failed" if "failed" in phases else "completed"
                 self.finish(run_id, status, f"每日模拟站任务：搜索完成，处理 {len(phases)} 个岗位，"
