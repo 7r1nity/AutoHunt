@@ -284,6 +284,13 @@ async def advance(plan: dict, registry) -> list[dict]:
 
 async def begin(plan: dict, registry) -> ChatResponse:
     persist(plan, activate=True)
+    if plan.get("paused"):
+        # Describe the persisted control state, not the model's free-form reply.
+        # No synthesis or tool loop may accidentally turn a saved plan into work.
+        text = "任务已保存并暂停，本轮没有执行任何步骤。可说「继续任务」后再执行。"
+        if plan.get("questions"):
+            text += "\n\n待补充：" + "；".join(plan["questions"])
+        return ChatResponse(message=text, lane=AgentLane.APPLICATION)
     observed = await advance(plan, registry)
     proposal = next((step.get("result", {}).get("proposal") for step in observed
         if step["status"] == "waiting_confirmation" and isinstance(step.get("result"), dict)), None)

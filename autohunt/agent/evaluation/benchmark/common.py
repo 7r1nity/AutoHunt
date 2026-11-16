@@ -68,10 +68,12 @@ class PhysicalBudget:
                 else: fcntl.flock(stream.fileno(),fcntl.LOCK_UN)
 
 
-def provider(output, limit=300):
+def provider(output, limit=300, *, budget_path=None):
     from evaluation.run import consented_provider
+    if budget_path is not None and not budget_path.is_file():
+        raise ValueError("A continued consent budget must already exist")
+    budget = PhysicalBudget(budget_path if budget_path is not None else output/"budget.json",limit)
     model = consented_provider(limit,[])
-    budget = PhysicalBudget(output/"budget.json",limit)
     async def completion(self, **kwargs):
         number=budget.reserve(); start=time.perf_counter()
         entry={"call":number,"case":CASE.get(),"request":kwargs,"endpoint":"https://api.deepseek.com"}

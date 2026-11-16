@@ -61,3 +61,25 @@ cd agent
 `executed_checks_passed` 表示实际执行的检查是否通过；必须同时查看 skipped 和 `semantic_acceptance_complete`，不能把跳过语义验收解释为通过。重复 trial 不增加独立场景数量。看过结果并据此调试后，这批题应作为回归集保留，未来泛化评估需要另建冻结任务。
 
 本轮不评估真实招聘平台、真实用户满意度、全站检索召回、长期负载或多 Worker 分布式执行。
+
+## 新任务暂停回归与聊天入口
+
+离线验证复用 unittest、现有 Harness、真实路由器和运行时，不引入新框架：
+
+```powershell
+.venv/Scripts/python.exe -m unittest evaluation.pause_contract evaluation.pause_runs_contract evaluation.acceptance.contracts evaluation.benchmark.contracts -q
+.venv/Scripts/python.exe -m evaluation.context_ledger_regression
+```
+
+`pause_contract` 检查新计划持久化暂停、模型漏填/误填暂停字段、引用/疑问/否定、修订暂停、普通任务仍可启动、独立只读步骤也被暂停、非法输出不执行，以及 HTTP 重复请求、显式继续、重启后继续。模型为脚本，工具为合成替身；这些是工程契约，不是模型准确率。
+
+当前前端实际通过 `/api/agent/runs` 代理到 `/api/v1/runs`。`pause_runs_contract` 另有 3 项检查，覆盖生产创建/读取运行 handler、公开状态、SSE 回答事件，以及继续按钮对应的 `/runs/{id}/resume`。检查断开事件流不触发执行、重复 POST 不重复创建、继续按钮和自然语言继续都只启动原搜索一次；不运行 React 页面或 Next 代理进程。
+
+真实模型定向复验从原冻结语料选择 `resume_search`，原句、预期条件及三次重复均不变。除了旧规划入口，额外跑三次 `/api/v1/chat → IntentRouter → AutoHuntAgent → AgentRuntime → watcher`。HTTP handler 从生产源码加载到隔离 ASGI app，不导入会打开用户数据库的应用全局对象；不包含生产启动、中间件或前端 UI。业务工具仍为合成替身，额外断言暂停期零工具调用/零审批、继续后参数不变、同一计划只启动一次搜索。
+
+```powershell
+# 仅在已有授权范围内接续；新输出目录，原预算账本，不重置额度。
+.venv/Scripts/python.exe -m evaluation.acceptance.pause --models-consented --call-limit 200 --budget evaluation/results/current-acceptance/model-20261116-v1/budget.json --output evaluation/results/current-acceptance/my-pause-rerun
+```
+
+`--budget` 必须指向已存在且额度一致的账本；所有请求在发送前预扣，失败/修复同样计入。该定向入口不能把历史 33 次成功与新 3 次成功拼成一次“36/36”。`chat-cases.jsonl` 留存实际 HTTP 回答、暂停前后计划、逐项断言、工具调用和运行事件。

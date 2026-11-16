@@ -42,7 +42,14 @@ async def run(data, output, model):
                                     checks = grade(h.plan, case["expected"][index])
                                     row["turns"].append({"message": message, "draft": copy.deepcopy(draft),
                                                          "plan": copy.deepcopy(h.plan), "checks": checks})
+                                    calls_before = len(h.calls)
                                     await advance(h.plan, h.registry)
+                                    # A matching plan flag alone is insufficient: audit effects.
+                                    if case["expected"][index].get("paused") is True:
+                                        checks["pause_no_tool_calls"] = len(h.calls) == calls_before
+                                        checks["pause_no_approvals"] = not h.store.approvals(h.run["id"])
+                                    if index and case["expected"][index-1].get("paused") is True and case["expected"][index].get("paused") is False:
+                                        checks["resume_search_once"] = sum(c["tool"] == "job_search_start" for c in h.calls) == 1
                                     h.store.save_plan(h.run["id"], h.plan)
                                     for step in h.plan.get("steps", []):
                                         if step["tool"] == "job_search_start":

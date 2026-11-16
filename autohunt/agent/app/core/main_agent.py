@@ -748,7 +748,7 @@ class AutoHuntAgent:
             # leave memory bound to the old request after that decision.
             task_request = capture_request(context.dialogue or {}, plan["original"], context.run_id, stamp, context.search_state or {})
             task_request.interpretation = "model"
-            task_request.status = "clarifying" if plan["questions"] else "running" if plan["steps"] else "finished"
+            task_request.status = "paused" if plan.get("paused") else "clarifying" if plan["questions"] else "running" if plan["steps"] else "finished"
             task_request.revoked_tools = plan.get("revoked_tools", [])
             task_request.conditions.update(plan.get("verified_conditions", {}))
             task_request.condition_overrides.update(plan.get("verified_conditions", {}))

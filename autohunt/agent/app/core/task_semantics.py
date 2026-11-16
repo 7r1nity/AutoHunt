@@ -129,6 +129,8 @@ def _kind(text: str, start: int, end: int, trigger: re.Match, tool: str) -> tupl
             return "revoked", "negated_control"
         prefix = _POLITE.sub("", before.strip()).strip()
         target = r"(?:一下|当前|本次|所有|全部|这个|正在执行的|正在运行的|搜索|检索|任务|执行|请求|投递|自动投递|沟通|浏览器任务|了|吧|。|！|!|\s)*"
+        if tool == "browser_task_pause":
+            target = target + r"(?:(?:先)?(?:不要|别|暂不)执行)?"
         if prefix or not re.fullmatch(target, after):
             return "unknown", "control_target_unresolved"
         return "command", "explicit_control"

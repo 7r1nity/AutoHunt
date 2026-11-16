@@ -42,6 +42,7 @@ class Strict(BaseModel):
 class RequestDraft(Strict):
     operation: Literal["execute", "revise"] = "execute"
     revision: dict | None = None
+    pause: bool = Field(default=False, description="新建任务先保存不执行时为true；已有任务使用revision.pause")
     continuation: bool = False
     goals: list[Goal] = Field(default_factory=list, max_length=MAX_PLAN_STEPS)
     steps: list[PlannedStep] = Field(default_factory=list, max_length=MAX_PLAN_STEPS)
@@ -179,7 +180,8 @@ async def plan_request(llm, registry, message: str, *, dialogue: dict, condition
             "active_plan的staged_arguments是已确认但暂未激活的最新条件；继续修改时继承它，不回退到旧arguments。"
             "取消尚未执行的单个分支用remove_steps中的原步骤ID，保留其他分支；已执行步骤只能引用其结果，不能删除或重放。"
             "steps也可提交新增步骤，应用会合并到add_steps；revision省略plan_id/expected_revision时使用当前任务。修改已有条件定位原未执行步骤，不另建同一动作。"
-            "先暂停添加条件、先改一下等修订设置pause=true，等待用户继续；纯暂停也可revision updates=[]。独立新任务仍operation=execute。"
+            "先暂停添加条件、先改一下等修订设置revision.pause=true，等待用户继续；纯暂停也可revision updates=[]。独立新任务仍operation=execute。"
+            "新建任务要求先暂停、先保存不执行或等用户继续时，顶层pause=true，仍完整保留待执行steps及条件；暂停不是取消搜索授权。不能仅在reply承诺暂停却让pause=false。"
             "待澄清计划不是所有新指令的归属：用户明确单独投递另一个岗位或独立移除时，优先execute，不修订不相关旧任务。"
             "用户回答旧追问且对象明确时，revision.questions=[]清除已解决的追问，并更新相关waiting_input步骤；不能只追加动作却保留旧阻塞。"
             "仅澄清或更正条件、没有要求执行或继续任务时，只用search_state_update保存条件并简短答复，不启动搜索或投递。"
@@ -305,6 +307,10 @@ def _validate_draft(draft: RequestDraft, registry, message: str, *, dialogue: di
     from .graph import bind_evidence, depend_on, deduplicate_mutations, wait_for_scope
     from .requests import is_continuation
 
+    # Explicit control language is a veto, never authority to execute. Share
+    # modality/quote checks with tool authorization even if the model omits it.
+    from ..core.task_semantics import understand
+    pause_requested = bool(understand(message).commands("browser_task_pause"))
     if draft.operation == "revise":
         from .revision import RevisionDraft, edited_plan
         context = active_run()
@@ -314,6 +320,8 @@ def _validate_draft(draft: RequestDraft, registry, message: str, *, dialogue: di
         if not target:
             raise PlanValidationError("missing_active_plan", "没有唯一可修改的执行中任务，请明确任务对象", category="clarify")
         revision = copy.deepcopy(draft.revision or {})
+        if pause_requested or draft.pause:
+            revision["pause"] = True
         revision.pop("scope_review",None)
         revision.setdefault("plan_id", target["id"])
         revision.setdefault("expected_revision", target.get("revision", 0))
@@ -629,6 +637,7 @@ def _validate_draft(draft: RequestDraft, registry, message: str, *, dialogue: di
     if any(goal["disposition"] == "unsupported" for goal in goals):
         questions.append(draft.reply or "有目标超出当前工具能力，请确认支持部分的执行范围。")
     from .validation import preflight_warnings
+    paused = bool(draft.pause or pause_requested or (continued and previous.get("paused")))
     return {"id": previous["id"] if continued else uuid.uuid4().hex, "original": original, "answers": answers,
         "condition_overrides": overrides, "verified_conditions": verified_conditions,
         "revoked_tools": revoked_tools, "understanding": {"source": "model", "goals": goals},
@@ -637,7 +646,7 @@ def _validate_draft(draft: RequestDraft, registry, message: str, *, dialogue: di
         "goals": goals, "steps": steps, "questions": list(dict.fromkeys(questions)), "reply": draft.reply,
         "resume_stamp": stamp, "turn": dialogue.get("turn", 0), "expires_at": time.time() + (600 if questions else 1800),
         "session_id": session_id, "revision": previous.get("revision", 0) if continued else 0,
-        "status": "clarifying" if questions else "ready"}
+        "paused": paused, "status": "paused" if paused else "clarifying" if questions else "ready"}
 
 
 async def _draft_with_repair(llm, request: LLMRequest, *, validator=None):

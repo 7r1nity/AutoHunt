@@ -1,0 +1,195 @@
+{
+  "date": "2026-11-16",
+  "baseline_commit": "fba6f757bb92a41fa98993956a652883dcf43dc0",
+  "scenario": "resume_search",
+  "frozen_corpus_sha256": "57c2c7ce638cb3e942fc16b7c44065afc7e2746903bcff3bb2b4225e9a032c55",
+  "prior_result": {
+    "trials": 3,
+    "pass": 0,
+    "fail": 3,
+    "artifact": "evaluation/results/current-acceptance/model-20261116-v1"
+  },
+  "production_source_sha256": {
+    "app/core/main_agent.py": "0457f2af32301435a99816df45c8b4948884793f30980971881453959eaf6d1b",
+    "app/core/task_semantics.py": "f913feefcd49abca07aa3c04c64cfca31b5731e27436c37608b59d197464d18b",
+    "app/workflow/planning.py": "c4f0c51c8d551ccc85af98bf087298d23c184a1a3e3490b8c86f8f290ff75cee",
+    "app/workflow/execution.py": "b2ce75712b2b8e50752f811555a395c711f29e7a8c6d73cf5d4181fe9e44b885"
+  },
+  "model_rerun": {
+    "planning": {
+      "planned_trials": 3,
+      "trials": 3,
+      "pass": 3,
+      "fail": 0,
+      "error": 0,
+      "not_run": 0,
+      "all_repetitions_pass": 1,
+      "independent_scenarios": 1,
+      "scope": "real model and production planner/revision/runtime; synthetic tools, not browser E2E"
+    },
+    "chat": {
+      "trials": 3,
+      "planned_trials": 3,
+      "pass": 3,
+      "fail": 0,
+      "error": 0,
+      "not_run": 0,
+      "scope": "production HTTP handler, router, agent, durable runtime and watcher; synthetic adapters; no app startup/middleware/UI"
+    },
+    "source_changed": false,
+    "physical_calls_this_run": 18,
+    "physical_calls_total": 145,
+    "consented_limit": 200,
+    "passed": true,
+    "artifact": "evaluation/results/current-acceptance/pause-20261116-v1",
+    "source_manifest_sha256": "684a064f5630aef3f14b167f169446ad74a192cda24913a06f0ad6907512c0b7",
+    "call_numbers": [
+      128,
+      129,
+      130,
+      131,
+      132,
+      133,
+      134,
+      135,
+      136,
+      137,
+      138,
+      139,
+      140,
+      141,
+      142,
+      143,
+      144,
+      145
+    ],
+    "response_model": "deepseek-flash",
+    "api_errors": 0,
+    "chat_checks": [
+      {
+        "repetition": 0,
+        "status": "pass",
+        "checks": {
+          "initial_one_search": true,
+          "initial_locations": true,
+          "initial_result_limit": true,
+          "initial_salary_scope": true,
+          "initial_no_delivery": true,
+          "initial_paused": true,
+          "paused_no_tools": true,
+          "paused_no_approvals": true,
+          "paused_no_mutation": true,
+          "response_says_paused": true,
+          "continued_one_search": true,
+          "continued_locations": true,
+          "continued_result_limit": true,
+          "continued_salary_scope": true,
+          "continued_no_delivery": true,
+          "continued_paused": true,
+          "same_plan": true,
+          "same_search_arguments": true,
+          "search_started_once": true,
+          "no_delivery": true
+        },
+        "adapter_tools": [
+          "job_search_start"
+        ]
+      },
+      {
+        "repetition": 1,
+        "status": "pass",
+        "checks": {
+          "initial_one_search": true,
+          "initial_locations": true,
+          "initial_result_limit": true,
+          "initial_salary_scope": true,
+          "initial_no_delivery": true,
+          "initial_paused": true,
+          "paused_no_tools": true,
+          "paused_no_approvals": true,
+          "paused_no_mutation": true,
+          "response_says_paused": true,
+          "continued_one_search": true,
+          "continued_locations": true,
+          "continued_result_limit": true,
+          "continued_salary_scope": true,
+          "continued_no_delivery": true,
+          "continued_paused": true,
+          "same_plan": true,
+          "same_search_arguments": true,
+          "search_started_once": true,
+          "no_delivery": true
+        },
+        "adapter_tools": [
+          "job_search_start"
+        ]
+      },
+      {
+        "repetition": 2,
+        "status": "pass",
+        "checks": {
+          "initial_one_search": true,
+          "initial_locations": true,
+          "initial_result_limit": true,
+          "initial_salary_scope": true,
+          "initial_no_delivery": true,
+          "initial_paused": true,
+          "paused_no_tools": true,
+          "paused_no_approvals": true,
+          "paused_no_mutation": true,
+          "response_says_paused": true,
+          "continued_one_search": true,
+          "continued_locations": true,
+          "continued_result_limit": true,
+          "continued_salary_scope": true,
+          "continued_no_delivery": true,
+          "continued_paused": true,
+          "same_plan": true,
+          "same_search_arguments": true,
+          "search_started_once": true,
+          "no_delivery": true
+        },
+        "adapter_tools": [
+          "job_search_start"
+        ]
+      }
+    ]
+  },
+  "offline_regression": {
+    "tests": 812,
+    "failures": 0,
+    "errors": 0,
+    "source_changed_during_run": [],
+    "external_model_calls": 0,
+    "artifact": "evaluation/results/context-ledger-regression/20261116T153051.405958Z",
+    "summary_sha256": "954ad5246ee8488b9b5ab7e207248408ae0af6950fdf2b1557fc2d6bfe1b2932"
+  },
+  "focused_contracts": {
+    "tests": 32,
+    "passed": true,
+    "includes_pause_contracts": 13,
+    "overlaps_offline_regression": true,
+    "artifact": "evaluation/results/pause-focused-v2.log"
+  },
+  "frontend_transport_contracts": {
+    "tests": 3,
+    "passed": true,
+    "external_model_calls": 0,
+    "module": "evaluation.pause_runs_contract",
+    "artifact": "evaluation/results/pause-runs.log",
+    "covers": [
+      "POST /api/v1/runs",
+      "GET /api/v1/runs/{id}",
+      "SSE response event and disconnect",
+      "POST /api/v1/runs/{id}/resume",
+      "duplicate POST",
+      "natural-language continuation"
+    ]
+  },
+  "limitations": [
+    "One known scenario repeated three times, not three independent scenarios.",
+    "Other eleven frozen scenarios were not rerun with the real model after this change.",
+    "Business adapters are synthetic; no recruitment website or real browser search/delivery.",
+    "HTTP handlers loaded from production source into isolated ASGI app; no application startup, middleware, React UI or Next proxy."
+  ]
+}
