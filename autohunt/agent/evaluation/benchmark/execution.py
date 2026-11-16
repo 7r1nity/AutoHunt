@@ -13,6 +13,7 @@ import json
 import socket
 import sqlite3
 import subprocess
+import sys
 import time
 import traceback
 from pathlib import Path
@@ -34,7 +35,7 @@ from evaluation.search_delivery_contract import job
 from evaluation.stateful_scenarios import Harness, STAMP
 from .common import CASE, ROOT, append, file_hash, percentile, write
 
-SITE=ROOT.parents[1]/"mock-site"
+SITE=ROOT/"evaluation/fixtures/job_site"
 VIRTUAL="http://127.0.0.1:8080"
 MUTATIONS={
     "button_moved":"document.querySelector('#resume-btn').style.cssText='position:fixed;top:25px;left:20px;z-index:9999'",
@@ -49,13 +50,15 @@ MUTATIONS={
 
 class IsolatedSite:
     async def start(self,output):
-        if not (SITE/".venv/Scripts/python.exe").is_file(): raise RuntimeError("Local unpublished simulator and its .venv are required")
+        if not (SITE/"app/main.py").is_file(): raise RuntimeError("Bundled evaluation site fixture is missing")
+        output = Path(output).resolve()
+        output.mkdir(parents=True, exist_ok=True)
         self.database=output/"site.sqlite.db"
         if self.database.exists(): raise ValueError("Never reuse a simulator database between benchmark phases")
         with socket.socket() as sock:
             sock.bind(("127.0.0.1",0)); self.port=sock.getsockname()[1]
         self.log=(output/"site-worker.log").open("w",encoding="utf-8")
-        self.process=subprocess.Popen([str(SITE/".venv/Scripts/python.exe"),str(Path(__file__).with_name("site_worker.py")),
+        self.process=subprocess.Popen([sys.executable,str(Path(__file__).with_name("site_worker.py")),
             "--site-root",str(SITE),"--database",str(self.database),"--port",str(self.port)],
             cwd=SITE,stdout=self.log,stderr=subprocess.STDOUT,creationflags=getattr(subprocess,"CREATE_NO_WINDOW",0))
         self.client=httpx.AsyncClient(base_url=f"http://127.0.0.1:{self.port}",trust_env=False,timeout=12,follow_redirects=False)
@@ -71,8 +74,12 @@ class IsolatedSite:
     async def close(self):
         if hasattr(self,"client"): await self.client.aclose()
         if hasattr(self,"process"):
-            self.process.terminate()
-            await asyncio.to_thread(self.process.wait,10)
+            if self.process.poll() is None:
+                self.process.terminate()
+                try: await asyncio.to_thread(self.process.wait,10)
+                except subprocess.TimeoutExpired:
+                    self.process.kill()
+                    await asyncio.to_thread(self.process.wait,10)
         if hasattr(self,"log"): self.log.close()
 
     async def create(self,trial):
@@ -263,7 +270,7 @@ async def trial(site,browser,case,method,repetition,output,model):
 
 async def run(data,output,model,repetitions=2,cases=None):
     site=IsolatedSite(); rows=[]
-    write(output/"execution-environment.json",{"site_source":"local_unpublished_mock_site","site_hashes":{str(p.relative_to(SITE)):file_hash(p) for p in SITE.rglob("*.py") if ".venv" not in p.parts and "__pycache__" not in p.parts},
+    write(output/"execution-environment.json",{"site_source":"bundled_synthetic_job_site","site_hashes":{str(p.relative_to(SITE)):file_hash(p) for p in SITE.rglob("*") if p.suffix in {".py", ".html", ".js", ".css"} and "__pycache__" not in p.parts},
         "scope":"real simulator HTTP/SQLite + real browser + production delivery queue/DOM adapter; browser CDP session injected; no UI upload/search coverage"})
     try:
         await site.start(output)

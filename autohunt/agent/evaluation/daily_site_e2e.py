@@ -44,7 +44,10 @@ async def until(check, *, timeout=60):
 async def run():
     started = time.monotonic()
     root = Path(__file__).resolve().parents[1]
-    output = root / "evaluation/results/daily-site-e2e" / datetime.now(UTC).strftime("%Y%m%dT%H%M%S.%fZ")
+    output = Path(os.environ.get("AUTOHUNT_ACCEPTANCE_UI_OUTPUT") or
+                  root / "evaluation/results/daily-site-e2e" / datetime.now(UTC).strftime("%Y%m%dT%H%M%S.%fZ")).resolve()
+    if output.parent != (root / "evaluation/results/daily-site-e2e").resolve() or output.exists() or not re.fullmatch(r"\d{8}T\d{6}\.\d+Z", output.name):
+        raise ValueError("Daily UI acceptance requires a new timestamp directory in evaluation/results/daily-site-e2e")
     output.mkdir(parents=True)
     token = "isolated-daily-" + os.urandom(18).hex()
     # Set before importing application configuration/dependencies. Never read .env.
@@ -89,7 +92,16 @@ async def run():
                 except PlaywrightError as exc:
                     if "closed" not in str(exc):
                         raise
-            await context.route("http://127.0.0.1:8080/**", forward)
+            allowed_ui_ports = set()
+            async def isolated_route(route):
+                parsed = urlsplit(route.request.url)
+                if parsed.hostname == "127.0.0.1" and parsed.port == 8080:
+                    await forward(route)
+                elif parsed.hostname == "127.0.0.1" and parsed.port in allowed_ui_ports:
+                    await route.continue_()
+                else:
+                    await route.abort()
+            await context.route("**/*", isolated_route)
             page = await context.new_page()
             await page.goto("http://127.0.0.1:8080/")
 
@@ -108,6 +120,7 @@ async def run():
             d.browser_service.session = Session()
 
             api_port, ui_port = port(), port()
+            allowed_ui_ports.update({api_port, ui_port})
             # Scheduler turns are driven explicitly below. Ordinary polling is
             # deliberately off so no background API can contact the user's site.
             server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=api_port,
@@ -257,8 +270,13 @@ async def run():
             # Publish a bounded summary, then load this exact report through the
             # real frontend history view. finally overwrites it if this check fails.
             (output / "summary.json").write_text(json.dumps({**report, "tests": 9, "failures": 0, "errors": 0}), encoding="utf-8")
-            await ui.get_by_role("button", name="历史评测", exact=True).click()
-            await ui.get_by_label("报告类别", exact=True).select_option("模拟站端到端")
+            expected_report_id = "local--daily-site-e2e--" + output.name
+            async with ui.expect_response(lambda response: response.url.endswith("/evaluation-reports/" + expected_report_id)) as loaded:
+                await ui.get_by_role("button", name="历史评测", exact=True).click()
+                await ui.get_by_label("报告类别", exact=True).select_option("模拟站端到端")
+            detail = await loaded.value
+            assert detail.status == 200 and (await detail.json())["id"] == expected_report_id
+            report["history_report_id"] = expected_report_id
             await ui.get_by_role("heading", name="每日任务模拟站端到端验收", exact=True).wait_for()
             await ui.get_by_text("验收通过", exact=True).wait_for()
             await ui.screenshot(path=str(output / "history.png"), full_page=True)
@@ -280,8 +298,15 @@ async def run():
         if server_task:
             await asyncio.wait_for(server_task, 15)
         if frontend:
-            subprocess.run(["taskkill", "/PID", str(frontend.pid), "/T", "/F"], stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            if os.name == "nt":
+                subprocess.run(["taskkill", "/PID", str(frontend.pid), "/T", "/F"], stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            elif frontend.poll() is None:
+                frontend.terminate()
+                try: await asyncio.to_thread(frontend.wait, 10)
+                except subprocess.TimeoutExpired:
+                    frontend.kill()
+                    await asyncio.to_thread(frontend.wait, 10)
             log.close()
         await site.close()
         report.update(tests=9, failures=0 if report["passed"] else 1, errors=0,

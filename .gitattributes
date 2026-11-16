@@ -1,0 +1,3 @@
+# Frozen acceptance corpus hashes must survive Windows checkout normalization.
+autohunt/agent/evaluation/corpora/current-acceptance-v1.json -text whitespace=cr-at-eol
+autohunt/agent/evaluation/corpora/current-acceptance-v1.sha256 text eol=lf

@@ -46,7 +46,7 @@
 
 ## 浏览器环境与边界
 
-模拟站已按用户要求停止随仓库分发。浏览器阶段要求本地单独保留兼容的 `mock-site/` 与其 `.venv`，其中需要 FastAPI、uvicorn、SQLAlchemy、aiosqlite。缺失时明确失败，不伪造浏览器通过。Agent 环境需安装 Playwright Chromium。
+2026-11-16 起，浏览器阶段使用随源码分发的 `evaluation/fixtures/job_site`，与 Agent 共用 `.[dev]` Python 环境，不依赖根目录未分发的 `mock-site/` 或其 `.venv`。安装和当前版本验收见[复现指南](../../../docs/current-acceptance.md)。Agent 环境需安装 Playwright Chromium。历史报告中的站点来源保持其原始记录，新实验单独记录夹具源码与页面哈希。
 
 `site_worker.py` 使用独立子进程、临时端口、`evaluation/results` 内新数据库，关闭批量 seed；不会启动现有 8080 站点或复用其数据库。浏览器的虚拟 8080 origin 全部路由到该独立站点，其它浏览器请求中止，service worker 禁用；不连接用户 CDP/profile。招聘方/求职者均为新建虚构账号。结束时仅关闭本次持有的浏览器与模拟站子进程。
 

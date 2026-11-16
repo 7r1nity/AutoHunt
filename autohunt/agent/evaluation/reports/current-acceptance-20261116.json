@@ -1,0 +1,231 @@
+{
+  "date": "2026-11-16",
+  "production_commit": "2beda92f3d8acedaf08c87bf98ce9c472e351508",
+  "dataset_sha256": "57c2c7ce638cb3e942fc16b7c44065afc7e2746903bcff3bb2b4225e9a032c55",
+  "label_source": "author task contracts; synthetic, not external human gold",
+  "planning": {
+    "planned_trials": 36,
+    "trials": 36,
+    "pass": 33,
+    "fail": 3,
+    "error": 0,
+    "not_run": 0,
+    "all_repetitions_pass": 11,
+    "independent_scenarios": 12,
+    "scope": "real model and production planner/revision/runtime; synthetic tools, not browser E2E",
+    "passed": false
+  },
+  "cases": [
+    {
+      "id": "city_preserves_floor",
+      "trials": 3,
+      "passed": 3,
+      "failed_checks": []
+    },
+    {
+      "id": "count_preserves_city",
+      "trials": 3,
+      "passed": 3,
+      "failed_checks": []
+    },
+    {
+      "id": "tighten_salary",
+      "trials": 3,
+      "passed": 3,
+      "failed_checks": []
+    },
+    {
+      "id": "explicit_relax_salary",
+      "trials": 3,
+      "passed": 3,
+      "failed_checks": []
+    },
+    {
+      "id": "replace_city_set",
+      "trials": 3,
+      "passed": 3,
+      "failed_checks": []
+    },
+    {
+      "id": "role_revision",
+      "trials": 3,
+      "passed": 3,
+      "failed_checks": []
+    },
+    {
+      "id": "quoted_instruction",
+      "trials": 3,
+      "passed": 3,
+      "failed_checks": []
+    },
+    {
+      "id": "pause_search",
+      "trials": 3,
+      "passed": 3,
+      "failed_checks": []
+    },
+    {
+      "id": "resume_search",
+      "trials": 3,
+      "passed": 0,
+      "failed_checks": [
+        {
+          "repetition": 0,
+          "turn": 1,
+          "checks": [
+            "paused"
+          ]
+        },
+        {
+          "repetition": 1,
+          "turn": 1,
+          "checks": [
+            "paused"
+          ]
+        },
+        {
+          "repetition": 2,
+          "turn": 1,
+          "checks": [
+            "paused"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "append_growth",
+      "trials": 3,
+      "passed": 3,
+      "failed_checks": []
+    },
+    {
+      "id": "withdraw_delivery",
+      "trials": 3,
+      "passed": 3,
+      "failed_checks": []
+    },
+    {
+      "id": "score_not_salary",
+      "trials": 3,
+      "passed": 3,
+      "failed_checks": []
+    }
+  ],
+  "browser": {
+    "passed": true,
+    "mode": "real_model",
+    "systems": {
+      "fixed_script": {
+        "trials": 9,
+        "successes": 9,
+        "recovery_successes": 3,
+        "recovery_trials": 3,
+        "backend_applications": 6,
+        "duplicate_records": 0,
+        "repeated_application_post_attempts": 0,
+        "submitted_without_prior_hr": 0,
+        "tool_outcomes": {},
+        "tool_ok_rate": null,
+        "original_verdict_changed": [],
+        "both_repetitions_passed": 3
+      },
+      "agent": {
+        "trials": 9,
+        "successes": 9,
+        "recovery_successes": 3,
+        "recovery_trials": 3,
+        "backend_applications": 6,
+        "duplicate_records": 0,
+        "repeated_application_post_attempts": 0,
+        "submitted_without_prior_hr": 0,
+        "tool_outcomes": {
+          "ok": 9
+        },
+        "tool_ok_rate": 1.0,
+        "original_verdict_changed": [],
+        "both_repetitions_passed": 3
+      }
+    },
+    "scope": "existing browser regression scenarios, not new task set or full UI E2E"
+  },
+  "contracts": {
+    "tests": 73,
+    "failures": 0,
+    "errors": 0
+  },
+  "cost": {
+    "physical_requests": 127,
+    "approved_ceiling": 200,
+    "api_errors": 0,
+    "model_names": [
+      "deepseek-flash"
+    ],
+    "prompt_tokens": 2952701,
+    "completion_tokens": 21948,
+    "total_tokens": 2974649
+  },
+  "source_changed_during_model_run": [],
+  "raw_artifacts": "evaluation/results/current-acceptance/model-20261116-v1",
+  "ui_initial_caveat": "Initial integrated UI loaded an older report: its history-report check is not valid evidence for this run. A corrected exact-ID clean-source rerun is recorded separately. Other eight checks were exercised on this run.",
+  "scope": "real model planner/revision/executor with synthetic tools; existing browser regression on bundled site; not full real-model UI E2E or real recruitment platform",
+  "clean_reproduction": {
+    "source": "git index export, no .env, old simulator, personal databases or browser profiles",
+    "python_environment": "new virtualenv with evaluation-constraints.txt",
+    "contracts": {
+      "exit_code": 0,
+      "passed": true,
+      "tests": 73
+    },
+    "browser": {
+      "passed": true,
+      "mode": "scripted_model",
+      "systems": {
+        "fixed_script": {
+          "trials": 3,
+          "successes": 3,
+          "recovery_successes": 1,
+          "recovery_trials": 1,
+          "backend_applications": 2,
+          "duplicate_records": 0,
+          "repeated_application_post_attempts": 0,
+          "submitted_without_prior_hr": 0,
+          "tool_outcomes": {},
+          "tool_ok_rate": null,
+          "original_verdict_changed": [],
+          "both_repetitions_passed": 3
+        },
+        "agent": {
+          "trials": 3,
+          "successes": 3,
+          "recovery_successes": 1,
+          "recovery_trials": 1,
+          "backend_applications": 2,
+          "duplicate_records": 0,
+          "repeated_application_post_attempts": 0,
+          "submitted_without_prior_hr": 0,
+          "tool_outcomes": {
+            "ok": 3
+          },
+          "tool_ok_rate": 1.0,
+          "original_verdict_changed": [],
+          "both_repetitions_passed": 3
+        }
+      },
+      "scope": "existing browser regression scenarios, not new task set or full UI E2E"
+    },
+    "daily_ui": {
+      "passed": true,
+      "tests": 9,
+      "failures": 0,
+      "errors": 0,
+      "external_model_calls": 0,
+      "real_browser_runs": 1,
+      "real_submissions": 1,
+      "duration_seconds": 26.703,
+      "history_report_id": "local--daily-site-e2e--20261116T151134.247435Z"
+    },
+    "changed_sources": [],
+    "external_model_calls": 0,
+    "summary_path": ".runtime/acceptance-clean/autohunt/agent/evaluation/results/acceptance/clean-source-final/summary.json"
+  }
+}
