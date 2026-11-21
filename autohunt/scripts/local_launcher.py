@@ -25,6 +25,8 @@ import urllib.request
 import webbrowser
 
 PROJECT = Path(__file__).resolve().parents[1]
+MOCK_SITE = PROJECT.parent / 'mock-site'
+MOCK_PORT = 8080  # Production delivery adapters intentionally allow only this local port.
 SCRIPT = Path(__file__).resolve()
 LOGS = PROJECT / '.runlogs' / 'launcher'
 STATE = LOGS / 'state.json'
@@ -132,15 +134,59 @@ def find_node():
     raise RuntimeError('未找到 Node.js，请安装 Node.js 20.9+，或设置 AUTOHUNT_NODE 指向 node.exe。')
 
 
-def prepare():
+def service_ports(args):
+    ports = {}
+    if args.services in ('all', 'mock'):
+        ports['mock'] = MOCK_PORT
+    if args.services in ('all', 'autohunt'):
+        ports.update(backend=args.backend_port, frontend=args.frontend_port)
+    if len(set(ports.values())) != len(ports) or not all(1024 <= p <= 65535 for p in ports.values()):
+        raise RuntimeError('服务端口必须不同，且位于 1024–65535；模拟站固定使用 8080。')
+    return ports
+
+
+def check_existing(state, args):
+    expected = service_ports(args)
+    # Old launcher records have no services field; never mistake them for a full stack.
+    actual = state.get('services', list(state.get('children', {})))
+    if set(actual) != set(expected) or set(state.get('children', {})) != set(expected) or any(
+        state.get(name + '_port') != port for name, port in expected.items()
+    ):
+        raise RuntimeError('现有实例的服务或端口不同，请先运行 stop-local.cmd，再按需要重新启动。')
+
+
+def prepare_mock():
+    requirements = MOCK_SITE / 'requirements.txt'
+    if not requirements.is_file() or not (MOCK_SITE / 'app' / 'main.py').is_file():
+        raise RuntimeError('缺少 mock-site 源码，请使用包含完整模拟站的仓库版本。')
+    fingerprint = hashlib.sha256(requirements.read_bytes()).hexdigest()
+    stamp = LOGS / 'mock-dependencies.json'
+    try:
+        old = json.loads(stamp.read_text())['fingerprint']
+    except (OSError, ValueError, KeyError):
+        old = None
+    probe = 'import fastapi, uvicorn, sqlalchemy, aiosqlite, greenlet, httpx, pydantic, multipart'
+    ready = subprocess.run([str(PYTHON), '-c', probe], stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL).returncode == 0
+    if not ready or old != fingerprint:
+        say('准备模拟招聘网站依赖…')
+        run_checked([PYTHON, '-m', 'pip', 'install', '-r', requirements])
+    write_json(stamp, {'fingerprint': fingerprint})
+
+
+def prepare(services='all'):
     if sys.version_info < (3, 12):
         raise RuntimeError('需要 Python 3.12 或更高版本。')
-    node = find_node()
-    # Child tools need the selected Node on PATH, including when supplied explicitly.
-    os.environ['PATH'] = str(Path(node).parent) + os.pathsep + os.environ.get('PATH', '')
     if not PYTHON.is_file():
         say('首次启动：创建 Python 虚拟环境…')
         run_checked([sys.executable, '-m', 'venv', PYTHON.parents[1]])
+    if services in ('all', 'mock'):
+        prepare_mock()
+    if services == 'mock':
+        return ''  # Standalone mock site does not require Node, Chromium or Agent config.
+    node = find_node()
+    # Child tools need the selected Node on PATH, including when supplied explicitly.
+    os.environ['PATH'] = str(Path(node).parent) + os.pathsep + os.environ.get('PATH', '')
     fingerprint_files = [PROJECT / 'agent' / 'pyproject.toml', PROJECT / 'pnpm-lock.yaml',
                          PROJECT / 'frontend' / 'package.json', PROJECT / 'package.json']
     fingerprint = hashlib.sha256(b''.join(p.read_bytes() for p in fingerprint_files)).hexdigest()
@@ -214,21 +260,25 @@ def local_json(url, token=None):
         return json.load(response)
 
 
-def wait_ready(url, child, stop, token=None, timeout=120):
+def wait_ready(url, child, stop, token=None, timeout=120, service='backend'):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if child.poll() is not None:
-            raise RuntimeError('服务提前退出，请查看 backend.log / frontend.log。')
+            raise RuntimeError(f'{service} 服务提前退出，请查看 {service}.log。')
         if stop.exists():
             raise RuntimeError('启动已取消。')
         try:
             value = local_json(url, token)
-            if isinstance(value, dict) and all(key in value for key in ('discovered', 'stored', 'applying')):
-                return
+            if isinstance(value, dict):
+                if service == 'mock':
+                    if value.get('service') == 'autohunt-mock-site' and value.get('status') == 'ok':
+                        return
+                elif all(key in value for key in ('discovered', 'stored', 'applying')):
+                    return
         except (OSError, ValueError):
             pass
         time.sleep(.5)
-    raise RuntimeError('服务健康检查超时，请查看日志。')
+    raise RuntimeError(f'{service} 服务健康检查超时，请查看日志。')
 
 
 def kill_owned(record):
@@ -239,13 +289,26 @@ def kill_owned(record):
 
 
 def shutdown_children(children, stop):
+    # The Agent drains first; its last reconciliation may still need the mock site.
     stop.touch(exist_ok=True)
-    backend = next((p for name, p, _ in children if name == 'backend'), None)
-    if backend:
-        try:
-            backend.wait(timeout=35)
-        except subprocess.TimeoutExpired:
-            say('后端正常退出超时，将关闭本启动器的进程；未完成任务由现有恢复机制处理。')
+    for name, process, record in children:
+        if name == 'backend':
+            try:
+                process.wait(timeout=35)
+            except subprocess.TimeoutExpired:
+                say('后端正常退出超时，将关闭本启动器的进程；未完成任务由现有恢复机制处理。')
+                kill_owned(record)
+                try:
+                    process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    pass
+    stop.with_suffix('.mock.stop').touch(exist_ok=True)
+    for name, process, _ in children:
+        if name == 'mock':
+            try:
+                process.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                say('模拟站正常退出超时，将关闭本启动器的模拟站进程。')
     for _, process, record in reversed(children):
         kill_owned(record)
         try:
@@ -254,13 +317,19 @@ def shutdown_children(children, stop):
             pass
 
 
-async def backend_worker(stop, port):
+async def backend_worker(stop, port, service='backend'):
     import uvicorn
-    from dotenv import load_dotenv
-    load_dotenv(PROJECT / 'agent' / '.env', override=False, encoding='utf-8-sig')
-    sys.path.insert(0, str(PROJECT / 'agent'))
+    if service == 'mock':
+        sys.path.insert(0, str(MOCK_SITE))
+        # An unrelated inherited DATABASE_URL must never select another application's DB.
+        os.environ['DATABASE_URL'] = os.environ.get('AUTOHUNT_MOCK_DATABASE_URL') or (
+            'sqlite+aiosqlite:///' + (MOCK_SITE / 'job_site.db').as_posix())
+    else:
+        from dotenv import load_dotenv
+        load_dotenv(PROJECT / 'agent' / '.env', override=False, encoding='utf-8-sig')
+        sys.path.insert(0, str(PROJECT / 'agent'))
     server = uvicorn.Server(uvicorn.Config('app.main:app', host='127.0.0.1', port=port,
-                                          timeout_graceful_shutdown=20))
+                                          timeout_graceful_shutdown=20 if service == 'backend' else 10))
     async def watch():
         while not stop.exists():
             await asyncio.sleep(.25)
@@ -268,36 +337,46 @@ async def backend_worker(stop, port):
     watcher = asyncio.create_task(watch())
     try:
         await server.serve()
+        if not server.started:
+            raise RuntimeError(f'{service} 服务未成功启动。')
     finally:
         watcher.cancel()
 
 
 def supervise(args):
     stop = LOGS / (args.instance + '.stop')
+    ports = service_ports(args)
     state = {'instance': args.instance, 'supervisor': identity(os.getpid()), 'phase': 'starting',
-             'url': f'http://127.0.0.1:{args.frontend_port}', 'backend_port': args.backend_port,
-             'frontend_port': args.frontend_port, 'children': {}}
+             'url': f'http://127.0.0.1:{MOCK_PORT if args.services == "mock" else args.frontend_port}',
+             'services': list(ports), 'children': {},
+             **{name + '_port': port for name, port in ports.items()}}
+    if 'mock' in ports:
+        state['mock_url'] = f'http://127.0.0.1:{MOCK_PORT}'
     write_json(STATE, state)
     children = []
     phase, error = 'stopped', None
     try:
-        backend, _ = configure()
+        backend = configure()[0] if args.services != 'mock' else {}
         env = os.environ.copy()
         # Match authentication and endpoints, including port overrides, only in
         # child environments. Existing user configuration is never overwritten.
-        env.update(AUTOHUNT_API_KEY=backend['AUTOHUNT_API_KEY'],
-                   AUTOHUNT_BACKEND_TOKEN=backend['AUTOHUNT_API_KEY'],
-                   AUTOHUNT_BACKEND_URL=f'http://127.0.0.1:{args.backend_port}',
-                   AUTOHUNT_ALLOWED_ORIGINS=f'http://127.0.0.1:{args.frontend_port},http://localhost:{args.frontend_port}',
-                   PYTHONUTF8='1', NEXT_TELEMETRY_DISABLED='1')
+        env.update(PYTHONUTF8='1', NEXT_TELEMETRY_DISABLED='1')
+        if backend:
+            env.update(AUTOHUNT_API_KEY=backend['AUTOHUNT_API_KEY'],
+                       AUTOHUNT_BACKEND_TOKEN=backend['AUTOHUNT_API_KEY'],
+                       AUTOHUNT_BACKEND_URL=f'http://127.0.0.1:{args.backend_port}',
+                       AUTOHUNT_ALLOWED_ORIGINS=f'http://127.0.0.1:{args.frontend_port},http://localhost:{args.frontend_port}')
         commands = [
+            ('mock', [str(PYTHON), str(SCRIPT), 'mock', '--instance', args.instance], MOCK_SITE),
             ('backend', [str(PYTHON), str(SCRIPT), 'backend', '--instance', args.instance,
                          '--backend-port', str(args.backend_port)], PROJECT / 'agent'),
             ('frontend', [args.node, str(NEXT), 'dev', '--webpack', '--hostname', '127.0.0.1',
                           '--port', str(args.frontend_port)], PROJECT / 'frontend'),
         ]
         for name, command, cwd in commands:
-            available_port(args.backend_port if name == 'backend' else args.frontend_port)
+            if name not in ports:
+                continue
+            available_port(ports[name])
             with (LOGS / f'{name}.log').open('ab') as log:
                 process = subprocess.Popen(command, cwd=cwd, env=env, stdout=log, stderr=log,
                                            stdin=subprocess.DEVNULL, creationflags=HIDDEN)
@@ -305,8 +384,11 @@ def supervise(args):
             children.append((name, process, record))
             state['children'][name] = record
             write_json(STATE, state)
-            path = f'http://127.0.0.1:{args.backend_port}/api/v1/automation/stats' if name == 'backend' else state['url'] + '/api/agent/stats'
-            wait_ready(path, process, stop, backend['AUTOHUNT_API_KEY'] if name == 'backend' else None)
+            paths = {'mock': f'http://127.0.0.1:{MOCK_PORT}/api/health',
+                     'backend': f'http://127.0.0.1:{args.backend_port}/api/v1/automation/stats',
+                     'frontend': state['url'] + '/api/agent/stats'}
+            wait_ready(paths[name], process, stop,
+                       backend['AUTOHUNT_API_KEY'] if name == 'backend' else None, service=name)
         state['phase'] = 'ready'
         write_json(STATE, state)
         while not stop.exists():
@@ -323,6 +405,7 @@ def supervise(args):
         state.update(phase=phase, error=error)
         write_json(STATE, state)
         stop.unlink(missing_ok=True)
+        stop.with_suffix('.mock.stop').unlink(missing_ok=True)
 
 
 def stop_current(state):
@@ -332,7 +415,7 @@ def stop_current(state):
     if owned_process(state.get('supervisor', {})):
         (LOGS / (state['instance'] + '.stop')).touch()
         say('正在关闭服务并保存任务状态…')
-        deadline = time.monotonic() + 55
+        deadline = time.monotonic() + 100
         while time.monotonic() < deadline and owned_process(state['supervisor']):
             time.sleep(.5)
         if owned_process(state['supervisor']):
@@ -345,7 +428,8 @@ def stop_current(state):
 
 def main():
     parser = argparse.ArgumentParser(description='AutoHunt Windows local launcher')
-    parser.add_argument('action', choices=['start', 'stop', 'status', 'prepare', 'supervise', 'backend'])
+    parser.add_argument('action', choices=['start', 'stop', 'status', 'prepare', 'supervise', 'backend', 'mock'])
+    parser.add_argument('--services', choices=['all', 'autohunt', 'mock'], default='all')
     parser.add_argument('--backend-port', type=int, default=8000)
     parser.add_argument('--frontend-port', type=int, default=3000)
     parser.add_argument('--no-browser', action='store_true')
@@ -354,8 +438,10 @@ def main():
     args = parser.parse_args()
     if os.name != 'nt':
         raise RuntimeError('此启动器面向 Windows。其他系统请使用 README 中的手动命令。')
-    if args.action == 'backend':
-        asyncio.run(backend_worker(LOGS / (args.instance + '.stop'), args.backend_port))
+    if args.action in ('backend', 'mock'):
+        suffix = '.mock.stop' if args.action == 'mock' else '.stop'
+        port = MOCK_PORT if args.action == 'mock' else args.backend_port
+        asyncio.run(backend_worker(LOGS / (args.instance + suffix), port, args.action))
         return
     if args.action == 'supervise':
         supervise(args)
@@ -364,6 +450,8 @@ def main():
         state = read_state()
         if args.action == 'status':
             say(f"状态：{state.get('phase', 'not_started')}；管理进程在线：{owned_process(state.get('supervisor', {}))}")
+            for name, record in state.get('children', {}).items():
+                say(f'{name}：端口 {state.get(name + "_port", "未知")}；在线：{owned_process(record)}')
             say(f'日志目录：{LOGS}')
             return
         if args.action == 'stop':
@@ -372,39 +460,45 @@ def main():
         if owned_process(state.get('supervisor', {})):
             if state.get('phase') != 'ready':
                 raise RuntimeError('服务仍在启动或停止中，请稍后重试。')
-            say(f"AutoHunt 已启动：{state['url']}")
+            check_existing(state, args)
+            if not all(owned_process(record) for record in state.get('children', {}).values()):
+                raise RuntimeError('实例中有服务退出，请先运行 stop-local.cmd，再重新启动。')
+            say(f"服务已启动：{state['url']}")
             if not args.no_browser:
                 webbrowser.open(state['url'])
             return
         if any(owned_process(r) for r in state.get('children', {}).values()):
             raise RuntimeError('检测到上次启动遗留的服务，请先运行 stop-local.cmd，再重新启动。')
-        if args.backend_port == args.frontend_port or not all(1024 <= p <= 65535 for p in (args.backend_port, args.frontend_port)):
-            raise RuntimeError('前后端端口必须不同，且位于 1024–65535。')
-        available_port(args.backend_port)
-        available_port(args.frontend_port)
-        node = prepare()
+        ports = service_ports(args)
+        if args.action != 'prepare':
+            for port in ports.values():
+                available_port(port)
+        node = prepare(args.services)
         # Re-enter in the project venv after bootstrap; no dependency on global dotenv.
         if Path(sys.executable).resolve() != PYTHON.resolve():
             lock.close()
             run_checked([PYTHON, SCRIPT, *sys.argv[1:]])
             return
-        configure()
+        if args.services != 'mock':
+            configure()
         if args.action == 'prepare':
             say('环境已准备完成。')
             return
         instance = secrets.token_hex(12)
-        command = [str(PYTHON), str(SCRIPT), 'supervise', '--instance', instance, '--node', node,
+        command = [str(PYTHON), str(SCRIPT), 'supervise', '--instance', instance, '--node', node, '--services', args.services,
                    '--backend-port', str(args.backend_port), '--frontend-port', str(args.frontend_port)]
         with (LOGS / 'supervisor.log').open('ab') as log:
             process = subprocess.Popen(command, cwd=PROJECT, stdout=log, stderr=log,
                                        stdin=subprocess.DEVNULL, creationflags=HIDDEN)
-        say('正在启动后端与工作台，首次页面编译可能需要一两分钟…')
-        deadline = time.monotonic() + 270
+        say('正在启动服务并检查就绪状态，首次初始化可能需要几分钟…')
+        deadline = time.monotonic() + 390
         while time.monotonic() < deadline:
             state = read_state()
             if state.get('instance') == instance:
                 if state.get('phase') == 'ready':
-                    say(f"AutoHunt 已就绪：{state['url']}")
+                    say(f"服务已就绪：{state['url']}")
+                    if state.get('mock_url') and args.services != 'mock':
+                        say(f"模拟招聘网站：{state['mock_url']}")
                     say(f'日志：{LOGS}\n关闭服务：双击仓库根目录 stop-local.cmd')
                     if not args.no_browser:
                         webbrowser.open(state['url'])

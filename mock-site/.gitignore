@@ -1,0 +1,26 @@
+# Publish only source. New runtime files are ignored by default.
+/*
+!/.gitignore
+!/README.md
+!/requirements.txt
+!/start-local.cmd
+!/stop-local.cmd
+!/app/
+!/common/
+!/frontend/
+/app/**
+!/app/**/
+!/app/**/*.py
+/common/**
+!/common/**/
+!/common/**/*.py
+/frontend/**
+!/frontend/**/
+!/frontend/**/*.html
+!/frontend/**/*.css
+!/frontend/**/*.js
+__pycache__/
+*.py[cod]
+.env*
+*.db*
+*.sqlite*

@@ -1,3 +1,7 @@
 # Frozen acceptance corpus hashes must survive Windows checkout normalization.
 autohunt/agent/evaluation/corpora/current-acceptance-v1.json -text whitespace=cr-at-eol
 autohunt/agent/evaluation/corpora/current-acceptance-v1.sha256 text eol=lf
+
+# Normalize simulator source; keep Windows launchers native on checkout.
+mock-site/** text=auto
+mock-site/*.cmd text eol=crlf

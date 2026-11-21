@@ -6,4 +6,4 @@ No account inventory, seeds, credentials, profiles, databases, or runtime histor
 The harness creates fictional records in a fresh SQLite database on a random loopback port.
 Header identity and displayed demo MFA are test conveniences, not production authentication.
 Start only through `evaluation.benchmark.execution.IsolatedSite` / `site_worker`.
-The separate unpublished `mock-site/` directory is neither required nor modified.
+The separate full `mock-site/` simulator is neither required nor modified.

@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>直聊招聘 · 好工作直接聊</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+  <header class="topbar"><div class="topbar-inner">
+    <a class="logo" href="/"><span>直聊</span>招聘</a>
+    <button class="city-trigger" onclick="focusCity()"><span class="pin">●</span><b id="current-city">全国</b><small>切换</small></button>
+    <nav><a class="active" href="/">首页</a><a href="#job-section">职位</a><a href="/applicant.html">求职中心</a><a href="/messages.html">消息</a><a href="/employer.html">招聘中心</a></nav>
+    <div class="top-actions"><a href="/employer.html">我要招聘</a><button id="login-button" class="outline-btn" onclick="openLogin()">登录 / 注册</button></div>
+  </div></header>
+  <main>
+    <section class="hero">
+      <div class="hero-copy"><span class="eyebrow">人才与机会，高效连接</span><h1>好工作，<em>直接聊</em></h1><p>不用等待冗长流程，和招聘负责人在线沟通，找到更适合你的下一站。</p></div>
+      <div class="search-shell">
+        <select id="city" aria-label="城市"><option value="">全国</option></select>
+        <select id="category" aria-label="职位类型"><option value="">职位类型</option></select>
+        <div class="search-input"><span>⌕</span><input id="keyword" placeholder="搜索职位、公司或技能"></div>
+        <button class="search-btn" onclick="loadJobs(1)">搜索职位</button>
+      </div>
+      <div id="hot" class="hot-search"><span>热门搜索</span></div>
+      <div class="hero-metrics"><div><b id="metric-jobs">--</b><span>正在招聘职位</span></div><div><b id="metric-companies">--</b><span>优质企业</span></div><div><b>实时</b><span>招聘方在线沟通</span></div></div>
+    </section>
+    <section class="job-section" id="job-section">
+      <div class="section-heading"><div><span class="eyebrow">RECOMMENDED JOBS</span><h2>热门职位</h2></div><span id="result-count" class="muted"></span></div>
+      <div id="category-chips" class="chips"><button class="active" data-value="">全部职位</button></div>
+      <div id="jobs" class="jobs-grid"></div><div class="pagination" id="pagination"></div>
+    </section>
+  </main>
+  <div class="modal" id="login-modal" aria-hidden="true"><div class="modal-card auth-card">
+    <button class="modal-close" onclick="closeLogin()">×</button><div class="auth-mark">直聊</div><h2>登录直聊招聘</h2><p class="muted">登录后即可与招聘方直接沟通</p>
+    <div class="role-switch"><button class="active" data-role="applicant">我要找工作</button><button data-role="employer">我要招聘</button></div>
+    <label>邮箱</label><input id="auth-email" type="email" placeholder="请输入邮箱"><label>姓名 / 昵称</label><input id="auth-name" placeholder="请输入姓名">
+    <div id="company-field" style="display:none"><label>公司名称</label><input id="auth-company" placeholder="请输入公司名称"></div>
+    <div id="mfa-row" style="display:none"><label>MFA 验证码</label><div class="code-row"><input id="auth-code" inputmode="numeric" maxlength="6" placeholder="6 位验证码"><button class="secondary" onclick="sendCode()">重新获取</button></div><p id="demo-code" class="demo-code"></p></div>
+    <button id="auth-submit" class="primary-wide" onclick="startLogin()">获取验证码</button><p class="auth-note">这是模拟 MFA 流程，验证码会显示在本页，不会发送真实邮件。</p>
+  </div></div>
+  <script src="/static/js/api.js"></script>
+  <script>
+    let currentPage=1,authRole='applicant',challengeId='';
+    async function init(){updateLoginState();try{const s=await getStats();metric('metric-jobs',s.open_jobs.toLocaleString());metric('metric-companies',s.total_companies);fillSelect('city',s.by_city,'city');fillSelect('category',s.by_category,'category');const cats=s.by_category.slice(0,9);document.getElementById('category-chips').innerHTML='<button class="active" data-value="">全部职位</button>'+cats.map(x=>`<button data-value="${escapeHtml(x.category)}">${escapeHtml(x.category)}</button>`).join('');document.getElementById('category-chips').onclick=e=>{if(e.target.tagName!=='BUTTON')return;document.querySelectorAll('.chips button').forEach(b=>b.classList.remove('active'));e.target.classList.add('active');document.getElementById('category').value=e.target.dataset.value;loadJobs(1)};document.getElementById('hot').innerHTML+=s.top_skills.slice(0,6).map(x=>`<button onclick="searchHot('${escapeHtml(x.skill)}')">${escapeHtml(x.skill)}</button>`).join('')}catch(e){toast('筛选数据加载失败：'+e.message)}loadJobs(1)}
+    function metric(id,v){document.getElementById(id).textContent=v} function fillSelect(id,items,key){const s=document.getElementById(id);items.forEach(x=>s.insertAdjacentHTML('beforeend',`<option value="${escapeHtml(x[key])}">${escapeHtml(x[key])} · ${x.count}</option>`))} function focusCity(){document.getElementById('city').focus()} function searchHot(v){document.getElementById('keyword').value=v;loadJobs(1)}
+    async function loadJobs(page){document.getElementById('result-count').textContent='搜索中…';currentPage=page;const city=document.getElementById('city').value;document.getElementById('current-city').textContent=city||'全国';try{const d=await getJobs({page,page_size:12,keyword:document.getElementById('keyword').value.trim(),category:document.getElementById('category').value,city,status:'open'});renderJobs(d.items);renderPagination(d.total,d.page,d.page_size);document.getElementById('result-count').textContent=`为你找到 ${d.total} 个职位`}catch(e){toast('加载职位失败：'+e.message)}}
+    function renderJobs(items){const box=document.getElementById('jobs');if(!items.length){box.innerHTML='<div class="empty-state">没有找到匹配的职位，换个条件试试吧</div>';return}box.innerHTML=items.map((j,i)=>`<article class="modern-job-card" onclick="location.href='/job.html?id=${j.id}'"><div class="job-card-top"><div><h3>${escapeHtml(j.title)}</h3><p>${escapeHtml(j.city)} · ${escapeHtml(j.experience_required)} · ${escapeHtml(j.education)}</p></div><strong class="salary">${escapeHtml(formatSalary(j))}</strong></div><div class="job-tags">${(j.skills||[]).slice(0,3).map(s=>`<span>${escapeHtml(s)}</span>`).join('')}</div><div class="company-line"><span class="company-avatar c${i%5}">${escapeHtml(j.company_name.slice(0,1))}</span><div><b>${escapeHtml(j.company_name)}</b><small>${escapeHtml(j.category)} · ${escapeHtml(j.department)}</small></div><span class="online-dot">招聘中</span></div></article>`).join('')}
+    function renderPagination(total,page,ps){
+      const pages=Math.max(1,Math.ceil(total/ps)),visible=new Set([1,pages]);
+      for(let i=Math.max(1,page-2);i<=Math.min(pages,page+2);i++)visible.add(i);
+      const nums=[...visible].sort((a,b)=>a-b);
+      let h=`<button class="page-arrow" ${page<=1?'disabled':''} onclick="loadJobs(${page-1})" aria-label="上一页">‹</button>`;
+      nums.forEach((n,i)=>{if(i&&n-nums[i-1]>1)h+='<span class="page-ellipsis">…</span>';h+=`<button class="${n===page?'active':''}" onclick="loadJobs(${n})" aria-current="${n===page?'page':'false'}">${n}</button>`});
+      h+=`<button class="page-arrow" ${page>=pages?'disabled':''} onclick="loadJobs(${page+1})" aria-label="下一页">›</button><span class="page-summary">第 ${page} / ${pages} 页 · 共 ${total} 个职位</span>`;
+      document.getElementById('pagination').innerHTML=h;
+    }
+    function openLogin(){document.getElementById('login-modal').classList.add('open')} function closeLogin(){document.getElementById('login-modal').classList.remove('open')} function updateLoginState(){const id=getIdentity(),b=document.getElementById('login-button');if(id.userId){b.textContent=`${id.userRole==='employer'?'招聘方':'求职者'} #${id.userId} · 退出`;b.onclick=()=>{clearIdentity();location.reload()}}}
+    document.querySelector('.role-switch').onclick=e=>{if(e.target.tagName!=='BUTTON')return;document.querySelectorAll('.role-switch button').forEach(b=>b.classList.remove('active'));e.target.classList.add('active');authRole=e.target.dataset.role;document.getElementById('company-field').style.display=authRole==='employer'?'block':'none'};
+    async function sendCode(){const email=document.getElementById('auth-email').value.trim();if(!email)return toast('请先填写邮箱');try{const r=await requestMfa(email);challengeId=r.challenge_id;document.getElementById('mfa-row').style.display='block';document.getElementById('demo-code').textContent=`模拟验证码：${r.demo_code}（5 分钟内有效）`;document.getElementById('auth-submit').textContent='验证并登录'}catch(e){toast(e.message)}}
+    async function startLogin(){if(!challengeId){await sendCode();return}const email=document.getElementById('auth-email').value.trim(),name=document.getElementById('auth-name').value.trim()||(authRole==='employer'?'招聘负责人':'求职者');try{await verifyMfa(challengeId,document.getElementById('auth-code').value.trim());const u=await registerUser(authRole,name,email,null,document.getElementById('auth-company').value.trim()||null);setIdentity(u.id,authRole);toast('MFA 验证成功，欢迎回来');closeLogin();updateLoginState()}catch(e){toast('登录失败：'+e.message)}}
+    document.getElementById('keyword').addEventListener('keydown',e=>{if(e.key==='Enter')loadJobs(1)});document.getElementById('city').addEventListener('change',()=>loadJobs(1));document.getElementById('category').addEventListener('change',()=>loadJobs(1));init();
+  </script>
+</body></html>

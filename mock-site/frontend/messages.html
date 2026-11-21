@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>消息 · 直聊招聘</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+  <link rel="stylesheet" href="/static/css/messages.css">
+  <style>.message-empty[hidden]{display:none!important}</style>
+</head>
+<body class="messages-page">
+<header class="messages-topbar"><div class="messages-topbar-inner">
+  <a class="messages-logo" href="/"><span>直聊</span>招聘</a>
+  <nav><a href="/">首页</a><a href="/">职位</a><a href="/applicant.html">求职中心</a><a href="/employer-messages.html">招聘方消息</a></nav>
+  <div class="messages-account"><a class="active" href="/messages.html">消息 <b id="nav-unread"></b></a><a href="/applicant.html">简历</a><button id="account-button" class="account-button" onclick="openAuth()">登录 / 注册</button></div>
+</div></header>
+
+<main class="messages-shell" data-testid="message-workspace">
+  <aside class="conversation-pane">
+    <div class="conversation-search"><input id="conversation-search" aria-label="搜索联系人" placeholder="搜索联系人、公司或职位" oninput="renderConversations()"><span>?</span></div>
+    <div class="conversation-tabs" role="tablist"><button class="active" data-filter="all">全部</button><button data-filter="unread">未读</button><button data-filter="new">新招呼</button><button data-filter="applied">已投递</button></div>
+    <div id="conversation-list" class="conversation-list" data-testid="conversation-list"><div class="conversation-placeholder">登录后查看会话</div></div>
+  </aside>
+  <section class="message-pane">
+    <div id="message-empty" class="message-empty"><div class="empty-icon">?</div><h2>选择一条会话</h2><p>招聘方回复、投递进度和简历发送记录会集中显示在这里。</p></div>
+    <div id="message-workspace" class="message-workspace" hidden>
+      <header class="chat-profile"><div class="profile-avatar" id="profile-avatar">HR</div><div class="profile-main"><div class="profile-line"><h2 id="profile-name">招聘负责人</h2><span class="online-badge">● 在线</span></div><p id="profile-company">招聘方 · 在线沟通</p></div><button class="more-button" aria-label="更多">??? 更多</button></header>
+      <a id="job-strip" class="job-strip" href="#" data-testid="conversation-job"><div><b id="job-title">职位名称</b><span id="job-meta"></span></div><strong id="job-salary"></strong><span>查看职位 ?</span></a>
+      <div id="message-list" class="message-list" data-testid="message-list"></div>
+      <div id="resume-action" class="resume-action" data-testid="resume-gate">
+        <div class="resume-action-copy"><span id="resume-lock">??</span><div><b id="resume-title">等待招聘方回复</b><small id="resume-description">招聘方回复后才可以发送简历</small></div></div>
+        <select id="resume-select" aria-label="选择简历" disabled></select><button id="resume-send" onclick="sendResume()" disabled>发简历</button><button id="phone-exchange" class="ghost-action" onclick="sendExchange('电话')">换电话</button><button id="wechat-exchange" class="ghost-action" onclick="sendExchange('微信')">换微信</button>
+      </div>
+      <div class="message-composer"><textarea id="message-input" rows="3" placeholder="输入消息，与招聘方沟通…" data-testid="message-input"></textarea><div><span>Enter 发送，Shift + Enter 换行</span><button id="message-send" onclick="sendCurrentMessage()" data-testid="message-send">发送</button></div></div>
+    </div>
+  </section>
+</main>
+
+<div class="modal" id="auth-modal" aria-hidden="true"><div class="modal-card auth-card">
+  <button class="modal-close" onclick="closeAuth()">×</button><div class="auth-mark">直聊</div><h2>登录后查看消息</h2><p class="muted">使用求职者账号完成模拟 MFA</p>
+  <label>邮箱</label><input id="auth-email" type="email" value="ai_applicant@example.com"><label>姓名 / 昵称</label><input id="auth-name" value="AI求职者">
+  <div id="mfa-row" hidden><label>MFA 验证码</label><input id="auth-code" inputmode="numeric" maxlength="6" placeholder="请输入 6 位验证码"><p id="demo-code" class="demo-code"></p></div>
+  <button id="auth-submit" class="primary-wide" onclick="authStep()">获取验证码</button><p class="auth-note">模拟验证码只显示在本页，不会发送真实邮件。</p>
+</div></div>
+
+<script src="/static/js/api.js?v=20261009-delivery-1"></script>
+<script>
+let conversations=[],resumes=[],applications=[],selected=null,selectedJob=null,selectedMessages=[],activeFilter='all',challengeId='',pollTimer=null;
+
+async function init(){
+  bindFilters();
+  document.getElementById('message-input').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendCurrentMessage()}});
+  const id=getIdentity();
+  if(!id.userId){openAuth();return}
+  if(id.userRole!=='applicant'){
+    document.getElementById('conversation-list').innerHTML='<div class="conversation-placeholder">当前是招聘方账号，请前往招聘方消息页查看会话。<a href="/employer-messages.html">打开招聘方消息页</a></div>';
+    updateAccount();return;
+  }
+  await loadWorkspace(true);
+  pollTimer=setInterval(()=>loadWorkspace(false),5000);
+}
+function bindFilters(){document.querySelectorAll('.conversation-tabs button').forEach(btn=>btn.onclick=()=>{document.querySelectorAll('.conversation-tabs button').forEach(x=>x.classList.remove('active'));btn.classList.add('active');activeFilter=btn.dataset.filter;renderConversations()})}
+function updateAccount(){const id=getIdentity(),btn=document.getElementById('account-button');if(!id.userId){btn.textContent='登录 / 注册';btn.onclick=openAuth;return}btn.textContent=`求职者 #${id.userId} · 退出`;btn.onclick=()=>{clearIdentity();location.reload()}}
+async function loadWorkspace(selectFirst){
+  updateAccount();
+  try{
+    const data=await Promise.all([getConversations(),getMyResumes(),getMyApplications()]);
+    conversations=data[0];resumes=data[1];applications=data[2];renderConversations();
+    if(selected){const fresh=conversations.find(x=>conversationKey(x)===conversationKey(selected));if(fresh)selected=fresh;await loadSelected(false)}
+    else if(selectFirst&&conversations.length)await selectConversation(0);
+  }catch(e){toast('加载消息失败：'+e.message)}
+}
+function conversationKey(x){return `${x.user_id}:${x.job_id||'none'}`}
+function conversationApplication(x){return applications.find(a=>a.job_id===x.job_id)||null}
+function visibleConversations(){const q=document.getElementById('conversation-search').value.trim().toLowerCase();return conversations.filter(x=>{const app=conversationApplication(x);const filter=activeFilter==='all'||(activeFilter==='unread'&&x.unread_count>0)||(activeFilter==='new'&&!app)||(activeFilter==='applied'&&!!app);const text=`${x.user_name||''} ${x.job_title||''} ${x.last_message||''}`.toLowerCase();return filter&&(!q||text.includes(q))})}
+function renderConversations(){
+  const list=document.getElementById('conversation-list'),visible=visibleConversations(),unread=conversations.reduce((sum,x)=>sum+x.unread_count,0);
+  document.getElementById('nav-unread').textContent=unread?Math.min(unread,99):'';
+  if(!visible.length){list.innerHTML='<div class="conversation-placeholder">暂无符合条件的会话</div>';return}
+  list.innerHTML=visible.map(x=>{const index=conversations.indexOf(x),active=selected&&conversationKey(x)===conversationKey(selected),app=conversationApplication(x);return `<button class="conversation-item ${active?'active':''}" onclick="selectConversation(${index})" data-conversation-key="${escapeHtml(conversationKey(x))}"><span class="conversation-avatar">${escapeHtml((x.user_name||'HR').slice(0,1))}</span><span class="conversation-copy"><span class="conversation-heading"><b>${escapeHtml(x.user_name||'招聘负责人')}</b><time>${formatListTime(x.last_time)}</time></span><span class="conversation-job">${escapeHtml(x.job_title||'平台消息')}${app?' · 已投递':''}</span><span class="conversation-preview">${escapeHtml(x.last_message||'')}</span></span>${x.unread_count?`<i class="unread-count">${Math.min(x.unread_count,99)}</i>`:''}</button>`}).join('');
+}
+async function selectConversation(index){selected=conversations[index];renderConversations();document.getElementById('message-empty').hidden=true;document.getElementById('message-workspace').hidden=false;await loadSelected(true)}
+async function loadSelected(scroll){if(!selected)return;try{const tasks=[getMessages(selected.user_id,selected.job_id)];if(selected.job_id)tasks.push(getJob(selected.job_id));const result=await Promise.all(tasks);selectedMessages=result[0];selectedJob=result[1]||null;renderSelected(scroll)}catch(e){toast('读取会话失败：'+e.message)}}
+function renderSelected(scroll){
+  document.getElementById('profile-avatar').textContent=(selected.user_name||'HR').slice(0,1);document.getElementById('profile-name').textContent=selected.user_name||'招聘负责人';document.getElementById('profile-company').textContent=selectedJob?`${selectedJob.company_name} · ${selectedJob.department}`:'平台招聘方 · 在线沟通';
+  const strip=document.getElementById('job-strip');
+  if(selectedJob){strip.hidden=false;strip.href=`/job.html?id=${selectedJob.id}`;document.getElementById('job-title').textContent=selectedJob.title;document.getElementById('job-meta').textContent=`${selectedJob.city} · ${selectedJob.experience_required} · ${selectedJob.education}`;document.getElementById('job-salary').textContent=formatSalary(selectedJob)}else strip.hidden=true;
+  const me=getIdentity(),list=document.getElementById('message-list');list.innerHTML=selectedMessages.length?selectedMessages.map(m=>renderMessage(m,me.userId)).join(''):'<div class="chat-empty-state">暂无消息</div>';updateResumeGate();if(scroll)list.scrollTop=list.scrollHeight;
+}
+function renderMessage(m,myId){
+  const mine=String(m.sender_id)===String(myId),content=String(m.content||''),isResume=content.includes('【简历已发送】')||content.includes('【已投递】'),asksResume=!mine&&!isResume&&/简历|附件/.test(content);
+  if(isResume)return `<div class="message-system-card resume-file-card"><span class="file-icon">?</span><div><b>${escapeHtml(content.replace(/^【.*?】/,'').replace(/（.*?）$/,'').trim()||'已发送的简历')}</b><small>附件简历发送记录</small></div><span class="sent-mark">已发送</span></div>`;
+  const bubble=`<div class="message-row ${mine?'mine':''}"><span class="message-avatar">${mine?'我':escapeHtml((selected.user_name||'HR').slice(0,1))}</span><div><time>${formatMessageTime(m.created_at)}</time><p>${escapeHtml(content)}</p></div></div>`;
+  if(!asksResume)return bubble;
+  const app=!!conversationApplication(selected);return bubble+`<div class="resume-request-card"><span class="file-icon">?</span><div><b>对方希望查看你的附件简历</b><small>发送前仍需由你确认</small></div><button onclick="sendResume()" ${app?'disabled':''}>${app?'已发送':'同意发送'}</button></div>`;
+}
+function updateResumeGate(){
+  const app=conversationApplication(selected),replied=selectedMessages.some(m=>String(m.sender_id)===String(selected.user_id)),canSend=!!selectedJob&&replied&&!app,box=document.getElementById('resume-action'),select=document.getElementById('resume-select'),btn=document.getElementById('resume-send');
+  const previous=select.value;
+  select.innerHTML=resumes.length?resumes.map(r=>`<option value="${r.id}">${escapeHtml(r.name)} · ${escapeHtml(r.education)}</option>`).join(''):'<option>暂无简历</option>';if(resumes.some(r=>String(r.id)===previous))select.value=previous;select.disabled=!canSend;btn.disabled=!canSend||!resumes.length;box.classList.toggle('unlocked',canSend&&!!resumes.length);
+  if(app){document.getElementById('resume-lock').textContent='?';document.getElementById('resume-title').textContent=`简历已发送 · ${applicationStatusLabel(app.status)}`;document.getElementById('resume-description').textContent=`投递 #${app.id}，可继续与招聘方沟通`;btn.textContent='已发送'}
+  else if(!selectedJob){document.getElementById('resume-lock').textContent='—';document.getElementById('resume-title').textContent='平台会话';document.getElementById('resume-description').textContent='该会话没有关联职位，不能发送简历';btn.textContent='发简历'}
+  else if(replied){document.getElementById('resume-lock').textContent='✓';document.getElementById('resume-title').textContent='招聘方已回复，可以发送简历';document.getElementById('resume-description').textContent=resumes.length?'选择一份简历，确认后发送':'请先创建简历；AutoHunt 将同步已授权的主简历';btn.disabled=!resumes.length;btn.textContent='发简历'}
+  else{document.getElementById('resume-lock').textContent='??';document.getElementById('resume-title').textContent='等待招聘方回复';document.getElementById('resume-description').textContent='招聘方回复后才可以发送简历';btn.textContent='发简历'}
+}
+async function sendCurrentMessage(){if(!selected)return toast('请先选择会话');const input=document.getElementById('message-input'),content=input.value.trim();if(!content)return;const btn=document.getElementById('message-send');btn.disabled=true;try{await sendMessage({recipient_id:selected.user_id,job_id:selected.job_id,content});input.value='';await loadWorkspace(false);const list=document.getElementById('message-list');list.scrollTop=list.scrollHeight}catch(e){toast('发送失败：'+e.message)}finally{btn.disabled=false}}
+async function sendExchange(kind){if(!selected)return toast('请先选择会话');document.getElementById('message-input').value=`我同意交换${kind}，请通过平台安全方式发起。`;await sendCurrentMessage()}
+async function sendResume(){
+  if(!selected||!selectedJob)return toast('当前会话没有关联职位');if(conversationApplication(selected))return toast('该职位已经发送过简历');const replied=selectedMessages.some(m=>String(m.sender_id)===String(selected.user_id));if(!replied)return toast('招聘方回复后才可以发送简历');
+  const btn=document.getElementById('resume-send');btn.disabled=true;btn.textContent='发送中…';try{
+    resumes=await getMyResumes();
+    if(!resumes.length){toast('请先创建真实简历，或在 AutoHunt 启用并授权主简历');return}
+    const chosen=document.getElementById('resume-select').value;
+    const resumeId=selectedResumeId(resumes,chosen);
+    await applyJob({job_id:selectedJob.id,resume_id:resumeId,cover_letter:`您好，这是我应聘${selectedJob.title}的简历，期待进一步沟通。`});toast('简历已发送');await loadWorkspace(false);const list=document.getElementById('message-list');list.scrollTop=list.scrollHeight
+  }catch(e){if(String(e.message).includes('已投递'))await loadWorkspace(false);else toast('发送简历失败：'+e.message)}finally{updateResumeGate()}
+}
+function applicationStatusLabel(s){return({submitted:'等待筛选',screening:'筛选中',interview:'进入面试',offer:'已发 Offer',rejected:'未通过'})[s]||s}
+function formatListTime(v){const d=new Date(v),now=new Date();if(d.toDateString()===now.toDateString())return d.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});return `${d.getMonth()+1}月${d.getDate()}日`}
+function formatMessageTime(v){return new Date(v).toLocaleString([],{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'})}
+function openAuth(){document.getElementById('auth-modal').classList.add('open');document.getElementById('auth-modal').setAttribute('aria-hidden','false')}
+function closeAuth(){document.getElementById('auth-modal').classList.remove('open');document.getElementById('auth-modal').setAttribute('aria-hidden','true')}
+async function authStep(){const email=document.getElementById('auth-email').value.trim(),name=document.getElementById('auth-name').value.trim()||'AI求职者';if(!email)return toast('请填写邮箱');try{if(!challengeId){const c=await requestMfa(email);challengeId=c.challenge_id;document.getElementById('mfa-row').hidden=false;document.getElementById('demo-code').textContent=`模拟验证码：${c.demo_code}`;document.getElementById('auth-submit').textContent='验证并登录';return}await verifyMfa(challengeId,document.getElementById('auth-code').value.trim());const user=await registerUser('applicant',name,email);setIdentity(user.id,'applicant',user.email);closeAuth();await loadWorkspace(true);pollTimer=setInterval(()=>loadWorkspace(false),5000)}catch(e){toast('登录失败：'+e.message)}}
+window.addEventListener('beforeunload',()=>{if(pollTimer)clearInterval(pollTimer)});init();
+</script>
+</body>
+</html>

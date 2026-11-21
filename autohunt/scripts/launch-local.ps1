@@ -1,6 +1,7 @@
 param(
     [ValidateSet('start', 'stop', 'status', 'prepare')][string]$Action = 'start',
     [switch]$NoBrowser,
+    [ValidateSet('all', 'autohunt', 'mock')][string]$Services = 'all',
     [ValidateRange(1024, 65535)][int]$BackendPort = 8000,
     [ValidateRange(1024, 65535)][int]$FrontendPort = 3000
 )
@@ -24,7 +25,7 @@ try {
     }
     $env:PYTHONUTF8 = '1'
     $launchArgs = @((Join-Path $PSScriptRoot 'local_launcher.py'), $Action,
-        '--backend-port', $BackendPort, '--frontend-port', $FrontendPort)
+        '--backend-port', $BackendPort, '--frontend-port', $FrontendPort, '--services', $Services)
     if ($NoBrowser) { $launchArgs += '--no-browser' }
     & $pythonPath @launchArgs
     exit $LASTEXITCODE

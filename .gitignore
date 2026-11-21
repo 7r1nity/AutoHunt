@@ -1,6 +1,5 @@
 .next/
-# Local simulator is intentionally not distributed with AutoHunt.
-/mock-site/
+# Simulator source is allowlisted in mock-site/.gitignore; runtime data stays local.
 node_modules/
 .pnpm-store/
 out/
@@ -23,6 +22,13 @@ agent/data/*.db*
 *.db
 *.db-shm
 *.db-wal
+*.db-journal
+*.sqlite
+*.sqlite3
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite3-shm
+*.sqlite3-wal
 *.enc
 *.pem
 *.key

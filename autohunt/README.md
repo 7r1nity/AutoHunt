@@ -31,23 +31,28 @@ agent/.venv/Scripts/python.exe -m playwright install chromium
 
 ### Windows 一键启动
 
-在仓库根目录双击 `start-local.cmd`，就绪后自动打开 `http://127.0.0.1:3000`。双击 `stop-local.cmd` 关闭本启动器管理的前后端。关闭启动窗口或网页不会停止后台服务。
+在仓库根目录双击 `start-local.cmd`，就绪后自动打开 `http://127.0.0.1:3000`。双击 `stop-local.cmd` 统一关闭本启动器管理的模拟站、后端和前端。模拟招聘站地址为 `http://127.0.0.1:8080`。关闭启动窗口或网页不会停止后台服务。
 
-首次使用需要已安装 **Python 3.12+ 和 Node.js 20.9+**，并可联网下载依赖。启动器会创建缺失的虚拟环境、安装项目依赖和 Playwright Chromium、补齐缺失的本地配置；已经准备好的环境可直接启动。未安装 pnpm 时通过 npm 调用仓库指定版本。也可以用 `AUTOHUNT_PYTHON`、`AUTOHUNT_NODE` 指定解释器路径。
+首次使用需要已安装 **Python 3.12+ 和 Node.js 20.9+**，并可联网下载依赖。启动器会创建缺失的虚拟环境、安装 Agent、完整模拟站及前端依赖和 Playwright Chromium、补齐缺失的本地配置；已经准备好的环境可直接启动。未安装 pnpm 时通过 npm 调用仓库指定版本。也可以用 `AUTOHUNT_PYTHON`、`AUTOHUNT_NODE` 指定解释器路径。
 
 启动器使用当前开发模式（Next.js Webpack），首次页面编译可能需要一两分钟；这是源码一键运行入口，不是独立安装包。配置、模型设置、数据库和简历保留；遇到已有数据但丢失加密密钥、前后端 Token 不一致时，会停止并给出提示，避免替换原配置。
 
-- 启动顺序：检查端口与环境 → 后端就绪 → 前端代理连通 → 打开工作台。
+- 启动顺序：检查三个端口与环境 → 模拟站数据库及 HTTP 就绪 → 后端就绪 → 前端代理连通 → 打开工作台。
 - 重复启动复用本启动器的实例；端口被其他服务占用时明确报错，不结束外部进程。
-- 停止先请求后端正常关闭并保存运行状态；超过等待期限才关闭本实例的进程树。下一次启动沿用项目原有的任务恢复规则。
-- 日志位于 `autohunt/.runlogs/launcher/`：`supervisor.log`、`backend.log`、`frontend.log`。进程标识与依赖缓存也保存在该忽略目录。
-- 本入口启动 AutoHunt 前后端。模拟招聘站仍单独启动；专用 Chrome 可按下文脚本启动，登录/MFA 沿用现有流程。
+- 停止先让 Agent 后端保存状态并退出，再正常关闭模拟站数据库连接，最后清理前端；超过等待期限才关闭本实例的进程树。下一次启动沿用项目原有的任务恢复规则。
+- 日志位于 `autohunt/.runlogs/launcher/`：`supervisor.log`、`mock.log`、`backend.log`、`frontend.log`。进程标识与依赖缓存也保存在该忽略目录。
+- 默认启动三个服务。`-Services autohunt` 只启动 Agent 与工作台；`-Services mock` 只启动模拟站（不要求 Node.js、Chromium 或模型配置）。模拟站固定监听 8080，与现有本地投递允许列表一致。切换服务组合或端口前先停止当前实例。
+- 端口被手动启动的模拟站占用时会报错，不接管或关闭该进程；先在原终端正常退出，再统一启动。专用 Chrome 可按下文脚本启动，登录/MFA 沿用现有流程。
 
 从仓库根目录也可以运行：
 
 ```powershell
-# 不自动打开浏览器
+# 默认一起启动；不自动打开浏览器
 .\start-local.cmd -NoBrowser
+# 单独启动模拟站（二选一；与统一启动器共享同一实例）
+.\mock-site\start-local.cmd -NoBrowser
+# 或只启动 AutoHunt
+.\start-local.cmd -Services autohunt -NoBrowser
 # 查看运行状态
 powershell -NoProfile -ExecutionPolicy Bypass -File .\autohunt\scripts\launch-local.ps1 -Action status
 # 只准备环境
@@ -86,8 +91,8 @@ pnpm --dir frontend dev --hostname 127.0.0.1
 
 搜索默认适配本地模拟招聘站，指令或界面也可选择 BOSS 直聘、智联招聘。
 
-- **模拟站不再随仓库分发**，根目录 `mock-site/` 已取消跟踪并加入忽略。已有本地模拟站仍可独立启动，通常监听 `127.0.0.1:8080`；其安装和账号配置由本地副本管理。
-- 新克隆仅包含 AutoHunt。离线契约测试不需要运行模拟站，但完整模拟搜索、沟通、HR 回复和投递演示需要另外准备兼容的本地模拟站。
+- **完整模拟站源码随仓库分发**，根目录 `mock-site/` 采用源码允许列表；本地数据库、个人记录、环境、日志和浏览器资料均被忽略。
+- 新克隆首次运行会生成虚构演示账号与岗位，支持模拟搜索、沟通、HR 回复和投递；不包含原机器上的职位扩充库存或个人历史。模拟站安装与账号说明见 [mock-site/README.md](../mock-site/README.md)。
 - 保留模拟站适配器不等于开放真实投递。BOSS/智联仅只读搜索，登录态和页面兼容性仍需实测；真实站沟通、简历上传与提交禁用。
 - 本地模拟投递仍保留内部预览、一次性授权、账号和简历绑定、验证码接管与未知结果保护。等待 HR 回复不代表投递完成。
 
@@ -116,7 +121,7 @@ cd agent
 .\.venv\Scripts\python.exe -m evaluation.stateful_scenarios
 ```
 
-详见 [评估说明](docs/evaluation.md)。旧 runner 和历史报告有各自的契约版本，不应把所有历史通过数简单相加。`gated_delivery_browser_contract`、`layout_contract` 等依赖本地模拟站文件或环境，新克隆不具备这些前置条件。真实模型评估需要另行确认目的、发送数据与调用上限。
+详见 [评估说明](docs/evaluation.md)。旧 runner 和历史报告有各自的契约版本，不应把所有历史通过数简单相加。`gated_delivery_browser_contract`、`layout_contract` 等依赖本地模拟站文件或环境，请按对应测试说明准备站点和账号。真实模型评估需要另行确认目的、发送数据与调用上限。
 
 运行日志默认写入本地忽略目录；源码和合成评估入口可以提交，个人简历、聊天、数据库、截图、密钥与浏览器 profile 不可以。
 
