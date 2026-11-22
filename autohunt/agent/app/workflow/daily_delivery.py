@@ -117,7 +117,7 @@ async def deliver(service, run_id, cp):
                     continue
                 if item["phase"] == "pending":
                     if "preview_id" not in item:
-                        preview = jobs.create_delivery_preview(job_id, **snapshot["binding"])
+                        preview = await service.delivery.create_preview(job_id, **snapshot["binding"])
                         persist(job_id, preview_id=preview.id, delivery_id=f"daily_{run_id}_{job_id}")
                     try:
                         jobs.get_delivery_run(item["delivery_id"])
@@ -127,7 +127,8 @@ async def deliver(service, run_id, cp):
                     def before_contact():
                         check_binding()
                         persist(job_id, "contact_started")
-                    observation = await adapter.prepare(page, url, before_communication=before_contact)
+                    observation = await adapter.prepare(page, url, before_communication=before_contact,
+                        outreach_message=jobs.delivery_outreach(item.get("preview_id")))
                     if observation.intervention_reason:
                         raise ValueError(observation.intervention_reason)
                     observed = await evidence(page, url, snapshot["applicant_id"])

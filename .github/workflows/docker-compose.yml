@@ -21,6 +21,32 @@ concurrency:
   group: docker-compose-${{ github.ref }}
   cancel-in-progress: true
 jobs:
+  workflow-contracts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: autohunt/agent
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install isolated evaluation dependencies
+        run: |
+          python -m pip install -e '.[dev]'
+          python -m playwright install --with-deps chromium
+      - name: Scope revisions, execution evidence and grounded outreach
+        run: python -m evaluation.workflow_upgrade_acceptance --browser
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: workflow-contracts-${{ github.run_id }}
+          path: |
+            autohunt/agent/evaluation/results/workflow-upgrade/**
+            autohunt/agent/evaluation/results/scope-chain/**
+            autohunt/agent/evaluation/results/outreach-browser/**
+          if-no-files-found: ignore
   compose:
     runs-on: ubuntu-latest
     timeout-minutes: 30

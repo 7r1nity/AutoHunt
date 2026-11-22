@@ -16,7 +16,7 @@ from typing import Literal, Any
 from ..llm.base import LLMRequest
 from ..runtime.context import emit
 
-SCOPE_FIELDS = frozenset({"filters", "result_groups", "salary_min", "min_score", "max_score"})
+SCOPE_FIELDS = frozenset({"filters", "result_groups", "salary_min", "min_score", "max_score", "scope_mode"})
 SCOPE_TOOLS = frozenset({"job_search_start", "search_state_update", "mock_delivery_start", "learning_plan_generate"})
 
 
@@ -79,13 +79,15 @@ def proposals(draft, live_plan):
     return selected
 
 
-async def review(llm, draft, *, message, live_plan, conditions, previous_request=None,timeout_seconds=18):
+async def review(llm, draft, *, message, live_plan, conditions, previous_request=None, delivery_scope=None, timeout_seconds=18):
     selected=proposals(draft,live_plan)
     if not selected:
         return draft, None, {}
     # No tools, resumes, JD or unrelated conversation are included in this call.
     payload={"message":message,"prior_request":(live_plan or {}).get("original") or (previous_request or {}).get("original"),
-             "prior_conditions":conditions,"scopes":[{**{k:v for k,v in s.items() if k!="kind"},
+             "prior_conditions":conditions,
+             "prior_delivery_scope":{key: delivery_scope.get(key) for key in ("task_id", "filters", "min_score")} if delivery_scope else None,
+             "scopes":[{**{k:v for k,v in s.items() if k!="kind"},
                  "salary_examples":salary_examples(s["arguments"])} for s in selected]}
     fingerprint=hashlib.sha256(json.dumps(payload,ensure_ascii=False,sort_keys=True).encode()).hexdigest()
     try:
@@ -100,7 +102,10 @@ async def review(llm, draft, *, message, live_plan, conditions, previous_request
                 "月薪数值限制与面议是不同接受范围；用户没允许面议不得自动加入。正式和实习分支可有不同门槛；不把独立分支变成AND。"
                 "salary_examples显示候选参数实际会接受的薪资，供检查范围，不是新要求。最低薪资默认检查岗位区间下限，不能让10-20K满足最低15K；除非用户明确要求只需区间交集才用overlap。"
                 "用户明确修改/扩大范围可以接受，不要求重复授权。保留未修改字段。组合label只是说明，不替代子条件，说明与子树矛盾需修正子树或追问。"
-                "允许修改字段仅filters/result_groups/salary_min/min_score/max_score；不能改变工具、目标、数量、城市、依赖或user_requested。"
+                "允许修改字段仅filters/result_groups/salary_min/min_score/max_score/scope_mode；不能改变工具、目标、数量、城市、依赖或user_requested。"
+                "scope_mode仅是投递范围参数的继承方式，不是授权：inherit补投取交集，update替换本轮明确修改字段而继承其余，new为独立完整范围。"
+                "若用户明确降低分数门槛或扩大投递条件，候选仍用inherit会被旧限制覆盖，应更正为update；搜索条件没变时不要把投递变化搬到搜索分支。"
+                "prior_delivery_scope只供继承和比较；更正任何范围仍由后续确定性风险和用户确认机制处理，不代表已批准投递。"
                 "更正filters时给完整合法子树；叶节点无children，组合说明用label，组合不能携带salary或非require的mode。"
                 "不要参考任何示例推测额外要求。输出schema："+json.dumps(ScopeReview.model_json_schema(),ensure_ascii=False)),
             user_message=json.dumps(payload,ensure_ascii=False),context="条件语义核对，不产生执行授权",fast=True,json_output=True,max_output_tokens=3000)),timeout=timeout_seconds)

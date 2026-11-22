@@ -33,7 +33,7 @@ def depend_on(steps, consumer, producer):
     consumer["depends_on"] = list(dict.fromkeys([*consumer["depends_on"], producer["id"]]))
 
 
-def bind_evidence(steps, consumer, producers):
+def bind_evidence(steps, consumer, producers, *, known_sources=()):
     # Cancelled/failed producers are not implicit evidence for newly appended
     # actions. Keep explicit dependencies intact, but never invent a new edge to
     # a withdrawn node when a revision has replaced the old work.
@@ -42,6 +42,17 @@ def bind_evidence(steps, consumer, producers):
     bound = [item for item in producers if item["id"] in dependency_ancestors(consumer["id"], steps)]
     bound = [item for item in bound if not any(item["id"] in dependency_ancestors(other["id"], steps)
              for other in bound if other is not item)]
+    explicit = consumer.get("arguments", {}).get("source_task_id") or consumer.get("arguments", {}).get("task_id")
+    if not bound and explicit:
+        matching = [item for item in producers if item.get("task_id") == explicit]
+        if len(matching) == 1:
+            depend_on(steps, consumer, matching[0])
+            bound = matching
+        elif explicit in set(known_sources):
+            # A trusted prior receipt is independent of newly added searches.
+            # The executor still checks completion, resume and session ownership.
+            consumer.pop("evidence_step", None)
+            return None
     if not bound and len(producers) == 1:
         depend_on(steps, consumer, producers[0])
         bound = producers

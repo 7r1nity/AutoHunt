@@ -18,7 +18,7 @@ from .contracts import EXECUTION_BATCH_SIZE
 from .lifecycle import DONE, input_waits, successful_receipt
 
 RESUME_BOUND_TOOLS = {"job_search_start", "job_results_refilter", "mock_delivery_start",
-                      "learning_plan_generate", "resume_propose_patch", "job_review_selection"}
+                      "learning_plan_generate", "interview_preparation_generate", "resume_propose_patch", "job_review_selection"}
 
 
 def persist(plan: dict, *, activate: bool = False) -> None:
@@ -211,7 +211,7 @@ async def advance(plan: dict, registry) -> list[dict]:
             try:
                 # A plan over 20 JDs needs the full analysis budget; a 100s cap cut
                 # it off mid-write and reported "结果未确认" instead of a plan.
-                timeout = 180 if step["tool"] in {"learning_plan_generate", "job_results_refilter"} or (
+                timeout = 90 if step["tool"] == "interview_preparation_generate" else 180 if step["tool"] in {"learning_plan_generate", "job_results_refilter"} or (
                     step["tool"] == "mock_delivery_start" and step["arguments"].get("filters")) else (
                     45 if step["tool"] in {"mock_delivery_start", "job_remove_selection", "job_target_resolve"} and step["arguments"].get("selector") else 20)
                 async with asyncio.timeout(timeout):

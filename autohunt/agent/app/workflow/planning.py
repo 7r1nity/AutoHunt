@@ -181,6 +181,7 @@ async def plan_request(llm, registry, message: str, *, dialogue: dict, condition
             "取消尚未执行的单个分支用remove_steps中的原步骤ID，保留其他分支；已执行步骤只能引用其结果，不能删除或重放。"
             "steps也可提交新增步骤，应用会合并到add_steps；revision省略plan_id/expected_revision时使用当前任务。修改已有条件定位原未执行步骤，不另建同一动作。"
             "先暂停添加条件、先改一下等修订设置revision.pause=true，等待用户继续；纯暂停也可revision updates=[]。独立新任务仍operation=execute。"
+            "等范围审批、等确认卡或某一步等待确认仅表示该动作waiting_approval，不是暂停整个计划；除非用户明确暂停任务，不得因此设置pause或revision.pause=true。"
             "新建任务要求先暂停、先保存不执行或等用户继续时，顶层pause=true，仍完整保留待执行steps及条件；暂停不是取消搜索授权。不能仅在reply承诺暂停却让pause=false。"
             "待澄清计划不是所有新指令的归属：用户明确单独投递另一个岗位或独立移除时，优先execute，不修订不相关旧任务。"
             "用户回答旧追问且对象明确时，revision.questions=[]清除已解决的追问，并更新相关waiting_input步骤；不能只追加动作却保留旧阻塞。"
@@ -209,6 +210,9 @@ async def plan_request(llm, registry, message: str, *, dialogue: dict, condition
             "dialogue.delivery_scope记录上一批已执行投递的范围，不是授权。补投、漏投或还有几个未投时默认继承该范围；"
             "scope_mode=inherit（默认）会保留旧条件并与新限制取交集，不得漏掉薪资/岗位类型等条件。"
             "用户明确另起独立批次、取消或替换旧限制、降低分数门槛时scope_mode=new，并给出完整新范围。指定单个岗位不继承旧批量范围。"
+            "只修改上一批投递的部分条件时使用scope_mode=update：例如搜索结果不变，把85分降为80分，min_score=80且省略filters以保留其他条件；不要另起搜索或改搜索条件。"
+            "投递地点/岗位类别范围扩大但搜索范围不变时，只更新mock_delivery_start的完整filters，用update替换对应条件树；inherit是补投取交集，不能用它表示降低门槛或OR扩大。"
+            "扩大搜索城市/岗位方向/数量是搜索范围变化，更新搜索参数并按用户需要新增搜索；不能把原有投递授权自动扩大到未来结果。"
             "指定第几个、前几个、岗位名称投递时必须传mock_delivery_start.selector；序号不是数据库ID，不得用上一轮批量filters替代指定对象。"
             "投递某一轮指定搜索结果时传mock_delivery_start.source_task_id，且只能使用result_sources里的已完成task_id；多轮搜索不明确时先问，不要默认用最近一轮。"
             "岗位公司地点/职责描述也可放selector，由共享目标解析器定位。single要求唯一对象；明确这些/所有符合描述者用selection_mode=matching。"
@@ -222,6 +226,9 @@ async def plan_request(llm, registry, message: str, *, dialogue: dict, condition
             "‘82分的某公司’是精确分数定位，必须保留82分于selector，不改成只有公司名+min_score=82；82分以上才是投递门槛。‘其他’是看板ID集合减去用户选中ID，不是公司名称之外的岗位。"
             "两个工具不要混传字段：job_results_refilter仅task_id；job_remove_selection无min_score/filters；mock_delivery_start无job_ids，目标通过selector定位。"
             "指定单个岗位投递时，除非本轮同时提出额外筛选，不要复制上一轮的批量投递filters。"
+            "selector只定位对象：单个独立投递省略scope_mode；‘其余/其他符合原条件的岗位继续投’属于原批次，必须scope_mode=inherit，不能因提供selector就丢掉原来的分数、城市和语义条件。"
+            "面试准备也用稳定序号或岗位名定位，例如当前简表第一项用selector='第1个'；不要把‘符合条件的岗位’等已由搜索核对的描述再附加到序号，造成不必要的二次定位。"
+            "若用户明确要求一个不满足原搜索业务条件的岗位也投，传稳定selector及allow_outside_search=true，系统会保存单岗例外等待一次人工确认；不能把全批条件清空或改动搜索来实现例外。"
             "正式5份、实习5份等分组请求必须生成result_groups，每组label/count/filters；类别必须require，不可用allow替代，result_limit为各组数量之和。共同城市、薪资、排除条件仍放在搜索filters。只修改总数且不再要求分组时清除旧result_groups。"
             "任意搜索条件使用filters条件树condition/all/any/not；叶text是完整语义，quote仅作审计，不要求机械复制。"
             "先区分准入范围、每个备选方案的硬条件和排序偏好。叶mode=require表示岗位必须满足的事实，prefer仅排序，allow只是允许包含，不需要JD证明接受。"
@@ -235,6 +242,7 @@ async def plan_request(llm, registry, message: str, *, dialogue: dict, condition
             "保留条件否定与组合逻辑，不把不要外包理解成取消搜索；缺JD证据不能猜符合。"
             "搜索异步，结果读取/总结、投递、成长计划依赖搜索真正完成。默认每次新搜索后生成job_results_read(summary=true)。"
             "成长/学习/提升计划同义，分析不足并更新成长计划可由learning_plan_generate输出。"
+            "面试预测/面试准备使用interview_preparation_generate，按用户所指岗位selector生成可能问题、追问和准备要点；不是投递，不改变搜索或成长计划，缺岗位对象时只追问该分支。"
             "简历修改只生成提案，不接受提案或直接改主简历。长期偏好更新与会话搜索条件调整分开。"
             "继续/重试指向有效原任务；补充范围或修改条件更新原任务，不把短句替换原始需求。"
             "必要用户信息缺失填对应步骤的missing_slots和questions；独立且参数完整的分支可以执行，不用全局questions阻断它们。工具JSON问题由系统修复，不要求用户说固定短语。"
@@ -263,6 +271,7 @@ async def plan_request(llm, registry, message: str, *, dialogue: dict, condition
         from .scope_review import review, apply_review
         reviewed,metadata,_=await review(llm,draft,message=message,live_plan=live_plan,
                                          conditions=conditions,previous_request=previous,
+                                         delivery_scope=dialogue.get("delivery_scope"),
                                          timeout_seconds=min(18,max(.001,review_deadline-time.monotonic()-2)))
         if metadata:
             # All corrected values re-enter the same compiler and action binding.
@@ -432,6 +441,8 @@ def _validate_draft(draft: RequestDraft, registry, message: str, *, dialogue: di
     evidence_producers = [*searches, *refreshes]
     context = active_run()
     session_id = context.session_id if context else "default"
+    from .result_sources import result_references
+    known_sources = {item["task_id"] for item in result_references(dialogue, previous)}
     overrides = previous.get("condition_overrides", {}) if continued else {}
     verified_conditions = {}
 
@@ -439,7 +450,8 @@ def _validate_draft(draft: RequestDraft, registry, message: str, *, dialogue: di
     # not a regex guess about whether the user used the word "总结".
     for search in searches:
         summaries = [step for step in steps if step["tool"] == "job_results_read"
-                     and step["arguments"].get("summary")]
+                     and step["arguments"].get("summary")
+                     and (not step["arguments"].get("task_id") or search.get("task_id") == step["arguments"]["task_id"])]
         covered = any(search["id"] in dependency_ancestors(step["id"], steps) for step in summaries)
         if not covered and len(searches) == 1 and summaries:
             # Fix its missing dependency, don't emit the same report twice.
@@ -533,11 +545,13 @@ def _validate_draft(draft: RequestDraft, registry, message: str, *, dialogue: di
         if name == "resume_propose_patch" and not args.get("instruction"):
             args["instruction"] = (step["command_quote"] or original)[:spec.parameters["properties"]["instruction"].get("maxLength", 2000)]
         if name == "mock_delivery_start":
-            from .delivery_scope import materialize_delivery_scope
+            from .delivery_scope import materialize_delivery_scope, remember_selection_scope
             from .result_sources import ResultSourceClarification
+            remember_selection_scope(step, args)
             try:
                 args.update(materialize_delivery_scope(args, dialogue.get("delivery_scope"),
-                    session_id=session_id, stamp=stamp, new_search=bool(searches),
+                    session_id=session_id, stamp=stamp,
+                    new_search=bool(searches) and args.get("source_task_id") not in known_sources,
                     task_id=(dialogue.get("tasks") or {}).get("browser_id")))
             except ResultSourceClarification as exc:
                 wait_for_scope(step, str(exc), field="scope_mode", value=args.get("scope_mode", "inherit"))
@@ -545,15 +559,18 @@ def _validate_draft(draft: RequestDraft, registry, message: str, *, dialogue: di
                 args["scope_mode"] = "new"  # Freeze expanded scope before binding.
             source = (searches[0]["arguments"].get("source", conditions.get("source", "mock"))
                       if len(searches) == 1 else conditions.get("source", "mock"))
-            if source != "mock":
+            if source != "mock" and args.get("source_task_id") not in known_sources:
                 step["unavailable_reason"] = "真实招聘网站自动投递未启用；已保留可执行的搜索及分析分支。"
+            if args.get("allow_outside_search") and not (args.get("selector") or args.get("target_step_id")):
+                step["missing_slots"].append("selector")
+                step.setdefault("questions", []).append("范围外例外需要指定一个目标岗位；不会改为批量放开筛选。")
         if name == "job_search_start" and args.get("dry_run") and args.get("source", "mock") != "mock":
             questions.append("真实网站不支持自动沟通与投递试运行；请使用本地模拟站。")
         # Only submission/contact has a scope-confirmation requirement. Ordinary
         # search, reading and local plan generation do not pass a risk gate.
         # Unconfirmed external scopes become durable waiting_approval at execution.
         if name in EVIDENCE_TOOLS:
-            bind_evidence(steps, step, evidence_producers)
+            bind_evidence(steps, step, evidence_producers, known_sources=known_sources)
         filled = (resolved_slots(step, conditions) | {"authorization"}) - set(step.get("unresolved_arguments", {}))
         valid_slots = set(spec.parameters.get("properties", {})) | {"score_scope", "target", "authorization"}
         if not set(step["missing_slots"]) <= valid_slots:

@@ -6,6 +6,7 @@ import { useAgentRuntime } from "@/lib/use-agent-runtime";
 import { RuntimePanel } from "@/components/runtime-panel";
 import { MetricsDashboard } from "@/components/metrics-dashboard";
 import { JobTargetChoices } from "@/components/job-target-choices";
+import { InterviewPreparation } from "@/components/interview-preparation";
 import { WorkspaceIcon } from "@/components/workspace-icon";
 import { interruptionCommand, terminalRun } from "@/lib/agent-runtime";
 import { createChatTurn, createMessageId } from "@/lib/chat-message";
@@ -448,6 +449,7 @@ export default function Home() {
   const chatUploadRef = useRef<HTMLInputElement>(null);
   const [materialKind, setMaterialKind] = useState<"course" | "project" | "code">("project");
   const [detailJobId, setDetailJobId] = useState<number | null>(null);
+  const [interviewJob, setInterviewJob] = useState<Job | null>(null);
   const announcedTaskIdsRef = useRef<Set<string>>(new Set());
   const ownedTaskIdsRef = useRef<Set<string>>(new Set());
   const runtimeTaskIdsRef = useRef<Set<string>>(new Set());
@@ -2282,16 +2284,21 @@ export default function Home() {
                 {detailJob.stage === "review" && <button className="button secondary" onClick={() => { rejectJob(detailJob.id); setDetailJobId(null); }}>跳过这个职位</button>}
                 {(detailJob.stage === "review" || detailJob.stage === "waiting") && <button className="button primary" onClick={() => { const id = detailJob.id; setDetailJobId(null); advanceJob(id); }}>{detailJob.stage === "review" ? "投递" : "记录面试"}</button>}
                 {detailJob.stage === "applying" && <button className="button primary" onClick={() => { const id = detailJob.id; setDetailJobId(null); void advanceJob(id); }}>{detailJob.recruiter_reply ? "开启自动发送简历" : "开启自动投递"}</button>}
+                <button className="button secondary" onClick={() => { setInterviewJob(detailJob); setDetailJobId(null); }}>预测面试问题</button>
                 <button className="button secondary" onClick={() => setDetailJobId(null)}>关闭</button>
               </div>
             </div>
           </div>
         )}
 
+        {interviewJob && <InterviewPreparation key={interviewJob.id} job={interviewJob} onClose={() => { setDetailJobId(interviewJob.id); setInterviewJob(null); }} />}
+
         {deliveryPreview && <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label="投递预览">
           <div className="delivery-modal panel">
             <span className="eyebrow">投递预览</span><h2>确认本次投递</h2>
             <dl><div><dt>职位</dt><dd>{deliveryPreview.title}</dd></div><div><dt>公司</dt><dd>{deliveryPreview.company}</dd></div><div><dt>简历</dt><dd>{deliveryPreview.resume_label} · v{deliveryPreview.resume_version}</dd></div><div><dt>简历快照</dt><dd>{deliveryPreview.resume_digest.slice(0, 12)}…</dd></div><div><dt>动作</dt><dd>{deliveryPreview.action_summary}</dd></div></dl>
+            {deliveryPreview.outreach_message && <section aria-label="本次沟通话术"><h3>本次沟通话术</h3><p>{deliveryPreview.outreach_message}</p></section>}
+            {!!deliveryPreview.exception_reasons?.length && <p role="status">本次例外：{deliveryPreview.exception_reasons.join("；")}</p>}
             <p>授权只绑定这一个职位、当前简历版本和“发送简历”动作，30 分钟过期且只能消费一次。确认后若简历变化，系统会拒绝旧预览。验证码、MFA 或结果无法确认时必须暂停。</p>
             <div className="modal-actions"><button className="button secondary" onClick={() => setDeliveryPreview(null)}>取消</button><button className="button primary" onClick={authorizeDelivery}>确认并生成一次性授权</button></div>
           </div>

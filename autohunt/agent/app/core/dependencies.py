@@ -11,6 +11,7 @@ from ..intent.small_model import SmallModelClient
 from ..intent.store import RouterStore
 from ..jobs.store import JobStore
 from ..growth.plans import LearningPlanService
+from ..growth.interview import InterviewPreparationService
 from ..llm.manager import LLMManager
 from ..memory.document_router import DocumentRouter
 from ..memory.candidate_state import CandidateEvidenceExtractor, CandidateProfileExtractor, CandidateStateStore, RESUME_PROJECT_PROMPT
@@ -50,6 +51,8 @@ resume_document_extractor = ResumeDocumentExtractor(llm_manager)
 document_router = DocumentRouter(llm_manager)
 job_store = JobStore(settings.data_root / "autohunt.db")
 learning_plans = LearningPlanService(job_store, candidate_state_store, resume_workspace_store, llm_manager, resume_store)
+interview_preparations = InterviewPreparationService(job_store, candidate_state_store, resume_workspace_store,
+    llm_manager, settings.data_root, settings.data_key)
 browser_service = BrowserAutomationService(
     job_store,
     memory_store,
@@ -66,6 +69,7 @@ delivery_service = DeliveryAutomationService(
     headless=settings.browser_headless,
     cdp_url=settings.browser_cdp_url,
     resume_workspace=resume_workspace_store,
+    llm=llm_manager,
 )
 mock_workflow = MockWorkflowCoordinator(
     job_store, browser_service, delivery_service, candidate_state_store, resume_workspace_store,
@@ -77,6 +81,7 @@ agent_tool_registry = AgentToolRegistry(
     resume_workspace=resume_workspace_store,
     memory=memory_store,
     learning_plans=learning_plans,
+    interview_preparations=interview_preparations,
     mock_workflow=mock_workflow,
     response_llm=llm_manager,
     confirmation_policy=settings.confirmation_policy,

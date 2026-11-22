@@ -24,6 +24,7 @@ ACTION_PATTERNS = {
     "preference_update": r"(?:更新|修改|设置|调整|保存).{0,30}(?:长期|持久化|偏好)",
     "resume_propose_patch": r"(?:修改|更新|补充|润色|优化|美化|精简|压缩|删除|加入|写进).{0,35}(?:简历|项目|经历)|(?:简历|项目|经历).{0,25}(?:改|删|优化|精简|润色)",
     "learning_plan_generate": r"(?:生成|制定|创建|规划|更新|补充|安排|做|写|给我).{0,35}(?:学习计划|成长计划|提升计划|行动方案|学习方案)",
+    "interview_preparation_generate": r"(?:预测|准备|模拟|生成|分析|给我).{0,30}(?:面试|追问)|(?:面试).{0,20}(?:预测|准备)",
     "mock_delivery_start": r"投递|提交申请|(?:发送|提交)简历",
     "mock_delivery_cancel": r"(?:停止|取消|关闭|暂停|不要(?:再)?|先别).{0,8}投递",
     "browser_task_stop": r"(?:停止|中断|取消|终止|结束)(?:当前|本次|所有|全部)?(?:搜索|检索|任务|执行|浏览器任务)?|别搜了",
@@ -44,6 +45,7 @@ _RETRACTION_TARGETS = {
     "job_search_start": r"搜索|检索|找工作",
     "mock_delivery_start": r"投递|发送简历|提交简历",
     "learning_plan_generate": r"(?:生成|更新)?(?:成长计划|学习计划|提升计划|行动方案|学习方案)",
+    "interview_preparation_generate": r"(?:面试预测|面试准备|面试问题)",
     "resume_propose_patch": r"(?:修改|更新|补充|写入)简历",
 }
 

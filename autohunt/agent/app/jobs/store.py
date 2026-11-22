@@ -203,6 +203,8 @@ class JobStore:
             self._ensure_column(db, "jobs", "source_tags", "TEXT")
             self._ensure_column(db, "mock_delivery_queue", "scope_json", "TEXT NOT NULL DEFAULT '{}'")
             self._ensure_column(db, "mock_delivery_queue", "scope_evidence_json", "TEXT NOT NULL DEFAULT '{}'")
+            self._ensure_column(db, "mock_delivery_queue", "eligibility_json", "TEXT")
+            self._ensure_column(db, "mock_delivery_queue", "eligibility_digest", "TEXT")
             self._ensure_column(db, "jobs", "recruiter_reply_at", "TEXT")
             self._ensure_column(db, "jobs", "reply_last_checked_at", "TEXT")
             self._ensure_column(db, "mock_workflow_settings", "last_reported_run_id", "TEXT")
@@ -476,6 +478,12 @@ class JobStore:
         filter_digest = filter_sample.get("digest") if isinstance(filter_sample, dict) else None
         if isinstance(filter_digest, str) and re.fullmatch(r"[0-9a-f]{64}", filter_digest):
             safe_sample["filter_evidence"]["digest"] = filter_digest
+        if event_type in {'job_stored', 'job_duplicate', 'job_refiltered'}:
+            # Only the evaluator can supply the receipt from its actual input.
+            # Reading today's global cache here would backfill old evidence.
+            for key in ('analysis_receipt', 'analysis_receipt_digest'):
+                if key in (sample or {}):
+                    safe_sample[key] = sample[key]
         with self.lock, self._connect() as db:
             db.execute(
                 "INSERT INTO browser_events (task_id,event_type,detail,reason_code,sample_json,created_at) VALUES (?,?,?,?,?,?)",
@@ -829,6 +837,7 @@ class JobStore:
                       "filter_status": job.get("filter_status", "pass"), "filter_evidence": job.get("filter_evidence", {}),
                       "result_group": group_index, "admission": status,
                       "filter_fingerprint": self.review_fingerprint(self.get_job_from_connection(db, job_id))}
+            sample.update(self._analysis_receipt(self.get_job_from_connection(db, job_id)))
             db.execute("INSERT INTO browser_events(task_id,event_type,detail,sample_json,created_at) VALUES (?,?,?,?,?)",
                        (task_id, event, f"{job['company']} / {job['title']}：{status}", json.dumps(sample, ensure_ascii=False), utc_now()))
             return {"counts": (int(newly_visible), int(not newly_visible), 1) if status == "accepted" else (0, 0, 0),
@@ -949,6 +958,7 @@ class JobStore:
                 updated = {**candidate, "filter_status": verdict["status"], "filter_evidence": encoded}
                 sample = {"job_id": candidate["id"], "filter_status": verdict["status"],
                     "filter_evidence": verdict, "filter_fingerprint": self.review_fingerprint(updated)}
+                sample.update(self._analysis_receipt(updated))
                 status = "accepted" if admitted else "pending_verification" if verdict["status"] == "unknown" else "not_admitted"
                 sample.update(admission=status, result_group=group_index)
                 db.execute("UPDATE jobs SET board_visible=? WHERE id=?",
@@ -1045,10 +1055,23 @@ class JobStore:
                 job_ids,
             ).fetchall()
 
-        rows = [{**dict(row), "admitted": outcomes.get(row["id"], {}).get("admission", "accepted") == "accepted",
-                 "filter_status": outcomes.get(row["id"], {}).get("filter_status", row["filter_status"]),
-                 "filter_evidence": json.dumps(outcomes.get(row["id"], {}).get("filter_evidence",
-                    json.loads(row["filter_evidence"])), ensure_ascii=False)} for row in rows]
+        report_rows = []
+        for raw in rows:
+            row = dict(raw)
+            selection_hash = self.review_fingerprint(row)
+            outcome = outcomes.get(row['id'], {})
+            status = outcome.get('filter_status', row['filter_status'])
+            evidence = outcome.get('filter_evidence', json.loads(row['filter_evidence']))
+            if (status == 'pass' and outcome.get('admission', 'accepted') == 'accepted'
+                    and ('analysis_receipt' in outcome or outcome.get('filter_fingerprint'))):
+                try:
+                    row = self._analysis_job(row, outcome, resume_digest=None)
+                except ValueError:
+                    status, evidence = 'unknown', {'status': 'unknown', 'reason': '岗位事实或本轮判定证据已变化，需重新核对'}
+            report_rows.append({**row, 'admitted': outcome.get('admission', 'accepted') == 'accepted',
+                'filter_status': status, 'filter_evidence': json.dumps(evidence, ensure_ascii=False),
+                'selection_hash': selection_hash})
+        rows = report_rows
 
         salaries: dict[str, int] = {}
         employment: dict[str, int] = {}
@@ -1091,7 +1114,7 @@ class JobStore:
                 "filter_status": row["filter_status"], "filter_evidence": json.loads(row["filter_evidence"]),
                 "employment_type": employment_type, "benefits": present_benefits,
                 "jd_excerpt": jd_excerpt, "jd_summary": jd["brief"],
-                "source_url": str(row["source_url"] or ""), "content_hash": self.review_fingerprint(dict(row)),
+                "source_url": str(row["source_url"] or ""), "content_hash": row['selection_hash'],
             })
         summaries.sort(key=lambda item: (item["stage"] != "rejected", item["score"]), reverse=True)
         pending_ids = {item["id"] for item in rows if item["filter_status"] == "unknown"}
@@ -1104,7 +1127,8 @@ class JobStore:
             "qualified_jobs": sum(item["stage"] != "rejected" and item["filter_status"] == "pass" for item in summaries),
             "pending_verification": len(pending_ids),
             "result_groups": [{"label": group["label"], "target": group["count"],
-                               "matched": sum(row["status"] == "accepted" and row["group_index"] == index for row in candidates)}
+                               "matched": sum(row["status"] == "accepted" and row["group_index"] == index
+                                    and row['job_id'] in {item['id'] for item in qualified_rows} for row in candidates)}
                               for index, group in enumerate(constraints.get("result_groups") or [])],
             "constraints": constraints,
             "salary_distribution": salaries,
@@ -1271,10 +1295,54 @@ class JobStore:
             "score_fair": sum(1 for score in scores if score < 80),
         }
 
+    @classmethod
+    def _analysis_receipt(cls, job: dict) -> dict:
+        """Freeze this search's verdict, independently of the global job cache."""
+        qualification = job.get('qualification_evidence')
+        if isinstance(qualification, str):
+            try:
+                qualification = json.loads(qualification)
+            except ValueError:
+                qualification = None
+        snapshot = {'version': 2, 'job_id': job['id'],
+            'job_facts_fingerprint': cls.facts_fingerprint(job),
+            'resume_digest': qualification.get('resume_digest') if isinstance(qualification, dict) else None,
+            **{key: job.get(key) for key in ('score', 'decision', 'reasoning', 'filter_status',
+                                            'filter_evidence', 'qualification_evidence')}}
+        snapshot['filter_status'] = job.get('filter_status', 'pass')
+        snapshot['filter_evidence'] = job.get('filter_evidence', {})
+        return {'analysis_receipt': snapshot,
+                'analysis_receipt_digest': hashlib.sha256(cls._canonical_snapshot(snapshot).encode()).hexdigest()}
+
+    @classmethod
+    def _analysis_job(cls, row: dict, outcome: dict, *, resume_digest: str | None) -> dict:
+        snapshot = outcome.get('analysis_receipt')
+        if snapshot is None:
+            # Old receipts do not prove a particular resume version. Do not
+            # silently bless them using today's matching cache.
+            if (resume_digest is not None or row.get('filter_status', 'pass') != 'pass'
+                    or outcome.get('filter_fingerprint') != cls.review_fingerprint(row)):
+                raise ValueError('旧搜索缺少当前简历版本的稳定证据')
+            return row
+        if (not isinstance(snapshot, dict) or snapshot.get('version') != 2
+                or outcome.get('analysis_receipt_digest') != hashlib.sha256(cls._canonical_snapshot(snapshot).encode()).hexdigest()
+                or snapshot.get('job_id') != row['id']
+                or snapshot.get('job_facts_fingerprint') != cls.facts_fingerprint(row)
+                or snapshot.get('filter_status') != 'pass'
+                or resume_digest is not None and snapshot.get('resume_digest') != resume_digest):
+            raise ValueError('搜索原始事实、简历版本或冻结判定已变化')
+        frozen = {key: snapshot.get(key) for key in ('score', 'decision', 'reasoning',
+                  'filter_status', 'filter_evidence', 'qualification_evidence')}
+        for key in ('filter_evidence', 'qualification_evidence'):
+            if isinstance(frozen[key], (dict, list)):
+                frozen[key] = json.dumps(frozen[key], ensure_ascii=False)
+        return {**row, **frozen, 'analysis_receipt': snapshot}
+
     def resume_analysis_evidence(self, resume_id: str, *, limit: int = 20,
                                  legacy_since: str | None = None, min_score: int | None = None,
                                  max_score: int | None = None, salary_min: int | None = None,
-                                 task_id: str | None = None) -> tuple[list[dict[str, Any]], dict[str, int]]:
+                                 task_id: str | None = None,
+                                 resume_digest: str | None = None) -> tuple[list[dict[str, Any]], dict[str, int]]:
         """Return saved JD evidence plus why other candidates were excluded.
 
         The gaps mapping separates "no matching job" from "cannot decide because
@@ -1319,19 +1387,18 @@ class JobStore:
                 "AND event_type IN ('job_stored','job_duplicate','job_refiltered') ORDER BY id DESC",
                 task_ids,
             ).fetchall()
-            ids: list[int] = []
-            outcomes: dict[int, dict] = {}
-            seen_ids: set[int] = set()
+            receipts: list[tuple[int, dict]] = []
+            seen_receipts: set[tuple[str, int]] = set()
             for event in events:
                 try:
                     sample = json.loads(event["sample_json"] or "{}")
                     job_id = int(sample.get("job_id") or 0)
                 except (ValueError, TypeError, json.JSONDecodeError):
                     continue
-                if job_id <= 0 or job_id in seen_ids:
+                key = (event['task_id'], job_id)
+                if job_id <= 0 or key in seen_receipts:
                     continue
-                seen_ids.add(job_id)
-                outcomes[job_id] = sample
+                seen_receipts.add(key)
                 fresh = event["task_id"] not in updated_digests or sample.get("filter_evidence", {}).get("digest") == updated_digests[event["task_id"]]
                 if not fresh:
                     gaps["stale_filter"] += 1
@@ -1339,10 +1406,11 @@ class JobStore:
                 if sample.get("filter_status", "pass") != "pass" or sample.get("admission", "accepted") != "accepted":
                     gaps["unknown_filter"] += 1
                     continue
-                ids.append(job_id)
-            if not ids:
+                receipts.append((job_id, sample))
+            if not receipts:
                 gaps["no_candidates"] = 1
                 return [], gaps
+            ids = list(dict.fromkeys(ident for ident, _ in receipts))
             rows = db.execute(
                 "SELECT * "
                 "FROM jobs WHERE id IN (" + ",".join("?" for _ in ids) + ")", ids,
@@ -1350,7 +1418,10 @@ class JobStore:
         by_id = {int(row["id"]): dict(row) for row in rows}
         from ..core.search_contract import monthly_salary_lower_bound
         selected: list[dict[str, Any]] = []
-        for job_id in ids:
+        selected_ids: set[int] = set()
+        for job_id, outcome in receipts:
+            if job_id in selected_ids:
+                continue
             row = by_id.get(job_id)
             if row is None:
                 gaps["missing_job"] += 1
@@ -1358,15 +1429,9 @@ class JobStore:
             if row.get("removed_at"):
                 gaps["removed"] += 1
                 continue
-            if row.get("filter_status", "pass") != "pass":
-                gaps["unknown_filter"] += 1
-                continue
-            outcome = outcomes.get(job_id, {})
-            if outcome.get("filter_status", "pass") != "pass":
-                gaps["unknown_filter"] += 1
-                continue
-            if (outcome.get("filter_fingerprint")
-                    and outcome["filter_fingerprint"] != self.review_fingerprint(row)):
+            try:
+                row = self._analysis_job(row, outcome, resume_digest=resume_digest)
+            except ValueError:
                 gaps["stale_filter"] += 1
                 continue
             score = row.get("score")
@@ -1388,6 +1453,7 @@ class JobStore:
                     gaps["salary_below_min"] += 1
                     continue
             selected.append(row)
+            selected_ids.add(job_id)
             if len(selected) >= limit:
                 break
         return selected, gaps
@@ -1395,10 +1461,11 @@ class JobStore:
     def jobs_for_resume_analysis(self, resume_id: str, *, limit: int = 20,
                                  legacy_since: str | None = None, min_score: int | None = None,
                                  max_score: int | None = None, salary_min: int | None = None,
-                                 task_id: str | None = None) -> list[dict[str, Any]]:
+                                 task_id: str | None = None, resume_digest: str | None = None) -> list[dict[str, Any]]:
         """Return saved JD evidence from terminal runs for one resume, not the global board."""
         return self.resume_analysis_evidence(resume_id, limit=limit, legacy_since=legacy_since,
-            min_score=min_score, max_score=max_score, salary_min=salary_min, task_id=task_id)[0]
+            min_score=min_score, max_score=max_score, salary_min=salary_min, task_id=task_id,
+            resume_digest=resume_digest)[0]
 
     def save_learning_plan(self, plan: dict[str, Any]) -> None:
         now = utc_now()
@@ -1416,19 +1483,28 @@ class JobStore:
         inserted = []
         with self.lock, self._connect() as db:
             for item in items:
-                current = db.execute("SELECT removed_at FROM jobs WHERE id=?", (item["id"],)).fetchone()
+                current = db.execute("SELECT * FROM jobs WHERE id=?", (item["id"],)).fetchone()
                 if not current or current["removed_at"]:
                     continue
-                selected_unknown = item.get("filter_status") == "unknown" and (scope_evidence or {}).get(item["id"], {}).get("allow_unverified") is True
-                if item.get("filter_status", "pass") != "pass" and not selected_unknown:
+                if self.facts_fingerprint(dict(current)) != self.facts_fingerprint(item):
                     continue
+                evidence = (scope_evidence or {}).get(item["id"], {})
+                try:
+                    snapshot = self.freeze_delivery_eligibility(item, binding=binding,
+                        allow_unverified=evidence.get('allow_unverified') is True,
+                        allow_outside_search=evidence.get('allow_outside_search') is True)
+                except ValueError:
+                    continue
+                snapshot['queue'] = {'session_id': session_id, 'resume_stamp': resume_stamp,
+                    'min_score': min_score, 'scope': scope or {}, 'scope_evidence': evidence}
+                frozen = self._canonical_snapshot(snapshot)
                 cursor = db.execute(
                     "INSERT OR IGNORE INTO mock_delivery_queue "
-                    "(job_id,session_id,resume_stamp,binding_json,job_hash,min_score,status,updated_at,scope_json,scope_evidence_json) "
-                    "VALUES (?,?,?,?,?,?,'queued',?,?,?)",
+                    "(job_id,session_id,resume_stamp,binding_json,job_hash,min_score,status,updated_at,scope_json,scope_evidence_json,eligibility_json,eligibility_digest) "
+                    "VALUES (?,?,?,?,?,?,'queued',?,?,?,?,?)",
                     (item["id"], session_id, resume_stamp, json.dumps(binding),
-                     self.review_fingerprint(item), min_score, utc_now(), json.dumps(scope or {}),
-                     json.dumps((scope_evidence or {}).get(item["id"], {}))),
+                     snapshot['job_facts_fingerprint'], min_score, utc_now(), json.dumps(scope or {}),
+                     json.dumps(evidence), frozen, hashlib.sha256(frozen.encode()).hexdigest()),
                 )
                 if cursor.rowcount:
                     # The user authorised this batch in words ("85分以上的自动投递").
@@ -1613,9 +1689,21 @@ class JobStore:
             values.append(session_id)
         with self.lock, self._connect() as db:
             rows = db.execute(query + " ORDER BY updated_at,job_id", values).fetchall()
-        return [{**dict(row), "binding": json.loads(row["binding_json"]),
+        return [self._decode_delivery_queue_row(row) for row in rows]
+
+    @staticmethod
+    def _decode_delivery_queue_row(row) -> dict:
+        return {**dict(row), "binding": json.loads(row["binding_json"]),
                  "scope": json.loads(row["scope_json"] or "{}"),
-                 "scope_evidence": json.loads(row["scope_evidence_json"] or "{}")} for row in rows]
+                 "scope_evidence": json.loads(row["scope_evidence_json"] or "{}"),
+                 "eligibility_snapshot": json.loads(row['eligibility_json']) if row['eligibility_json'] else None}
+
+    def _stored_delivery_queue_item(self, job_id: int) -> dict | None:
+        # A read-only connection also works while authorization owns self.lock;
+        # do not recursively acquire the non-reentrant writer lock.
+        with self._connect() as db:
+            row = db.execute('SELECT * FROM mock_delivery_queue WHERE job_id=?', (job_id,)).fetchone()
+        return self._decode_delivery_queue_row(row) if row else None
 
     def claim_mock_delivery(self, job_id: int) -> bool:
         with self.lock, self._connect() as db:
@@ -1715,6 +1803,85 @@ class JobStore:
             facts["qualification_evidence"]=job["qualification_evidence"]
         return hashlib.sha256(json.dumps(facts, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
 
+    @staticmethod
+    def facts_fingerprint(job: dict) -> str:
+        """Original job facts, independent of mutable search/matching verdicts."""
+        facts = {key: job.get(key) for key in ('id', 'title', 'company', 'location', 'salary',
+                 'source_url', 'source', 'external_id', 'description', 'content_hash', 'source_tags')}
+        raw_tags = facts['source_tags']
+        if isinstance(raw_tags, str):
+            try:
+                facts['source_tags'] = json.loads(raw_tags)
+            except ValueError:
+                pass
+        if isinstance(facts['source_tags'], list):
+            facts['source_tags'] = sorted(facts['source_tags'], key=lambda value: str(value).casefold())
+        return hashlib.sha256(json.dumps(facts, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+
+    @staticmethod
+    def _canonical_snapshot(snapshot: dict) -> str:
+        return json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
+
+    @classmethod
+    def freeze_delivery_eligibility(cls, job: dict, *, binding: dict,
+                                    allow_unverified=False, allow_outside_search=False) -> dict:
+        snapshot = {'version': 2, 'job_id': job['id'], 'job_facts_fingerprint': cls.facts_fingerprint(job),
+            'binding': {key: binding.get(key) for key in ('resume_document_id', 'resume_version', 'resume_digest')},
+            'score': job.get('score', 0), 'filter_status': job.get('filter_status', 'pass'),
+            'filter_evidence': job.get('filter_evidence'), 'qualification_evidence': job.get('qualification_evidence'),
+            'allow_unverified': bool(allow_unverified), 'allow_outside_search': bool(allow_outside_search)}
+        cls._validate_frozen_eligibility(snapshot, job, binding=binding)
+        return snapshot
+
+    @classmethod
+    def _validate_frozen_eligibility(cls, snapshot: dict, job: dict, *, binding: dict | None = None) -> None:
+        if (not isinstance(snapshot, dict) or snapshot.get('version') != 2
+                or snapshot.get('job_id') != job.get('id')
+                or snapshot.get('job_facts_fingerprint') != cls.facts_fingerprint(job)):
+            raise ValueError('岗位原始事实已变化；旧投递范围不能继续使用')
+        if job.get('removed_at'):
+            raise ValueError('岗位已由用户移除，不能继续投递')
+        if binding is not None and snapshot.get('binding') != {key: binding.get(key)
+                for key in ('resume_document_id', 'resume_version', 'resume_digest')}:
+            raise ValueError('冻结投递范围绑定的简历已变化')
+        allowed_unknown = snapshot.get('filter_status') == 'unknown' and snapshot.get('allow_unverified') is True
+        if (snapshot.get('filter_status') != 'pass' and not allowed_unknown
+                and snapshot.get('allow_outside_search') is not True):
+            raise ValueError('冻结的投递判定未通过，且未授权本次单岗例外')
+        scope_evidence = (snapshot.get('queue') or {}).get('scope_evidence') or {}
+        if (scope_evidence.get('status', 'pass') != 'pass' and not snapshot.get('allow_unverified')
+                and not snapshot.get('allow_outside_search')):
+            raise ValueError('冻结的独立投递条件未通过，不能继续发送')
+
+    def assert_delivery_queue_facts(self, item: dict, job: dict | None = None) -> dict | None:
+        """Verify the frozen queued scope; never inherit a new search's cache."""
+        job = job or self.get_job(item['job_id'])
+        snapshot = item.get('eligibility_snapshot')
+        if snapshot is None:
+            if job.get('removed_at') or self.review_fingerprint(job) != item.get('job_hash'):
+                raise ValueError('旧队列岗位或筛选证据已变化，需要重新确认')
+            return None
+        if not isinstance(snapshot, dict):
+            raise ValueError('冻结投递范围格式损坏')
+        canonical = self._canonical_snapshot(snapshot)
+        actual = hashlib.sha256(canonical.encode()).hexdigest()
+        if not secrets.compare_digest(actual, str(item.get('eligibility_digest') or '')):
+            raise ValueError('冻结投递范围完整性校验失败')
+        expected_queue = {key: item.get(key) for key in ('session_id', 'resume_stamp', 'min_score', 'scope', 'scope_evidence')}
+        if snapshot.get('queue') != expected_queue or item.get('job_hash') != snapshot.get('job_facts_fingerprint'):
+            raise ValueError('冻结的投递队列范围、门槛或归属已变化')
+        self._validate_frozen_eligibility(snapshot, job, binding=item.get('binding') or {})
+        if int(snapshot.get('score', -1)) < int(item['min_score']):
+            raise ValueError('冻结匹配分低于本批投递门槛')
+        with self._connect() as db:
+            stored = db.execute('SELECT eligibility_digest,status FROM mock_delivery_queue WHERE job_id=?',
+                                (item['job_id'],)).fetchone()
+        if not stored or not secrets.compare_digest(actual, str(stored['eligibility_digest'] or '')):
+            raise ValueError('投递快照与持久队列不一致')
+        if stored['status'] in {'cancelled', 'stale', 'blocked'}:
+            raise ValueError('投递队列已取消或终止，不能继续发送')
+        return snapshot
+
     def get_job(self, job_id: int) -> dict[str, Any]:
         with self.lock, self._connect() as db:
             row = db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
@@ -1735,6 +1902,8 @@ class JobStore:
         resume_document_id: str = "master", resume_version: int = 0,
         resume_digest: str = "unavailable", action: str = "submit_resume",
         allow_unverified: bool = False, delivery_flow: str = "native",
+        outreach: dict | None = None, allow_outside_search: bool = False,
+        eligibility_snapshot: dict | None = None,
     ) -> DeliveryPreviewView:
         if action != "submit_resume":
             raise ValueError("不支持的投递动作")
@@ -1742,11 +1911,33 @@ class JobStore:
             raise ValueError("不支持的模拟投递流程")
         job = self.get_job(job_id)
         now = datetime.now(UTC)
-        self._check_delivery_filter(job, {"allow_unverified": allow_unverified})
+        binding = {'resume_document_id': resume_document_id, 'resume_version': resume_version, 'resume_digest': resume_digest}
+        if eligibility_snapshot is None:
+            self._check_delivery_filter(job, {"allow_unverified": allow_unverified,
+                "allow_outside_search": allow_outside_search, "job_id": job_id,
+                "filter_fingerprint": self.review_fingerprint(job)})
+            eligibility_snapshot = self.freeze_delivery_eligibility(job, binding=binding,
+                allow_unverified=allow_unverified, allow_outside_search=allow_outside_search)
+        else:
+            self._validate_frozen_eligibility(eligibility_snapshot, job, binding=binding)
+            if ((allow_unverified and not eligibility_snapshot.get('allow_unverified'))
+                    or (allow_outside_search and not eligibility_snapshot.get('allow_outside_search'))):
+                raise ValueError('不能在冻结队列之外扩大投递例外')
+            allow_unverified = eligibility_snapshot.get('allow_unverified') is True
+            allow_outside_search = eligibility_snapshot.get('allow_outside_search') is True
+            queued = self._stored_delivery_queue_item(job_id)
+            if eligibility_snapshot.get('queue') is not None:
+                if not queued or self._canonical_snapshot(queued.get('eligibility_snapshot')) != self._canonical_snapshot(eligibility_snapshot):
+                    raise ValueError('投递预览没有对应的持久冻结队列')
+                self.assert_delivery_queue_facts(queued, job)
+        if allow_outside_search and (resume_digest == 'unavailable' or resume_version < 1):
+            raise ValueError("范围外单岗投递必须绑定当前已确认简历")
         expires = now + timedelta(minutes=30)
         payload = {
             "job_id": job_id,
             "filter_fingerprint": self.review_fingerprint(job),
+            "job_facts_fingerprint": self.facts_fingerprint(job),
+            "eligibility_snapshot": eligibility_snapshot,
             "title": job["title"],
             "company": job["company"],
             "source_url": job["source_url"],
@@ -1757,7 +1948,20 @@ class JobStore:
             "action": action,
             "action_summary": "填写申请表并上传所选简历；遇到验证码、MFA 或未知问题立即暂停",
             "allow_unverified": allow_unverified,
+            "allow_outside_search": allow_outside_search,
+            "exception_reasons": ([f"原搜索业务条件状态为 {job.get('filter_status', 'unknown')}；本次仅对该岗位例外"]
+                                  if allow_outside_search else []),
         }
+        if outreach is not None:
+            from ..delivery.outreach import job_digest
+            if (not isinstance(outreach, dict) or outreach.get('job_digest') != job_digest(job)
+                    or outreach.get('resume_digest') != resume_digest):
+                raise ValueError("沟通话术与岗位或已批准简历不一致，请重新生成预览")
+            message = outreach.get('message')
+            if not isinstance(message, str) or not message.strip() or len(message) > 600 or redact_text(message) != message:
+                raise ValueError("沟通话术为空、过长或含联系方式，请重新生成")
+            payload.update(outreach_message=message, outreach_method=outreach.get('method', 'evidence_template'),
+                           outreach_evidence=outreach.get('evidence', []), outreach_job_digest=outreach['job_digest'])
         if delivery_flow in {"direct", "gated"}:
             from ..delivery.mock_site_adapter import MockJobSiteAdapter
             from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
@@ -1794,6 +1998,16 @@ class JobStore:
         if row is None:
             raise KeyError(preview_id)
         return int(row["job_id"])
+
+    def delivery_outreach(self, preview_id: str | None) -> str | None:
+        if not preview_id:
+            return None
+        with self.lock, self._connect() as db:
+            row = db.execute("SELECT * FROM delivery_previews WHERE id=?", (preview_id,)).fetchone()
+        if row is None:
+            raise ValueError("缺少已冻结的沟通预览")
+        payload = self._validate_delivery_preview_row(row)
+        return payload.get('outreach_message') or None
 
     @staticmethod
     def _validate_delivery_preview_row(
@@ -1900,8 +2114,24 @@ class JobStore:
     def _check_delivery_filter(self, job: dict, payload: dict | None = None) -> None:
         if job.get("removed_at"):
             raise ValueError("岗位已由用户移除，不能继续投递")
+        snapshot = (payload or {}).get('eligibility_snapshot')
+        if snapshot is not None:
+            self._validate_frozen_eligibility(snapshot, job, binding=payload)
+            if (payload.get('job_facts_fingerprint') != snapshot.get('job_facts_fingerprint')
+                    or payload.get('allow_outside_search', False) != snapshot.get('allow_outside_search', False)
+                    or payload.get('allow_unverified', False) != snapshot.get('allow_unverified', False)):
+                raise ValueError('投递预览与冻结的条件证据不一致')
+            if snapshot.get('queue') is not None:
+                queued = self._stored_delivery_queue_item(job['id'])
+                if not queued or self._canonical_snapshot(queued.get('eligibility_snapshot')) != self._canonical_snapshot(snapshot):
+                    raise ValueError('投递预览的冻结队列已变化')
+                self.assert_delivery_queue_facts(queued, job)
+            return
         selected_unknown = job and job.get("filter_status") == "unknown" and (payload or {}).get("allow_unverified") is True
-        if not job or job.get("filter_status", "pass") != "pass" and not selected_unknown:
+        selected_exception = bool(job and (payload or {}).get('allow_outside_search') is True
+            and (payload or {}).get('job_id') == job.get('id')
+            and (payload or {}).get('filter_fingerprint') == self.review_fingerprint(job))
+        if not job or job.get("filter_status", "pass") != "pass" and not (selected_unknown or selected_exception):
             raise ValueError("职位筛选条件未核实通过，不能沟通或投递；请先核对条件并重新搜索")
         if payload and "filter_fingerprint" in payload and payload["filter_fingerprint"] != self.review_fingerprint(job):
             raise ValueError("筛选条件或职位证据已变化，请重新生成预览并授权")
@@ -1912,7 +2142,8 @@ class JobStore:
             preview = db.execute("SELECT * FROM delivery_previews WHERE id=? AND job_id=?", (preview_id, job_id)).fetchone()
         if preview is None:
             raise ValueError("缺少与职位绑定的投递预览，需重新授权")
-        self._check_delivery_filter(dict(job) if job else {}, json.loads(preview["payload_json"]))
+        payload = self._validate_delivery_preview_row(preview)
+        self._check_delivery_filter(dict(job) if job else {}, payload)
 
     def mark_recruiter_reply(self, job_id: int, reply: str) -> str:
         now = utc_now()

@@ -510,6 +510,11 @@ class DeliveryPreviewView(BaseModel):
     resume_digest: str
     action: Literal["submit_resume"] = "submit_resume"
     action_summary: str
+    outreach_message: str = ""
+    outreach_method: str = "legacy"
+    outreach_evidence: list[dict[str, Any]] = Field(default_factory=list)
+    allow_outside_search: bool = False
+    exception_reasons: list[str] = Field(default_factory=list)
     payload_digest: str
     requires_user_confirmation: bool = True
     created_at: datetime

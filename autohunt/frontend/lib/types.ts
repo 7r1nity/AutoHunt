@@ -184,6 +184,41 @@ export type LearningPlan = {
   gaps: LearningGap[];
 };
 
+export type InterviewQuestion = {
+  id: string;
+  category: "requirements" | "project" | "depth" | "gap" | "collaboration";
+  question: string;
+  followups: string[];
+  preparation: string[];
+  jd_quote: string;
+  resume_quote: string;
+  candidate_source: string;
+  assessment: "evidenced" | "resume_not_shown";
+};
+
+export type InterviewPreparationReport = {
+  id: string;
+  resume_id: string;
+  resume_document_id: string;
+  resume_version: number;
+  resume_digest: string;
+  job_id: number;
+  job_title: string;
+  company: string;
+  source_url: string;
+  jd_hash: string;
+  created_at: string;
+  focus: string;
+  generation_mode: "model" | "template";
+  provider: string;
+  model: string;
+  summary: string;
+  notice: string;
+  questions: InterviewQuestion[];
+  stale: boolean;
+  stale_reasons: string[];
+};
+
   export type DeliveryTask = {
     id: string | null;
     preview_id: string | null;
@@ -219,6 +254,9 @@ export type DeliveryPreview = {
   action_summary: string;
   payload_digest: string;
   expires_at: string;
+  outreach_message?: string;
+  outreach_method?: string;
+  exception_reasons?: string[];
 };
 
 export type Material = {

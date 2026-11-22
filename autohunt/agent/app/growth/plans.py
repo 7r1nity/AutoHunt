@@ -15,7 +15,7 @@ from ..jobs.store import JobStore
 from ..llm.base import LLMRequest
 from ..llm.manager import LLMManager
 from ..memory.candidate_state import CandidateStateStore
-from ..memory.resume_workspace import ResumeWorkspaceStore
+from ..memory.resume_workspace import ResumeWorkspaceStore, resume_document_digest
 from ..memory.resume_store import ResumeStore
 
 
@@ -124,16 +124,19 @@ class LearningPlanService:
         legacy_start = profile.resume_activated_at
         if legacy_start is None and self.original_resumes is not None:
             legacy_start = self.original_resumes.get(profile.resume_id).uploaded_at
-        jobs = self.jobs.jobs_for_resume_analysis(
+        document = self.resumes.read_document()
+        jobs, evidence_gaps = self.jobs.resume_analysis_evidence(
             profile.resume_id, limit=20, legacy_since=legacy_start.isoformat() if legacy_start else None,
             min_score=min_score, max_score=max_score, salary_min=salary_min, task_id=task_id,
+            resume_digest=resume_document_digest(document),
         )
         jobs = [job for job in jobs if len(str(job["description"] or "").strip()) >= 40]
         if not jobs:
+            if evidence_gaps.get('stale_filter'):
+                raise ValueError('已找到搜索记录，但岗位原始事实、简历版本或冻结判定证据已变化；未生成计划。请先重新核对该轮结果或按当前简历重新搜索')
             if min_score is not None or max_score is not None or salary_min is not None:
                 raise ValueError("指定匹配分和薪资范围内没有当前简历的有效 JD；没有生成计划，也不会擅自扩大范围。请调整条件或先搜索职位")
             raise ValueError("当前简历尚无已完成搜索的有效 JD，请先搜索职位")
-        document = self.resumes.read_document()
         resume_text = self.resumes.render_markdown(document)[:12000]
         source = [{
             "id": job["id"], "title": job["title"], "location": job["location"],

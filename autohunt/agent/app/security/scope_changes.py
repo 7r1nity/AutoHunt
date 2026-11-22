@@ -46,10 +46,11 @@ def _implies(new, old):
     return False
 
 
-def delivery_scope_change(arguments, previous, *, session_id, stamp, task_id=None):
+def delivery_scope_change(arguments, previous, *, session_id, stamp, task_id=None, selection_inherits_scope=False):
     """Return a server-owned reason to confirm, or None for a proved subset."""
-    if not previous or arguments.get("selector") or arguments.get("target_step_id"):
-        return None  # Explicit job selection has its own bounded-target contract.
+    selected = arguments.get("selector") or arguments.get("target_step_id")
+    if not previous or (selected and not selection_inherits_scope and arguments.get("scope_mode") not in {"inherit", "update"}):
+        return None  # Independent job selection has its own bounded-target contract.
     reasons = []
     if previous.get("session_id") != session_id or previous.get("resume_stamp") != stamp:
         reasons.append("会话或简历绑定不同")

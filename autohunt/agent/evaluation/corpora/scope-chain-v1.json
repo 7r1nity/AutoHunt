@@ -1,0 +1,1811 @@
+{
+  "schema_version": 1,
+  "name": "Scope and full-chain stateful scenarios",
+  "evaluation_type": "deterministic engineering scenarios with scripted plans; not natural-language model accuracy",
+  "defaults": {
+    "search": {
+      "queries": [
+        "数据分析师"
+      ],
+      "locations": [
+        "深圳",
+        "上海",
+        "杭州"
+      ],
+      "salary_min": 0,
+      "result_limit": 15,
+      "source": "mock",
+      "filters": {
+        "op": "condition",
+        "text": "非第三方或外包岗位"
+      }
+    },
+    "delivery_scope": {
+      "min_score": 85,
+      "filters": {
+        "op": "all",
+        "children": [
+          {
+            "op": "condition",
+            "text": "正式岗位"
+          },
+          {
+            "op": "condition",
+            "text": "城市为深圳"
+          },
+          {
+            "op": "condition",
+            "text": "月薪区间下限至少15000元",
+            "salary": {
+              "unit": "monthly",
+              "minimum": 15000
+            }
+          }
+        ]
+      }
+    }
+  },
+  "cases": [
+    {
+      "id": "search-cities",
+      "family": "search_update",
+      "turns": [
+        "找15个数据分析岗位，深圳、上海、杭州，正式和实习都可，不要第三方外包。仅投深圳正式岗、月薪15k及85分以上。",
+        "把搜索城市加上北京，其他搜索条件不变。"
+      ],
+      "payload": {
+        "initial_search": {},
+        "patch": {
+          "locations": [
+            "深圳",
+            "上海",
+            "杭州",
+            "北京"
+          ]
+        }
+      },
+      "oracle": {
+        "patch": {
+          "locations": [
+            "深圳",
+            "上海",
+            "杭州",
+            "北京"
+          ]
+        },
+        "unchanged_outside_patch": true,
+        "old_search_receipt_retained": true
+      },
+      "phases": [
+        "pending",
+        "waiting_external"
+      ]
+    },
+    {
+      "id": "search-roles",
+      "family": "search_update",
+      "turns": [
+        "找15个数据分析岗位，深圳、上海、杭州，正式和实习都可，不要第三方外包。仅投深圳正式岗、月薪15k及85分以上。",
+        "岗位方向再加上风险分析师，其他不变。"
+      ],
+      "payload": {
+        "initial_search": {},
+        "patch": {
+          "queries": [
+            "数据分析师",
+            "风险分析师"
+          ]
+        }
+      },
+      "oracle": {
+        "patch": {
+          "queries": [
+            "数据分析师",
+            "风险分析师"
+          ]
+        },
+        "unchanged_outside_patch": true,
+        "old_search_receipt_retained": true
+      },
+      "phases": [
+        "pending",
+        "waiting_external"
+      ]
+    },
+    {
+      "id": "search-quantity",
+      "family": "search_update",
+      "turns": [
+        "找15个数据分析岗位，深圳、上海、杭州，正式和实习都可，不要第三方外包。仅投深圳正式岗、月薪15k及85分以上。",
+        "搜索数量从15改成25，条件不变。"
+      ],
+      "payload": {
+        "initial_search": {},
+        "patch": {
+          "result_limit": 25
+        }
+      },
+      "oracle": {
+        "patch": {
+          "result_limit": 25
+        },
+        "unchanged_outside_patch": true,
+        "old_search_receipt_retained": true
+      },
+      "phases": [
+        "pending",
+        "waiting_external"
+      ]
+    },
+    {
+      "id": "search-salary",
+      "family": "search_update",
+      "turns": [
+        "找15个数据分析岗位，深圳、上海、杭州，正式和实习都可，不要第三方外包。仅投深圳正式岗、月薪15k及85分以上。",
+        "搜索最低月薪从15k降到13k。"
+      ],
+      "payload": {
+        "initial_search": {
+          "salary_min": 15000
+        },
+        "patch": {
+          "salary_min": 13000
+        }
+      },
+      "oracle": {
+        "patch": {
+          "salary_min": 13000
+        },
+        "unchanged_outside_patch": true,
+        "old_search_receipt_retained": true
+      },
+      "phases": [
+        "pending",
+        "waiting_external"
+      ]
+    },
+    {
+      "id": "search-internship",
+      "family": "search_update",
+      "turns": [
+        "找15个数据分析岗位，深圳、上海、杭州，正式和实习都可，不要第三方外包。仅投深圳正式岗、月薪15k及85分以上。",
+        "搜索范围扩大到正式或实习，其他不变。"
+      ],
+      "payload": {
+        "initial_search": {
+          "filters": {
+            "op": "condition",
+            "text": "正式岗位"
+          }
+        },
+        "patch": {
+          "filters": {
+            "op": "any",
+            "children": [
+              {
+                "op": "condition",
+                "text": "正式岗位"
+              },
+              {
+                "op": "condition",
+                "text": "实习岗位"
+              }
+            ]
+          }
+        }
+      },
+      "oracle": {
+        "patch": {
+          "filters": {
+            "op": "any",
+            "children": [
+              {
+                "op": "condition",
+                "text": "正式岗位"
+              },
+              {
+                "op": "condition",
+                "text": "实习岗位"
+              }
+            ]
+          }
+        },
+        "unchanged_outside_patch": true,
+        "old_search_receipt_retained": true
+      },
+      "phases": [
+        "pending",
+        "waiting_external"
+      ]
+    },
+    {
+      "id": "search-negotiable",
+      "family": "search_update",
+      "turns": [
+        "找15个数据分析岗位，深圳、上海、杭州，正式和实习都可，不要第三方外包。仅投深圳正式岗、月薪15k及85分以上。",
+        "搜索接受面议，或者月薪15k以上。"
+      ],
+      "payload": {
+        "initial_search": {
+          "filters": {
+            "op": "condition",
+            "text": "月薪区间下限至少15000元",
+            "salary": {
+              "unit": "monthly",
+              "minimum": 15000
+            }
+          }
+        },
+        "patch": {
+          "filters": {
+            "op": "any",
+            "children": [
+              {
+                "op": "condition",
+                "text": "月薪区间下限至少15000元",
+                "salary": {
+                  "unit": "monthly",
+                  "minimum": 15000
+                }
+              },
+              {
+                "op": "condition",
+                "text": "薪资面议"
+              }
+            ]
+          }
+        }
+      },
+      "oracle": {
+        "patch": {
+          "filters": {
+            "op": "any",
+            "children": [
+              {
+                "op": "condition",
+                "text": "月薪区间下限至少15000元",
+                "salary": {
+                  "unit": "monthly",
+                  "minimum": 15000
+                }
+              },
+              {
+                "op": "condition",
+                "text": "薪资面议"
+              }
+            ]
+          }
+        },
+        "unchanged_outside_patch": true,
+        "old_search_receipt_retained": true
+      },
+      "phases": [
+        "pending",
+        "waiting_external"
+      ]
+    },
+    {
+      "id": "search-third-party",
+      "family": "search_update",
+      "turns": [
+        "找15个数据分析岗位，深圳、上海、杭州，正式和实习都可，不要第三方外包。仅投深圳正式岗、月薪15k及85分以上。",
+        "这一轮搜索也接受第三方岗位，其他不变。"
+      ],
+      "payload": {
+        "initial_search": {
+          "filters": {
+            "op": "all",
+            "children": [
+              {
+                "op": "condition",
+                "text": "正式岗位"
+              },
+              {
+                "op": "condition",
+                "text": "非第三方或外包岗位"
+              }
+            ]
+          }
+        },
+        "patch": {
+          "filters": {
+            "op": "condition",
+            "text": "正式岗位"
+          }
+        }
+      },
+      "oracle": {
+        "patch": {
+          "filters": {
+            "op": "condition",
+            "text": "正式岗位"
+          }
+        },
+        "unchanged_outside_patch": true,
+        "old_search_receipt_retained": true
+      },
+      "phases": [
+        "pending",
+        "waiting_external"
+      ]
+    },
+    {
+      "id": "search-benefit",
+      "family": "search_update",
+      "turns": [
+        "找15个数据分析岗位，深圳、上海、杭州，正式和实习都可，不要第三方外包。仅投深圳正式岗、月薪15k及85分以上。",
+        "搜索不再要求住房补贴，保留正式岗位要求。"
+      ],
+      "payload": {
+        "initial_search": {
+          "filters": {
+            "op": "all",
+            "children": [
+              {
+                "op": "condition",
+                "text": "正式岗位"
+              },
+              {
+                "op": "condition",
+                "text": "提供住房补贴"
+              }
+            ]
+          }
+        },
+        "patch": {
+          "filters": {
+            "op": "condition",
+            "text": "正式岗位"
+          }
+        }
+      },
+      "oracle": {
+        "patch": {
+          "filters": {
+            "op": "condition",
+            "text": "正式岗位"
+          }
+        },
+        "unchanged_outside_patch": true,
+        "old_search_receipt_retained": true
+      },
+      "phases": [
+        "pending",
+        "waiting_external"
+      ]
+    },
+    {
+      "id": "delivery-lower-score",
+      "family": "delivery_update",
+      "turns": [
+        "找15个数据分析岗位，深圳、上海、杭州，正式和实习都可，不要第三方外包。仅投深圳正式岗、月薪15k及85分以上。",
+        "搜索不变，自动投递门槛从85降为80分。"
+      ],
+      "payload": {
+        "previous_filter": {
+          "op": "all",
+          "children": [
+            {
+              "op": "condition",
+              "text": "正式岗位"
+            },
+            {
+              "op": "condition",
+              "text": "城市为深圳"
+            },
+            {
+              "op": "condition",
+              "text": "月薪区间下限至少15000元",
+              "salary": {
+                "unit": "monthly",
+                "minimum": 15000
+              }
+            }
+          ]
+        },
+        "arguments": {
+          "scope_mode": "update",
+          "min_score": 80
+        }
+      },
+      "oracle": {
+        "min_score": 80,
+        "filters": {
+          "op": "all",
+          "children": [
+            {
+              "op": "condition",
+              "text": "正式岗位"
+            },
+            {
+              "op": "condition",
+              "text": "城市为深圳"
+            },
+            {
+              "op": "condition",
+              "text": "月薪区间下限至少15000元",
+              "salary": {
+                "unit": "monthly",
+                "minimum": 15000
+              }
+            }
+          ]
+        },
+        "needs_approval": true,
+        "search_unchanged": true
+      },
+      "phases": [
+        "pending",
+        "waiting_approval"
+      ]
+    },
+    {
+      "id": "delivery-remove-score",
+      "family": "delivery_update",
+      "turns": [
+        "找15个数据分析岗位，深圳、上海、杭州，正式和实习都可，不要第三方外包。仅投深圳正式岗、月薪15k及85分以上。",
+        "搜索不变，取消投递分数门槛，仍按原岗位条件。"
+      ],
+      "payload": {
+        "previous_filter": {
+          "op": "all",
+          "children": [
+            {
+              "op": "condition",
+              "text": "正式岗位"
+            },
+            {
+              "op": "condition",
+              "text": "城市为深圳"
+            },
+            {
+              "op": "condition",
+              "text": "月薪区间下限至少15000元",
+              "salary": {
+                "unit": "monthly",
+                "minimum": 15000
+              }
+            }
+          ]
+        },
+        "arguments": {
+          "scope_mode": "update",
+          "min_score": 0
+        }
+      },
+      "oracle": {
+        "min_score": 0,
+        "filters": {
+          "op": "all",
+          "children": [
+            {
+              "op": "condition",
+              "text": "正式岗位"
+            },
+            {
+              "op": "condition",
+              "text": "城市为深圳"
+            },
+            {
+              "op": "condition",
+              "text": "月薪区间下限至少15000元",
+              "salary": {
+                "unit": "monthly",
+                "minimum": 15000
+              }
+            }
+          ]
+        },
+        "needs_approval": true,
+        "search_unchanged": true
+      },
+      "phases": [
+        "pending",
+        "waiting_approval"
+      ]
+    },
+    {
+      "id": "delivery-raise-score",
+      "family": "delivery_update",
+      "turns": [
+        "找15个数据分析岗位，深圳、上海、杭州，正式和实习都可，不要第三方外包。仅投深圳正式岗、月薪15k及85分以上。",
+        "投递只要90分以上，其他不变。"
+      ],
+      "payload": {
+        "previous_filter": {
+          "op": "all",
+          "children": [
+            {
+              "op": "condition",
+              "text": "正式岗位"
+            },
+            {
+              "op": "condition",
+              "text": "城市为深圳"
+            },
+            {
+              "op": "condition",
+              "text": "月薪区间下限至少15000元",
+              "salary": {
+                "unit": "monthly",
+                "minimum": 15000
+              }
+            }
+          ]
+        },
+        "arguments": {
+          "scope_mode": "update",
+          "min_score": 90
+        }
+      },
+      "oracle": {
+        "min_score": 90,
+        "filters": {
+          "op": "all",
+          "children": [
+            {
+              "op": "condition",
+              "text": "正式岗位"
+            },
+            {
+              "op": "condition",
+              "text": "城市为深圳"
+            },
+            {
+              "op": "condition",
+              "text": "月薪区间下限至少15000元",
+              "salary": {
+                "unit": "monthly",
+                "minimum": 15000
+              }
+            }
+          ]
+        },
+        "needs_approval": false,
+        "search_unchanged": true
+      },
+      "phases": [
+        "pending",
+        "waiting_approval"
+      ]
+    },
+    {
+      "id": "delivery-expand-city",
+      "family": "delivery_update",
+      "turns": [
+        "找15个数据分析岗位，深圳、上海、杭州，正式和实习都可，不要第三方外包。仅投深圳正式岗、月薪15k及85分以上。",
+        "搜索不变，投递城市扩到深圳或上海。"
+      ],
+      "payload": {
+        "previous_filter": {
+          "op": "all",
+          "children": [
+            {
+              "op": "condition",
+              "text": "正式岗位"
+            },
+            {
+              "op": "condition",
+              "text": "城市为深圳"
+            },
+            {
+              "op": "condition",
+              "text": "月薪区间下限至少15000元",
+              "salary": {
+                "unit": "monthly",
+                "minimum": 15000
+              }
+            }
+          ]
+        },
+        "arguments": {
+          "scope_mode": "update",
+          "filters": {
+            "op": "all",
+            "children": [
+              {
+                "op": "condition",
+                "text": "正式岗位"
+              },
+              {
+                "op": "any",
+                "children": [
+                  {
+                    "op": "condition",
+                    "text": "城市为深圳"
+                  },
+                  {
+                    "op": "condition",
+                    "text": "城市为上海"
+                  }
+                ]
+              },
+              {
+                "op": "condition",
+                "text": "月薪区间下限至少15000元",
+                "salary": {
+                  "unit": "monthly",
+                  "minimum": 15000
+                }
+              }
+            ]
+          }
+        }
+      },
+      "oracle": {
+        "min_score": 85,
+        "filters": {
+          "op": "all",
+          "children": [
+            {
+              "op": "condition",
+              "text": "正式岗位"
+            },
+            {
+              "op": "any",
+              "children": [
+                {
+                  "op": "condition",
+                  "text": "城市为深圳"
+                },
+                {
+                  "op": "condition",
+                  "text": "城市为上海"
+                }
+              ]
+            },
+            {
+              "op": "condition",
+              "text": "月薪区间下限至少15000元",
+              "salary": {
+                "unit": "monthly",
+                "minimum": 15000
+              }
+            }
+          ]
+        },
+        "needs_approval": true,
+        "search_unchanged": true
+      },
+      "phases": [
+        "pending",
+        "waiting_approval"
+      ]
+    },
+    {
+      "id": "delivery-narrow-city",
+      "family": "delivery_update",
+      "turns": [
+        "找15个数据分析岗位，深圳、上海、杭州，正式和实习都可，不要第三方外包。仅投深圳正式岗、月薪15k及85分以上。",
+        "搜索不变，深圳上海中只投深圳。"
+      ],
+      "payload": {
+        "previous_filter": {
+          "op": "all",
+          "children": [
+            {
+              "op": "condition",
+              "text": "正式岗位"
+            },
+            {
+              "op": "any",
+              "children": [
+                {
+                  "op": "condition",
+                  "text": "城市为深圳"
+                },
+                {
+                  "op": "condition",
+                  "text": "城市为上海"
+                }
+              ]
+            },
+            {
+              "op": "condition",
+              "text": "月薪区间下限至少15000元",
+              "salary": {
+                "unit": "monthly",
+                "minimum": 15000
+              }
+            }
+          ]
+        },
+        "arguments": {
+          "scope_mode": "update",
+          "filters": {
+            "op": "all",
+            "children": [
+              {
+                "op": "condition",
+                "text": "正式岗位"
+              },
+              {
+                "op": "condition",
+                "text": "城市为深圳"
+              },
+              {
+                "op": "condition",
+                "text": "月薪区间下限至少15000元",
+                "salary": {
+                  "unit": "monthly",
+                  "minimum": 15000
+                }
+              }
+            ]
+          }
+        }
+      },
+      "oracle": {
+        "min_score": 85,
+        "filters": {
+          "op": "all",
+          "children": [
+            {
+              "op": "condition",
+              "text": "正式岗位"
+            },
+            {
+              "op": "condition",
+              "text": "城市为深圳"
+            },
+            {
+              "op": "condition",
+              "text": "月薪区间下限至少15000元",
+              "salary": {
+                "unit": "monthly",
+                "minimum": 15000
+              }
+            }
+          ]
+        },
+        "needs_approval": false,
+        "search_unchanged": true
+      },
+      "phases": [
+        "pending",
+        "waiting_approval"
+      ]
+    },
+    {
+      "id": "delivery-lower-salary",
+      "family": "delivery_update",
+      "turns": [
+        "找15个数据分析岗位，深圳、上海、杭州，正式和实习都可，不要第三方外包。仅投深圳正式岗、月薪15k及85分以上。",
+        "搜索不变，投递月薪门槛改为13k。"
+      ],
+      "payload": {
+        "previous_filter": {
+          "op": "all",
+          "children": [
+            {
+              "op": "condition",
+              "text": "正式岗位"
+            },
+            {
+              "op": "condition",
+              "text": "城市为深圳"
+            },
+            {
+              "op": "condition",
+              "text": "月薪区间下限至少15000元",
+              "salary": {
+                "unit": "monthly",
+                "minimum": 15000
+              }
+            }
+          ]
+        },
+        "arguments": {
+          "scope_mode": "update",
+          "filters": {
+            "op": "all",
+            "children": [
+              {
+                "op": "condition",
+                "text": "正式岗位"
+              },
+              {
+                "op": "condition",
+                "text": "城市为深圳"
+              },
+              {
+                "op": "condition",
+                "text": "月薪区间下限至少13000元",
+                "salary": {
+                  "unit": "monthly",
+                  "minimum": 13000
+                }
+              }
+            ]
+          }
+        }
+      },
+      "oracle": {
+        "min_score": 85,
+        "filters": {
+          "op": "all",
+          "children": [
+            {
+              "op": "condition",
+              "text": "正式岗位"
+            },
+            {
+              "op": "condition",
+              "text": "城市为深圳"
+            },
+            {
+              "op": "condition",
+              "text": "月薪区间下限至少13000元",
+              "salary": {
+                "unit": "monthly",
+                "minimum": 13000
+              }
+            }
+          ]
+        },
+        "needs_approval": true,
+        "search_unchanged": true
+      },
+      "phases": [
+        "pending",
+        "waiting_approval"
+      ]
+    },
+    {
+      "id": "delivery-raise-salary",
+      "family": "delivery_update",
+      "turns": [
+        "找15个数据分析岗位，深圳、上海、杭州，正式和实习都可，不要第三方外包。仅投深圳正式岗、月薪15k及85分以上。",
+        "搜索不变，投递月薪门槛改为20k。"
+      ],
+      "payload": {
+        "previous_filter": {
+          "op": "all",
+          "children": [
+            {
+              "op": "condition",
+              "text": "正式岗位"
+            },
+            {
+              "op": "condition",
+              "text": "城市为深圳"
+            },
+            {
+              "op": "condition",
+              "text": "月薪区间下限至少15000元",
+              "salary": {
+                "unit": "monthly",
+                "minimum": 15000
+              }
+            }
+          ]
+        },
+        "arguments": {
+          "scope_mode": "update",
+          "filters": {
+            "op": "all",
+            "children": [
+              {
+                "op": "condition",
+                "text": "正式岗位"
+              },
+              {
+                "op": "condition",
+                "text": "城市为深圳"
+              },
+              {
+                "op": "condition",
+                "text": "月薪区间下限至少20000元",
+                "salary": {
+                  "unit": "monthly",
+                  "minimum": 20000
+                }
+              }
+            ]
+          }
+        }
+      },
+      "oracle": {
+        "min_score": 85,
+        "filters": {
+          "op": "all",
+          "children": [
+            {
+              "op": "condition",
+              "text": "正式岗位"
+            },
+            {
+              "op": "condition",
+              "text": "城市为深圳"
+            },
+            {
+              "op": "condition",
+              "text": "月薪区间下限至少20000元",
+              "salary": {
+                "unit": "monthly",
+                "minimum": 20000
+              }
+            }
+          ]
+        },
+        "needs_approval": false,
+        "search_unchanged": true
+      },
+      "phases": [
+        "pending",
+        "waiting_approval"
+      ]
+    },
+    {
+      "id": "delivery-include-internship",
+      "family": "delivery_update",
+      "turns": [
+        "找15个数据分析岗位，深圳、上海、杭州，正式和实习都可，不要第三方外包。仅投深圳正式岗、月薪15k及85分以上。",
+        "搜索不变，投递接受正式或实习，其余限制保持。"
+      ],
+      "payload": {
+        "previous_filter": {
+          "op": "all",
+          "children": [
+            {
+              "op": "condition",
+              "text": "正式岗位"
+            },
+            {
+              "op": "condition",
+              "text": "城市为深圳"
+            },
+            {
+              "op": "condition",
+              "text": "月薪区间下限至少15000元",
+              "salary": {
+                "unit": "monthly",
+                "minimum": 15000
+              }
+            }
+          ]
+        },
+        "arguments": {
+          "scope_mode": "update",
+          "filters": {
+            "op": "all",
+            "children": [
+              {
+                "op": "any",
+                "children": [
+                  {
+                    "op": "condition",
+                    "text": "正式岗位"
+                  },
+                  {
+                    "op": "condition",
+                    "text": "实习岗位"
+                  }
+                ]
+              },
+              {
+                "op": "condition",
+                "text": "城市为深圳"
+              },
+              {
+                "op": "condition",
+                "text": "月薪区间下限至少15000元",
+                "salary": {
+                  "unit": "monthly",
+                  "minimum": 15000
+                }
+              }
+            ]
+          }
+        }
+      },
+      "oracle": {
+        "min_score": 85,
+        "filters": {
+          "op": "all",
+          "children": [
+            {
+              "op": "any",
+              "children": [
+                {
+                  "op": "condition",
+                  "text": "正式岗位"
+                },
+                {
+                  "op": "condition",
+                  "text": "实习岗位"
+                }
+              ]
+            },
+            {
+              "op": "condition",
+              "text": "城市为深圳"
+            },
+            {
+              "op": "condition",
+              "text": "月薪区间下限至少15000元",
+              "salary": {
+                "unit": "monthly",
+                "minimum": 15000
+              }
+            }
+          ]
+        },
+        "needs_approval": true,
+        "search_unchanged": true
+      },
+      "phases": [
+        "pending",
+        "waiting_approval"
+      ]
+    },
+    {
+      "id": "delivery-clear-filter",
+      "family": "delivery_update",
+      "turns": [
+        "找15个数据分析岗位，深圳、上海、杭州，正式和实习都可，不要第三方外包。仅投深圳正式岗、月薪15k及85分以上。",
+        "搜索条件不变，投递只按85分，不限旧岗位类型城市和薪资。"
+      ],
+      "payload": {
+        "previous_filter": {
+          "op": "all",
+          "children": [
+            {
+              "op": "condition",
+              "text": "正式岗位"
+            },
+            {
+              "op": "condition",
+              "text": "城市为深圳"
+            },
+            {
+              "op": "condition",
+              "text": "月薪区间下限至少15000元",
+              "salary": {
+                "unit": "monthly",
+                "minimum": 15000
+              }
+            }
+          ]
+        },
+        "arguments": {
+          "scope_mode": "update",
+          "filters": null
+        }
+      },
+      "oracle": {
+        "min_score": 85,
+        "filters": null,
+        "needs_approval": true,
+        "search_unchanged": true
+      },
+      "phases": [
+        "pending",
+        "waiting_approval"
+      ]
+    },
+    {
+      "id": "delivery-inherit",
+      "family": "delivery_update",
+      "turns": [
+        "找15个数据分析岗位，深圳、上海、杭州，正式和实习都可，不要第三方外包。仅投深圳正式岗、月薪15k及85分以上。",
+        "按原条件补投，不重新搜索。"
+      ],
+      "payload": {
+        "previous_filter": {
+          "op": "all",
+          "children": [
+            {
+              "op": "condition",
+              "text": "正式岗位"
+            },
+            {
+              "op": "condition",
+              "text": "城市为深圳"
+            },
+            {
+              "op": "condition",
+              "text": "月薪区间下限至少15000元",
+              "salary": {
+                "unit": "monthly",
+                "minimum": 15000
+              }
+            }
+          ]
+        },
+        "arguments": {
+          "scope_mode": "inherit",
+          "min_score": 80
+        }
+      },
+      "oracle": {
+        "min_score": 85,
+        "filters": {
+          "op": "all",
+          "children": [
+            {
+              "op": "condition",
+              "text": "正式岗位"
+            },
+            {
+              "op": "condition",
+              "text": "城市为深圳"
+            },
+            {
+              "op": "condition",
+              "text": "月薪区间下限至少15000元",
+              "salary": {
+                "unit": "monthly",
+                "minimum": 15000
+              }
+            }
+          ]
+        },
+        "needs_approval": false,
+        "search_unchanged": true
+      },
+      "phases": [
+        "pending",
+        "waiting_approval"
+      ]
+    },
+    {
+      "id": "delivery-independent",
+      "family": "delivery_update",
+      "turns": [
+        "找15个数据分析岗位，深圳、上海、杭州，正式和实习都可，不要第三方外包。仅投深圳正式岗、月薪15k及85分以上。",
+        "另开一批投递，只要求75分且正式岗位，搜索范围不改。"
+      ],
+      "payload": {
+        "previous_filter": {
+          "op": "all",
+          "children": [
+            {
+              "op": "condition",
+              "text": "正式岗位"
+            },
+            {
+              "op": "condition",
+              "text": "城市为深圳"
+            },
+            {
+              "op": "condition",
+              "text": "月薪区间下限至少15000元",
+              "salary": {
+                "unit": "monthly",
+                "minimum": 15000
+              }
+            }
+          ]
+        },
+        "arguments": {
+          "scope_mode": "new",
+          "min_score": 75,
+          "filters": {
+            "op": "condition",
+            "text": "正式岗位"
+          }
+        }
+      },
+      "oracle": {
+        "min_score": 75,
+        "filters": {
+          "op": "condition",
+          "text": "正式岗位"
+        },
+        "needs_approval": true,
+        "search_unchanged": true
+      },
+      "phases": [
+        "pending",
+        "waiting_approval"
+      ]
+    },
+    {
+      "id": "delivery-extra-benefit",
+      "family": "delivery_update",
+      "turns": [
+        "找15个数据分析岗位，深圳、上海、杭州，正式和实习都可，不要第三方外包。仅投深圳正式岗、月薪15k及85分以上。",
+        "搜索不变，投递再要求住房补贴。"
+      ],
+      "payload": {
+        "previous_filter": {
+          "op": "all",
+          "children": [
+            {
+              "op": "condition",
+              "text": "正式岗位"
+            },
+            {
+              "op": "condition",
+              "text": "城市为深圳"
+            },
+            {
+              "op": "condition",
+              "text": "月薪区间下限至少15000元",
+              "salary": {
+                "unit": "monthly",
+                "minimum": 15000
+              }
+            }
+          ]
+        },
+        "arguments": {
+          "scope_mode": "update",
+          "filters": {
+            "op": "all",
+            "children": [
+              {
+                "op": "all",
+                "children": [
+                  {
+                    "op": "condition",
+                    "text": "正式岗位"
+                  },
+                  {
+                    "op": "condition",
+                    "text": "城市为深圳"
+                  },
+                  {
+                    "op": "condition",
+                    "text": "月薪区间下限至少15000元",
+                    "salary": {
+                      "unit": "monthly",
+                      "minimum": 15000
+                    }
+                  }
+                ]
+              },
+              {
+                "op": "condition",
+                "text": "提供住房补贴"
+              }
+            ]
+          }
+        }
+      },
+      "oracle": {
+        "min_score": 85,
+        "filters": {
+          "op": "all",
+          "children": [
+            {
+              "op": "all",
+              "children": [
+                {
+                  "op": "condition",
+                  "text": "正式岗位"
+                },
+                {
+                  "op": "condition",
+                  "text": "城市为深圳"
+                },
+                {
+                  "op": "condition",
+                  "text": "月薪区间下限至少15000元",
+                  "salary": {
+                    "unit": "monthly",
+                    "minimum": 15000
+                  }
+                }
+              ]
+            },
+            {
+              "op": "condition",
+              "text": "提供住房补贴"
+            }
+          ]
+        },
+        "needs_approval": false,
+        "search_unchanged": true
+      },
+      "phases": [
+        "pending",
+        "waiting_approval"
+      ]
+    },
+    {
+      "id": "exception-outside-city",
+      "family": "outside_single",
+      "turns": [
+        "找15个数据分析岗位，深圳、上海、杭州，正式和实习都可，不要第三方外包。仅投深圳正式岗、月薪15k及85分以上。",
+        "第六个不在搜索城市，但这次也投第六个。"
+      ],
+      "payload": {
+        "selector": "第六个",
+        "target_id": 6
+      },
+      "oracle": {
+        "needs_approval": true,
+        "only_target": [
+          6
+        ],
+        "search_unchanged": true,
+        "remembered_scope_unchanged": true,
+        "exception_not_inherited": true
+      },
+      "phases": [
+        "approve",
+        "reject"
+      ]
+    },
+    {
+      "id": "exception-third-party",
+      "family": "outside_single",
+      "turns": [
+        "找15个数据分析岗位，深圳、上海、杭州，正式和实习都可，不要第三方外包。仅投深圳正式岗、月薪15k及85分以上。",
+        "第五个虽然是第三方，这次单独投第五个。"
+      ],
+      "payload": {
+        "selector": "第五个",
+        "target_id": 5
+      },
+      "oracle": {
+        "needs_approval": true,
+        "only_target": [
+          5
+        ],
+        "search_unchanged": true,
+        "remembered_scope_unchanged": true,
+        "exception_not_inherited": true
+      },
+      "phases": [
+        "approve",
+        "reject"
+      ]
+    },
+    {
+      "id": "exception-unknown-evidence",
+      "family": "outside_single",
+      "turns": [
+        "找15个数据分析岗位，深圳、上海、杭州，正式和实习都可，不要第三方外包。仅投深圳正式岗、月薪15k及85分以上。",
+        "第八个条件信息不足，单独确认后投第八个。"
+      ],
+      "payload": {
+        "selector": "第八个",
+        "target_id": 8
+      },
+      "oracle": {
+        "needs_approval": true,
+        "only_target": [
+          8
+        ],
+        "search_unchanged": true,
+        "remembered_scope_unchanged": true,
+        "exception_not_inherited": true
+      },
+      "phases": [
+        "approve",
+        "reject"
+      ]
+    },
+    {
+      "id": "exception-title",
+      "family": "outside_single",
+      "turns": [
+        "找15个数据分析岗位，深圳、上海、杭州，正式和实习都可，不要第三方外包。仅投深圳正式岗、月薪15k及85分以上。",
+        "这个城市不符的合成职位六，这次也投。"
+      ],
+      "payload": {
+        "selector": "合成职位六",
+        "target_id": 6
+      },
+      "oracle": {
+        "needs_approval": true,
+        "only_target": [
+          6
+        ],
+        "search_unchanged": true,
+        "remembered_scope_unchanged": true,
+        "exception_not_inherited": true
+      },
+      "phases": [
+        "approve",
+        "reject"
+      ]
+    },
+    {
+      "id": "exception-company",
+      "family": "outside_single",
+      "turns": [
+        "找15个数据分析岗位，深圳、上海、杭州，正式和实习都可，不要第三方外包。仅投深圳正式岗、月薪15k及85分以上。",
+        "合成企业五这一个外包岗，也单独投。"
+      ],
+      "payload": {
+        "selector": "合成企业五",
+        "target_id": 5
+      },
+      "oracle": {
+        "needs_approval": true,
+        "only_target": [
+          5
+        ],
+        "search_unchanged": true,
+        "remembered_scope_unchanged": true,
+        "exception_not_inherited": true
+      },
+      "phases": [
+        "approve",
+        "reject"
+      ]
+    },
+    {
+      "id": "exception-structured",
+      "family": "outside_single",
+      "turns": [
+        "找15个数据分析岗位，深圳、上海、杭州，正式和实习都可，不要第三方外包。仅投深圳正式岗、月薪15k及85分以上。",
+        "第六个合成企业六，原范围之外本次也投。"
+      ],
+      "payload": {
+        "selector": {
+          "ordinal": 6,
+          "company": "合成企业六"
+        },
+        "target_id": 6
+      },
+      "oracle": {
+        "needs_approval": true,
+        "only_target": [
+          6
+        ],
+        "search_unchanged": true,
+        "remembered_scope_unchanged": true,
+        "exception_not_inherited": true
+      },
+      "phases": [
+        "approve",
+        "reject"
+      ]
+    },
+    {
+      "id": "chain-standard",
+      "family": "full_chain",
+      "turns": [
+        "找15个数据分析岗位，深圳、上海、杭州，正式和实习都可，不要第三方外包。仅投深圳正式岗、月薪15k及85分以上。",
+        "找15份，85以上投递，低于85且月薪25k以上生成成长计划，给第1个准备面试。"
+      ],
+      "payload": {
+        "threshold": 85,
+        "max_score": 84,
+        "growth_salary": 25000,
+        "grouped": false,
+        "interview_ordinal": 1
+      },
+      "oracle": {
+        "order": [
+          "job_search_start",
+          "job_results_read",
+          "mock_delivery_start",
+          "learning_plan_generate",
+          "interview_preparation_generate"
+        ],
+        "wait_for_search": true,
+        "no_completed_replay": true,
+        "one_summary": true
+      },
+      "phases": [
+        "fresh",
+        "paused"
+      ]
+    },
+    {
+      "id": "chain-lower",
+      "family": "full_chain",
+      "turns": [
+        "找15个数据分析岗位，深圳、上海、杭州，正式和实习都可，不要第三方外包。仅投深圳正式岗、月薪15k及85分以上。",
+        "找20份，80以上投递，80以下且月薪20k以上分析不足并生成成长计划，给第2个准备面试。"
+      ],
+      "payload": {
+        "threshold": 80,
+        "max_score": 79,
+        "growth_salary": 20000,
+        "grouped": false,
+        "interview_ordinal": 2
+      },
+      "oracle": {
+        "order": [
+          "job_search_start",
+          "job_results_read",
+          "mock_delivery_start",
+          "learning_plan_generate",
+          "interview_preparation_generate"
+        ],
+        "wait_for_search": true,
+        "no_completed_replay": true,
+        "one_summary": true
+      },
+      "phases": [
+        "fresh",
+        "paused"
+      ]
+    },
+    {
+      "id": "chain-high",
+      "family": "full_chain",
+      "turns": [
+        "找15个数据分析岗位，深圳、上海、杭州，正式和实习都可，不要第三方外包。仅投深圳正式岗、月薪15k及85分以上。",
+        "找10份，90以上投递，90以下且月薪30k以上总结差距并更新成长计划，给第3个预测面试问题。"
+      ],
+      "payload": {
+        "threshold": 90,
+        "max_score": 89,
+        "growth_salary": 30000,
+        "grouped": false,
+        "interview_ordinal": 3
+      },
+      "oracle": {
+        "order": [
+          "job_search_start",
+          "job_results_read",
+          "mock_delivery_start",
+          "learning_plan_generate",
+          "interview_preparation_generate"
+        ],
+        "wait_for_search": true,
+        "no_completed_replay": true,
+        "one_summary": true
+      },
+      "phases": [
+        "fresh",
+        "paused"
+      ]
+    },
+    {
+      "id": "chain-grouped",
+      "family": "full_chain",
+      "turns": [
+        "找15个数据分析岗位，深圳、上海、杭州，正式和实习都可，不要第三方外包。仅投深圳正式岗、月薪15k及85分以上。",
+        "找5份正式和5份实习，85以上投递，其余25k以上成长计划，并为第1个准备面试。"
+      ],
+      "payload": {
+        "threshold": 85,
+        "max_score": 84,
+        "growth_salary": 25000,
+        "grouped": true,
+        "interview_ordinal": 1
+      },
+      "oracle": {
+        "order": [
+          "job_search_start",
+          "job_results_read",
+          "mock_delivery_start",
+          "learning_plan_generate",
+          "interview_preparation_generate"
+        ],
+        "wait_for_search": true,
+        "no_completed_replay": true,
+        "one_summary": true
+      },
+      "phases": [
+        "fresh",
+        "paused"
+      ]
+    },
+    {
+      "id": "recovery-completed-send",
+      "family": "recovery_control",
+      "turns": [
+        "找15个数据分析岗位，深圳、上海、杭州，正式和实习都可，不要第三方外包。仅投深圳正式岗、月薪15k及85分以上。",
+        "继续任务，不要重复已发送内容。"
+      ],
+      "payload": {
+        "variant": "completed-send",
+        "tool": "mock_delivery_start",
+        "status": "completed",
+        "effect": "external",
+        "execution_phase": "committed"
+      },
+      "oracle": {
+        "no_completed_replay": true,
+        "uncertain_never_replayed": false,
+        "retain_independent_analysis": true
+      },
+      "phases": [
+        "live",
+        "reopen"
+      ]
+    },
+    {
+      "id": "recovery-unknown-send",
+      "family": "recovery_control",
+      "turns": [
+        "找15个数据分析岗位，深圳、上海、杭州，正式和实习都可，不要第三方外包。仅投深圳正式岗、月薪15k及85分以上。",
+        "沟通响应丢失后继续任务，先核对。"
+      ],
+      "payload": {
+        "variant": "unknown-send",
+        "tool": "mock_delivery_start",
+        "status": "outcome_indeterminate",
+        "effect": "external",
+        "execution_phase": "started"
+      },
+      "oracle": {
+        "no_completed_replay": true,
+        "uncertain_never_replayed": true,
+        "retain_independent_analysis": true
+      },
+      "phases": [
+        "live",
+        "reopen"
+      ]
+    },
+    {
+      "id": "recovery-preparing-send",
+      "family": "recovery_control",
+      "turns": [
+        "找15个数据分析岗位，深圳、上海、杭州，正式和实习都可，不要第三方外包。仅投深圳正式岗、月薪15k及85分以上。",
+        "发送前准备失败，从记录继续。"
+      ],
+      "payload": {
+        "variant": "preparing-send",
+        "tool": "mock_delivery_start",
+        "status": "failed",
+        "effect": "external",
+        "execution_phase": "preparing"
+      },
+      "oracle": {
+        "no_completed_replay": true,
+        "uncertain_never_replayed": false,
+        "retain_independent_analysis": true
+      },
+      "phases": [
+        "live",
+        "reopen"
+      ]
+    },
+    {
+      "id": "recovery-read-failure",
+      "family": "recovery_control",
+      "turns": [
+        "找15个数据分析岗位，深圳、上海、杭州，正式和实习都可，不要第三方外包。仅投深圳正式岗、月薪15k及85分以上。",
+        "总结读取失败，继续任务。"
+      ],
+      "payload": {
+        "variant": "read-failure",
+        "tool": "job_results_read",
+        "status": "failed",
+        "effect": "read",
+        "execution_phase": "preparing"
+      },
+      "oracle": {
+        "no_completed_replay": true,
+        "uncertain_never_replayed": false,
+        "retain_independent_analysis": true
+      },
+      "phases": [
+        "live",
+        "reopen"
+      ]
+    },
+    {
+      "id": "recovery-hr-wait",
+      "family": "recovery_control",
+      "turns": [
+        "找15个数据分析岗位，深圳、上海、杭州，正式和实习都可，不要第三方外包。仅投深圳正式岗、月薪15k及85分以上。",
+        "还在等HR回复时追加成长和面试准备，不重复打招呼。"
+      ],
+      "payload": {
+        "variant": "hr-wait",
+        "tool": "mock_delivery_start",
+        "status": "completed",
+        "effect": "external",
+        "execution_phase": "committed"
+      },
+      "oracle": {
+        "no_completed_replay": true,
+        "uncertain_never_replayed": false,
+        "retain_independent_analysis": true
+      },
+      "phases": [
+        "live",
+        "reopen"
+      ]
+    },
+    {
+      "id": "recovery-withdraw",
+      "family": "recovery_control",
+      "turns": [
+        "找15个数据分析岗位，深圳、上海、杭州，正式和实习都可，不要第三方外包。仅投深圳正式岗、月薪15k及85分以上。",
+        "取消投递，保留总结、成长和面试准备。"
+      ],
+      "payload": {
+        "variant": "withdraw",
+        "tool": "mock_delivery_start",
+        "status": "pending",
+        "effect": "external",
+        "execution_phase": "preparing"
+      },
+      "oracle": {
+        "no_completed_replay": true,
+        "uncertain_never_replayed": false,
+        "retain_independent_analysis": true
+      },
+      "phases": [
+        "live",
+        "reopen"
+      ]
+    },
+    {
+      "id": "source-old-receipt",
+      "family": "source_isolation",
+      "turns": [
+        "找15个数据分析岗位，深圳、上海、杭州，正式和实习都可，不要第三方外包。仅投深圳正式岗、月薪15k及85分以上。",
+        "扩大搜索城市到北京，但仅投上一轮的85分以上结果。"
+      ],
+      "payload": {
+        "source_task_id": "synthetic-search"
+      },
+      "oracle": {
+        "delivery_source": "synthetic-search",
+        "not_depends_on_new_search": true
+      },
+      "phases": [
+        "pending",
+        "waiting_external"
+      ]
+    },
+    {
+      "id": "source-fabricated",
+      "family": "source_isolation",
+      "turns": [
+        "找15个数据分析岗位，深圳、上海、杭州，正式和实习都可，不要第三方外包。仅投深圳正式岗、月薪15k及85分以上。",
+        "扩大搜索，但投递工具中的搜索ID来自模型猜测，不可拿它取得新权限。"
+      ],
+      "payload": {
+        "source_task_id": "fabricated-model-task"
+      },
+      "oracle": {
+        "never_execute_source": "fabricated-model-task",
+        "only_trusted_completed_source": true
+      },
+      "phases": [
+        "pending",
+        "waiting_external"
+      ]
+    },
+    {
+      "id": "selector-explicit-inherit",
+      "family": "selector_scope",
+      "turns": [
+        "上一批只投深圳正式岗、月薪15k以上、85分以上。",
+        "只给前两个岗位补投，仍继承上一批全部条件，不降低门槛。"
+      ],
+      "payload": {"selector": "前两个", "scope_mode": "inherit", "min_score": 80},
+      "oracle": {"min_score": 85, "inherit_filter": true, "selected_ids": [1, 2]},
+      "phases": ["live", "reopen"]
+    },
+    {
+      "id": "selector-default-independent",
+      "family": "selector_scope",
+      "turns": [
+        "上一批只投深圳正式岗、月薪15k以上、85分以上。",
+        "单独投第一个，本次没有额外匹配分或批次筛选要求。"
+      ],
+      "payload": {"selector": "第一个", "min_score": 0},
+      "oracle": {"min_score": 0, "inherit_filter": false, "selected_ids": [1]},
+      "phases": ["live", "reopen"]
+    },
+    {
+      "id": "prepared-selection-after-approval",
+      "family": "prepared_exception",
+      "turns": [
+        "按已完成的搜索展示稳定岗位列表。",
+        "先定位第六个北京岗位，本次明确单岗例外，等待确认后投递。"
+      ],
+      "payload": {"selector": {"ordinal": 6, "company": "合成企业六"}},
+      "oracle": {"needs_approval": true, "selected_ids": [6], "no_other_sends": true},
+      "phases": ["approve", "reject", "reopen", "other_current_plan"]
+    },
+    {
+      "id": "selected-scope-lower-threshold",
+      "family": "selected_expansion",
+      "turns": [
+        "上一批只投深圳正式岗、月薪15k以上、85分以上。",
+        "其余岗位的门槛改为70分，仍然继承上一批正式岗、城市和薪资范围，等待核对。"
+      ],
+      "payload": {"selector": "其余岗位", "selection_mode": "matching", "scope_mode": "update", "min_score": 70},
+      "oracle": {"needs_approval": true, "min_score": 70, "rejection_sends": 0},
+      "phases": ["reject", "reopen"]
+    }
+  ]
+}

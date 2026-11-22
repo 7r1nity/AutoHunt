@@ -61,6 +61,10 @@ class DeepSeekProvider(LLMProvider):
             kwargs["reasoning_effort"] = "high"
             kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
         if request.json_output:
+            # DeepSeek's JSON mode rejects requests whose prompts do not name
+            # JSON. Own this transport-format requirement here, rather than
+            # making every feature prompt know the provider's precondition.
+            kwargs["messages"][0]["content"] += "\nReturn exactly one valid JSON object, without Markdown or surrounding text."
             kwargs["response_format"] = {"type": "json_object"}
         if request.max_output_tokens is not None:
             kwargs["max_tokens"] = request.max_output_tokens

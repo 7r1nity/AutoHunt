@@ -404,15 +404,17 @@ class PersistedFlow(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.registry._delivery_arguments(args), args)
         self.assertEqual(self.registry._delivery_arguments({"selector": "第七个"}), {"selector": "第七个"})
 
-    async def test_legacy_row_requires_recheck_and_exposes_unknown_reason(self):
+    async def test_missing_raw_tags_invalidates_frozen_receipt_before_scope_evaluation(self):
         self.context.owner = asyncio.current_task()
         await self.seed()
         with self.store._connect() as db:
             db.execute("UPDATE jobs SET source_tags=NULL")
+        before = len(self.calls)
         result = await self.coordinator.queue_deliveries(session_id="default", task_id="search", min_score=85, filters=leaf("正式全职"))
-        self.assertEqual((result["queued"], result["unknown"]), (0, 2))
-        self.assertEqual(len(result["scope_checks"]), 2)
-        self.assertTrue(all(c["status"] == "unknown" for c in result["scope_checks"]))
+        self.assertEqual((result["queued"], result["insufficient"]), (0, 2))
+        self.assertEqual(result["reason"], "insufficient_evidence")
+        self.assertEqual(result["scope_checks"], [])
+        self.assertEqual(len(self.calls), before)  # Changed facts require fresh search evidence first.
         self.assertEqual(self.store.mock_delivery_queue(), [])
 
     async def test_planner_sees_scope_and_materializes_omitted_conditions(self):

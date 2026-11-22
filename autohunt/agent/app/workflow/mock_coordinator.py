@@ -235,19 +235,28 @@ class MockWorkflowCoordinator:
         document = self.resume.read_document()
         document_digest = resume_document_digest(document)
         explicit = job_ids is not None and selection_evidence is not None
+        outside_search_exception = explicit and bool((selection_evidence or {}).get("allow_outside_search"))
         gaps: dict[str, int] = {}
         if explicit:
             evidence = [self.jobs.get_job(job_id) for job_id in dict.fromkeys(job_ids)]
         else:
             evidence, gaps = self.jobs.resume_analysis_evidence(
-                profile.resume_id, limit=200, min_score=min_score, task_id=task_id)
+                profile.resume_id, limit=200, min_score=min_score, task_id=task_id, resume_digest=document_digest)
         target_hashes = (selection_evidence or {}).get("target_fingerprints", {})
         if explicit and any(target_hashes.get(str(job["id"])) and target_hashes[str(job["id"])] != self.jobs.review_fingerprint(job) for job in evidence):
             raise PreflightRefused("定位后岗位内容变化，未加入投递队列，请重新查看")
         eligible, already_delivered, not_applicable = [], 0, 0
+        outside_targets = []
         qualification_unknown=qualification_failed=0
         for item in evidence:
             job = self.jobs.get_job(item["id"])
+            if not explicit:
+                # The checked receipt is tied to this search and resume. Another
+                # search may update global semantic caches on the same raw JD.
+                # Keep that live JD but retain the source round's eligibility.
+                job = {**job, **{key: item[key] for key in (
+                    "score", "decision", "reasoning", "filter_status", "filter_evidence", "qualification_evidence"
+                ) if key in item}}
             if item.get("score", 0) < min_score:
                 not_applicable += 1
                 continue
@@ -259,19 +268,26 @@ class MockWorkflowCoordinator:
                 continue
             from ..jobs.candidate_facts import qualification_status
             qualification=qualification_status(job,document_digest)
-            if qualification=="fail":
+            if qualification=="fail" and not outside_search_exception:
                 qualification_failed+=1
+                if explicit:
+                    outside_targets.append({"job_id": job["id"], "title": job["title"], "reason": "qualification_not_met"})
                 continue
             if qualification=="unknown" and not explicit:
                 qualification_unknown+=1
                 continue
-            if item.get("filter_status", "pass") != "pass" and not (explicit and item.get("filter_status") == "unknown"):
+            if item.get("filter_status", "pass") != "pass" and not outside_search_exception and not (explicit and item.get("filter_status") == "unknown"):
                 not_applicable += 1
+                if explicit and item.get("filter_status") == "fail":
+                    outside_targets.append({"job_id": job["id"], "title": job["title"], "reason": "search_filter_not_met"})
                 continue
             if self.jobs.latest_delivery_status_for_job(item["id"]) is not None:
                 already_delivered += 1
                 continue
             eligible.append(job)
+        if outside_targets:
+            return {"queued": 0, "reason": "outside_scope_confirmation_required", "outside_targets": outside_targets,
+                "message": f"选中的岗位有 {len(outside_targets)} 个未满足原搜索或资历条件。若仍要申请，请明确允许这次指定岗位例外；搜索条件和其他岗位投递范围保持不变。尚未加入队列。"}
         scope_evidence, excluded, unknown = {}, qualification_failed, qualification_unknown
         if filters is not None:
             from ..core.job_filters import evaluate_filter, validate_filter
@@ -586,10 +602,15 @@ class MockWorkflowCoordinator:
                 if job.get("removed_at"):
                     self.jobs.update_mock_delivery(job["id"], "cancelled", "岗位已移除，未继续发送")
                     continue
-                if (item["resume_stamp"] != stamp or job["score"] < item["min_score"]
-                        or (job.get("filter_status", "pass") != "pass" and not (
-                            job.get("filter_status") == "unknown" and item.get("scope_evidence", {}).get("allow_unverified")))
-                        or self.jobs.review_fingerprint(job) != item["job_hash"]
+                try:
+                    eligibility = self.jobs.assert_delivery_queue_facts(item, job)
+                except ValueError as exc:
+                    self._finish_queue_item(item, "stale", str(exc))
+                    continue
+                score = eligibility["score"] if eligibility is not None else job["score"]
+                legacy_filter_changed = eligibility is None and job.get("filter_status", "pass") != "pass" and not (
+                    job.get("filter_status") == "unknown" and item.get("scope_evidence", {}).get("allow_unverified"))
+                if (item["resume_stamp"] != stamp or score < item["min_score"] or legacy_filter_changed
                         or not self.delivery.supports(job["source_url"])):
                     self._finish_queue_item(item, "stale", "简历、职位或分数已变化，旧授权失效，请重新核对")
                     continue
@@ -600,8 +621,10 @@ class MockWorkflowCoordinator:
                     if not self.jobs.claim_mock_delivery(job["id"]):
                         continue
                     try:
-                        preview = self.jobs.create_delivery_preview(job["id"], resume_label="候选人主简历",
+                        preview = await self.delivery.create_preview(job["id"], resume_label="候选人主简历",
                             allow_unverified=bool(item.get("scope_evidence", {}).get("allow_unverified")),
+                            allow_outside_search=bool(item.get("scope_evidence", {}).get("allow_outside_search")),
+                            eligibility_snapshot=eligibility,
                             delivery_flow="gated", **item["binding"])
                         result = await self._operation(item["session_id"],
                             lambda: self.delivery.authorize_and_start(preview.id, monitor_reply=False, **item["binding"]), job_id=job["id"])
@@ -813,7 +836,7 @@ class MockWorkflowCoordinator:
             "resume_version": document.version,
             "resume_digest": resume_document_digest(document),
         }
-        preview = self.jobs.create_delivery_preview(
+        preview = await self.delivery.create_preview(
             job_id, resume_label=document.source_filename or "候选人主简历", **binding,
         )
         result = await self.delivery.authorize_and_start(preview.id, **binding)

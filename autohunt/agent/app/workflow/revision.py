@@ -61,7 +61,7 @@ def edited_plan(plan: dict, edit: RevisionDraft, registry, *, stamp: str, sessio
             continue
         old = steps[old_id]
         if old["status"] != "completed" or old["tool"] not in {
-                "job_results_read", "job_stats_read", "job_results_refilter", "learning_plan_generate"}:
+                "job_results_read", "job_stats_read", "job_results_refilter", "learning_plan_generate", "interview_preparation_generate"}:
             raise ValueError("只能刷新已完成的证据或分析；发送与结果不确定的动作需要核验")
         new_id = f"r{plan.get('revision', 0) + 1}_{old_id}"[:38]
         while new_id in steps:
@@ -141,6 +141,8 @@ def edited_plan(plan: dict, edit: RevisionDraft, registry, *, stamp: str, sessio
                 step.pop("evidence_step", None)
         if update.user_requested is not None:
             step["user_requested"] = update.user_requested
+        if step["tool"] == "mock_delivery_start" and "scope_mode" in update.arguments:
+            step.pop("selection_inherits_scope", None)
         if step["status"] in {"waiting_approval", "waiting_input"}:
             step.update(status="pending")
             step.pop("approval_id", None)
@@ -241,11 +243,16 @@ def edited_plan(plan: dict, edit: RevisionDraft, registry, *, stamp: str, sessio
         if step["status"] != "pending" or step["tool"] not in EVIDENCE_TOOLS:
             continue
         producers = [item for item in result["steps"] if item["tool"] in {"job_search_start", "job_results_refilter"}]
-        bind_evidence(result["steps"], step, producers)
+        from .result_sources import result_references
+        from ..runtime.context import active_run
+        known_context = active_run()
+        known_sources = {item["task_id"] for item in result_references(known_context.dialogue if known_context else {}, plan)}
+        bind_evidence(result["steps"], step, producers, known_sources=known_sources)
         if step["tool"] == "mock_delivery_start":
             from ..runtime.context import active_run
-            from .delivery_scope import materialize_delivery_scope
+            from .delivery_scope import materialize_delivery_scope, remember_selection_scope
             from .result_sources import ResultSourceClarification
+            remember_selection_scope(step, step["arguments"])
             context = active_run()
             remembered = (context.dialogue or {}).get("delivery_scope") if context else None
             ancestors = dependency_ancestors(step["id"], result["steps"])

@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, patch
 
 from app.runtime.store import RunStore
 from app.workflow.daily import DailyWorkflow
+from app.delivery.automation import DeliveryAutomationService
 from app.core.models import BrowserTaskStatus
 from evaluation import daily_workflow_contract as fixture
 
@@ -20,7 +21,9 @@ class Scheduler(unittest.IsolatedAsyncioTestCase):
         fixture.DailyWorkflow.setUp(self)
         self.runs = RunStore(self.root / "runtime.db")
         self.now = datetime(2099, 1, 12, 2, tzinfo=UTC)
-        self.daily = DailyWorkflow(self.jobs, self.runs, self.browser, NS(worker=None), self.candidate,
+        delivery = DeliveryAutomationService(self.jobs, self.root, headless=True, cdp_url=None,
+            resume_workspace=NS(read_document=lambda: self.document))
+        self.daily = DailyWorkflow(self.jobs, self.runs, self.browser, delivery, self.candidate,
                                    NS(read_document=lambda: self.document), clock=lambda: self.now)
         self.browser.session.reuse = AsyncMock(return_value="cdp")
         self.browser.session.ensure_cdp_window = AsyncMock()
@@ -32,7 +35,7 @@ class Scheduler(unittest.IsolatedAsyncioTestCase):
         self.jobs.bind_mock_applicant(1)
         self.contacts = 0
 
-        async def prepare(*args, before_communication=None):
+        async def prepare(*args, before_communication=None, outreach_message=None):
             if not self.remote["contacted"]:
                 if before_communication:
                     before_communication()

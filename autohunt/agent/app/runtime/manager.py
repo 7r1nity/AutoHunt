@@ -20,6 +20,18 @@ from .resilience import WatchLimits, wait_expired
 _APPROVAL_REMINDER_SECONDS = 300
 
 
+def _bound_action_snapshot(plan: dict, step: dict) -> dict:
+    """Use the same complete binding when issuing and settling approval."""
+    from ..workflow.execution import RESUME_BOUND_TOOLS
+    producer = next((item for item in plan["steps"] if item["id"] == step.get("evidence_step")), {})
+    snapshot = {"plan_id": plan["id"], "tool": step["tool"], "arguments": copy.deepcopy(step["arguments"]),
+                "resume_stamp": plan["resume_stamp"] if step["tool"] in RESUME_BOUND_TOOLS else None,
+                "evidence_task_id": producer.get("task_id")}
+    if step.get("selection_inherits_scope"):
+        snapshot["selection_inherits_scope"] = True
+    return snapshot
+
+
 def _approval_detail(tool: str, arguments: dict) -> str:
     """Generate a human-readable confirmation prompt from action arguments (T-13/T-19).
 
@@ -278,11 +290,7 @@ class AgentRuntime:
         step = next((step for step in plan.get("steps", []) if step["id"] == step_id), None)
         if not step or step["tool"] != tool or step["arguments"] != arguments or step.get("withdrawn") or tool in plan.get("revoked_tools", []):
             raise ValueError("动作与任务执行记录不一致或已撤回")
-        producer = next((item for item in plan["steps"] if item["id"] == step.get("evidence_step")), {})
-        from ..workflow.execution import RESUME_BOUND_TOOLS
-        snapshot = {"plan_id": plan["id"], "tool": tool, "arguments": copy.deepcopy(arguments),
-                    "resume_stamp": plan["resume_stamp"] if tool in RESUME_BOUND_TOOLS else None,
-                    "evidence_task_id": producer.get("task_id")}
+        snapshot = _bound_action_snapshot(plan, step)
         return step_id, snapshot, bool(step.get("user_requested", (step.get("authority_binding") or {}).get("user_requested", False)))
 
     def authorize_action(self, run_id: str, tool: str, arguments: dict, risk: str, always: bool) -> dict:
@@ -301,7 +309,12 @@ class AgentRuntime:
                     break
             scope_reset = scope_reset or delivery_scope_change(arguments,
                 self.store.dialogue_state(run["session_id"]).get("delivery_scope"),
-                session_id=run["session_id"], stamp=snapshot["resume_stamp"], task_id=snapshot["evidence_task_id"])
+                session_id=run["session_id"], stamp=snapshot["resume_stamp"], task_id=snapshot["evidence_task_id"],
+                selection_inherits_scope=bool(snapshot.get("selection_inherits_scope")))
+            if arguments.get("allow_outside_search") and not scope_reset:
+                scope_reset = {"previous_scope_id": None, "previous_filters": None, "previous_min_score": 0,
+                    "previous_task_id": snapshot["evidence_task_id"], "exception_requested": True,
+                    "reasons": ["指定岗位申请业务筛选条件例外；仅对本次选中岗位和当前简历有效"]}
             if scope_reset:
                 snapshot["scope_reset"] = copy.deepcopy(scope_reset)
         record = self.store.ensure_approval(run_id, run["session_id"], step_id, snapshot,
@@ -315,7 +328,8 @@ class AgentRuntime:
             except (TypeError, ValueError, KeyError):
                 old_summary = "原筛选结构需要人工核对"
             detail = ("投递范围变化，需要人工确认：" + "；".join(scope_reset["reasons"]) + "。\n"
-                + f"上一批：匹配分≥{scope_reset['previous_min_score']}；{old_summary}。\n"
+                + ("业务筛选例外不会变更搜索条件，也不会跳过账号、简历版本和重复发送检查。\n" if scope_reset.get("exception_requested") else
+                   f"上一批：匹配分≥{scope_reset['previous_min_score']}；{old_summary}。\n")
                 + ("本次未设置额外语义筛选。\n" if not arguments.get("filters") else "") + detail)
         if record["status"] == "pending":
             # Persist wait BEFORE returning to the caller, including tool-loop callers.
@@ -416,11 +430,7 @@ class AgentRuntime:
         step = next((step for step in plan.get("steps", []) if step["id"] == record["step_id"]), None)
         if not step or step.get("approval_id") != approval_id:
             raise ValueError("动作已修订，请核对当前待确认范围")
-        producer = next((item for item in plan["steps"] if item["id"] == step.get("evidence_step")), {})
-        from ..workflow.execution import RESUME_BOUND_TOOLS
-        snapshot = {"plan_id": plan["id"], "tool": step["tool"], "arguments": step["arguments"],
-                    "resume_stamp": plan["resume_stamp"] if step["tool"] in RESUME_BOUND_TOOLS else None,
-                    "evidence_task_id": producer.get("task_id")}
+        snapshot = _bound_action_snapshot(plan, step)
         if record["snapshot"].get("scope_reset"):
             snapshot["scope_reset"] = copy.deepcopy(record["snapshot"]["scope_reset"])
         if step.get("withdrawn") or step["tool"] in plan.get("revoked_tools", []):
@@ -834,6 +844,7 @@ class AgentRuntime:
                             mutate_dialogue=lambda op: self.store.mutate_dialogue(run["session_id"], op),
                             retrieve_history=lambda query, limit: self.jobs.search_conversation_history(run["session_id"], query, limit=limit),
                             request_records=lambda: self.store.request_records(run["session_id"]),
+                            plan_reader=lambda: (self.store.get(run_id)["checkpoint"] or {}).get("plan"),
                             diagnose=lambda kind, data: self.store.event(run_id, kind, data),
                             enforce_task_scope=True, user_message=plan["original"],
                             cancellation_requested=lambda: bool(self.store.get(run_id)["cancel_requested"]))

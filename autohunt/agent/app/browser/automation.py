@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import random
 import re
@@ -776,7 +777,11 @@ class BrowserAutomationService:
                         "resume_version": document.version,
                         "resume_digest": resume_document_digest(document),
                     }
-                preview = self.store.create_delivery_preview(job_id, **binding)
+                outreach = None
+                if self.resume_workspace is not None:
+                    from ..delivery.outreach import build_outreach
+                    outreach = build_outreach(job, document)
+                preview = self.store.create_delivery_preview(job_id, **binding, **({'outreach': outreach} if outreach else {}))
                 authorization_id, token, authorized_job_id, _ = self.store.authorize_delivery(
                     preview.id, **binding
                 )
@@ -792,7 +797,8 @@ class BrowserAutomationService:
                 page = await self.session.recover_page(job_url)
                 page = await self.session.navigate(job_url, page=page)
                 while True:
-                    observation = await self.mock_delivery_adapter.prepare(page, job_url)
+                    observation = await self.mock_delivery_adapter.prepare(page, job_url,
+                        **({'outreach_message': outreach['message']} if outreach else {}))
                     if not observation.intervention_reason:
                         break
                     self.gate.clear()
@@ -1382,6 +1388,10 @@ class BrowserAutomationService:
         job_id, inserted = self.store.upsert_job(detail)
         if request is not None and request.result_limit and self.store.job_touched_by_task(task_id, job_id):
             return (0, 0, 0)
+        receipt_description = re.sub(r'\s+', ' ', detail.get('description', '')).strip()
+        receipt = self.store._analysis_receipt({**detail, 'id': job_id, 'description': receipt_description,
+            'external_id': str(detail['external_id']) if detail.get('external_id') is not None else None,
+            'content_hash': hashlib.sha256(receipt_description.encode()).hexdigest()})
         self.store.event(
             task_id,
             "job_stored" if inserted else "job_duplicate",
@@ -1390,6 +1400,7 @@ class BrowserAutomationService:
             sample={"job_id": job_id, "title": detail["title"], "company": detail["company"],
                 "filter_status": detail.get("filter_status", "pass"),
                 "filter_evidence": detail.get("filter_evidence", {}),
+                **receipt,
                 "filter_fingerprint": self.store.review_fingerprint(self.store.get_job(job_id))},
         )
         return (1 if inserted else 0, 0 if inserted else 1, 1 if analysis.decision in {"APPLY", "REVIEW"} and detail.get("filter_status", "pass") == "pass" else 0)

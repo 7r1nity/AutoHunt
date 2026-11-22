@@ -10,6 +10,7 @@ from ..core.models import BrowserMode, DeliveryTaskStatus, DeliveryTaskView
 from ..jobs.store import JobStore
 from .mock_site_adapter import MockJobSiteAdapter
 from .resume_binding import mock_resume_payload
+from .outreach import OutreachService
 from ..memory.resume_workspace import ResumeWorkspaceStore
 from ..runtime.resilience import WatchLimits, WatchdogExpired, guarded_operation, wait_expired
 
@@ -29,7 +30,7 @@ class DeliveryAutomationService:
     """One-job, one-authorization browser delivery state machine."""
 
     def __init__(self, jobs: JobStore, data_root, *, headless: bool, cdp_url: str, reply_poll_seconds: float | None = 5.0,
-                 resume_workspace: ResumeWorkspaceStore | None = None) -> None:
+                 resume_workspace: ResumeWorkspaceStore | None = None, llm=None) -> None:
         self.jobs = jobs
         self.data_root = data_root
         self.profile_dir = data_root / "browser-profile"
@@ -37,6 +38,7 @@ class DeliveryAutomationService:
         self.cdp_url = cdp_url
         self.reply_poll_seconds = reply_poll_seconds
         self.resume_workspace = resume_workspace
+        self.outreach = OutreachService(llm)
         # A start that failed before any click cannot have sent anything, so it may
         # be retried this many times without a fresh authorisation.
         self.retry_limit = 3
@@ -59,6 +61,21 @@ class DeliveryAutomationService:
 
     def supports(self, source_url: str) -> bool:
         return self.adapter.normalize_job_url(source_url) is not None
+
+    async def create_preview(self, job_id: int, **options):
+        """Freeze one evidence-backed message with the exact approved document."""
+        if self.resume_workspace is None:
+            return self.jobs.create_delivery_preview(job_id, **options)
+        from ..memory.resume_workspace import resume_document_digest
+        document = self.resume_workspace.read_document()
+        binding = {'resume_document_id': document.id, 'resume_version': document.version,
+                   'resume_digest': resume_document_digest(document)}
+        if any(key in options and options[key] != value for key, value in binding.items()):
+            raise ValueError('沟通预览使用的主简历版本已变化，请重新生成')
+        draft = await self.outreach.draft(self.jobs.get_job(job_id), document)
+        if resume_document_digest(self.resume_workspace.read_document()) != binding['resume_digest']:
+            raise ValueError('生成话术期间主简历发生变化，请按当前版本重新预览')
+        return self.jobs.create_delivery_preview(job_id, **{**options, **binding, 'outreach': draft})
 
     def _authorized_resume_payload(self) -> dict:
         self.jobs.assert_delivery_facts(self.state.job_id, self.state.preview_id)
@@ -352,8 +369,15 @@ class DeliveryAutomationService:
                         raise ValueError("当前模拟站求职者账号与授权任务不一致")
                     self.state.mock_applicant_id = applicant_id
                     self._update(DeliveryTaskStatus.RUNNING, "已核对求职者账号", checkpoint="applicant_bound")
-                observation = await self.adapter.prepare(page, job_url, before_communication=lambda:
-                    self._update(DeliveryTaskStatus.RUNNING, "即将发起已授权的沟通", checkpoint="communication_started"))
+                def before_communication():
+                    self._authorized_resume_payload()
+                    self._update(DeliveryTaskStatus.RUNNING, "即将发送与当前预览绑定的沟通话术", checkpoint="communication_started")
+                prepare_options = {'before_communication': before_communication}
+                outreach_reader = getattr(self.jobs, 'delivery_outreach', None)
+                opening = outreach_reader(self.state.preview_id) if callable(outreach_reader) else None
+                if opening:
+                    prepare_options['outreach_message'] = opening
+                observation = await self.adapter.prepare(page, job_url, **prepare_options)
                 self.state.last_checked_at = datetime.now(UTC)
                 self._update(DeliveryTaskStatus.RUNNING, "已读取投递页面", url=page.url)
                 if observation.intervention_reason:

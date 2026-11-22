@@ -17,7 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from ..core.security import redact
 
 Topic = Literal["search", "applications", "resume", "learning", "general"]
-ACTION_TOOLS = {"job_search_start", "learning_plan_generate", "resume_propose_patch"}
+ACTION_TOOLS = {"job_search_start", "learning_plan_generate", "resume_propose_patch", "interview_preparation_generate"}
 CONFIRM = re.compile(r"^(?:行吧[，, ]*)?(?:好|好的|行|行吧|可以|确认|同意|就这样|照你说的办|那就照你说的办|按这个方案|开始吧)[。！! ]*$")
 REJECT = re.compile(r"^(?:不|不要|算了|取消|不执行|不同意|先不做|先不要)[。！! ]*$")
 

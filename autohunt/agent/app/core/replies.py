@@ -23,6 +23,8 @@ LABELS = {
     "memory_read": "长期记忆", "mock_delivery_start": "模拟站自动投递",
     "mock_delivery_cancel": "停止自动投递", "mock_delivery_status": "投递队列",
     "learning_plan_generate": "成长计划",
+    "interview_preparation_generate": "面试准备",
+    "interview_preparations_read": "面试准备报告",
 }
 STATES = {"idle": "空闲", "starting": "正在启动", "running": "执行中", "paused": "已暂停",
     "waiting_for_user": "等待你完成登录或验证", "completed": "已结束", "stopped": "已停止",
@@ -82,6 +84,21 @@ def tool_reply(tool: str, status: str, result) -> str:
         if tool == "browser_task_read" and "can_start_search" in data:
             text += "可以发起新搜索。" if data["can_start_search"] else "共享浏览器暂不可启动新搜索。"
         return text
+    if tool in {"interview_preparation_generate", "interview_preparations_read"} and data.get("questions"):
+        questions = data.get("questions") or []
+        lines = [f"已保存「{data.get('job_title') or '目标岗位'}」的面试准备，共 {len(questions)} 个方向。",
+                 str(data.get("notice") or "以下是可能的问题，不是招聘方真实题库。")]
+        for index, question in enumerate(questions, 1):
+            lines.append(f"{index}. {question.get('question', '')}")
+            if question.get("followups"):
+                lines.append("   可能追问：" + "；".join(question["followups"]))
+        if data.get("source_url"):
+            from urllib.parse import urlsplit
+            source = str(data["source_url"])
+            parsed = urlsplit(source)
+            if parsed.scheme in {"http", "https"} and parsed.hostname and not parsed.username:
+                lines.append("[打开岗位 JD](" + source.replace(")", "%29").replace("(", "%28") + ")")
+        return "\n\n".join(lines)
     if isinstance(data.get("message"), str) and not has_internal_data(data["message"]):
         return data["message"]
     if tool in {"search_state_read", "search_state_update"}:

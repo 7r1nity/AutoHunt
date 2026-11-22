@@ -194,13 +194,51 @@ class MockJobSiteAdapter:
         except Exception:  # noqa: BLE001 - a page probe must never break the flow
             return False
 
-    async def _open_communication(self, page: Page, *, before_click: Callable[[], object] | None = None) -> None:
+    async def _send_outreach(self, page: Page, message: str, *, before_click: Callable[[], object] | None = None) -> None:
+        """Open without greeting, then send the frozen text through the composer.
+
+        A successful read of existing messages precedes any send. Opening an
+        empty panel is not evidence that no prior conversation exists.
+        """
+        if not isinstance(message, str) or not message.strip() or len(message) > 600:
+            raise ValueError('已授权沟通话术为空或过长')
+        previous = await page.evaluate("""async () => {
+          if (typeof openChat !== 'function' || typeof getMessages !== 'function' || typeof job === 'undefined')
+            throw new Error('模拟站版本不支持定稿话术，请刷新页面');
+          await openChat(false);
+          const id = Number(localStorage.getItem('userId'));
+          if (!id || localStorage.getItem('userRole') !== 'applicant') throw new Error('求职者账号未验证');
+          const existing = await getMessages(job.employer_id, Number(jobId));
+          if (!Array.isArray(existing)) throw new Error('沟通记录尚未确认');
+          return {applicantId: id, count: existing.filter(item => Number(item.sender_id) === id).length};
+        }""")
+        if previous['count']:
+            return  # Existing messages survive waits/restarts; never re-greet.
+        await page.locator('#chat-input').fill(message)
+        valid_account = await page.evaluate("id => Number(localStorage.getItem('userId')) === id && localStorage.getItem('userRole') === 'applicant'", previous['applicantId'])
+        if not valid_account:
+            raise ValueError('发送沟通前求职者账号发生变化；不会发送')
+        if before_click:
+            before_click()
+        try:
+            await page.locator('#chat-panel .chat-compose').get_by_role('button', name='发送', exact=True).click(timeout=5000)
+            await page.wait_for_function("""message => typeof messages !== 'undefined' && messages.some(item =>
+              Number(item.sender_id) === Number(localStorage.getItem('userId')) && item.content === message)""",
+                                         arg=message, timeout=8000)
+        except Exception as exc:
+            raise RuntimeError('定稿沟通消息的发送结果未确认；请核对会话，不会自动重复发送') from exc
+
+    async def _open_communication(self, page: Page, *, before_click: Callable[[], object] | None = None,
+                                  outreach_message: str | None = None) -> None:
         """Open the chat panel once, without waiting 30s on an overlay.
 
         Once the panel is open it covers the button's hit point, so a second
         Playwright click waits for actionability until it times out. The DOM
         opening message is a side effect too: do not retry an ambiguous click.
         """
+        if outreach_message is not None:
+            await self._send_outreach(page, outreach_message, before_click=before_click)
+            return
         if await self._chat_open(page):
             return
         communicate = page.locator("button.communicate-btn")
@@ -215,7 +253,8 @@ class MockJobSiteAdapter:
                 raise RuntimeError("发起沟通未获确认；请核对模拟站会话，不会重复点击") from exc
         await page.wait_for_timeout(800)
 
-    async def prepare(self, page: Page, job_url: str, *, before_communication: Callable[[], object] | None = None) -> MockApplyObservation:
+    async def prepare(self, page: Page, job_url: str, *, before_communication: Callable[[], object] | None = None,
+                      outreach_message: str | None = None) -> MockApplyObservation:
         if page.url != job_url:
             await page.goto(job_url, wait_until="domcontentloaded", timeout=30_000)
         await page.locator("#job-hero h1").wait_for(state="visible", timeout=10_000)
@@ -233,7 +272,7 @@ class MockJobSiteAdapter:
                     before_communication()
                 await page.locator("#job-hero").get_by_role("button", name="投递后沟通", exact=True).click(timeout=5_000)
             return await self.inspect(page)
-        await self._open_communication(page, before_click=before_communication)
+        await self._open_communication(page, before_click=before_communication, outreach_message=outreach_message)
         return await self.inspect(page)
 
     async def bind_resume(self, page: Page, payload: dict, *, applicant_id: int | None = None,

@@ -14,7 +14,7 @@ JOB_TABLES = ("search_candidates", "search_recovery", "mock_delivery_queue", "de
 RUN_TABLES = ("session_memories", "action_approvals", "agent_run_events", "agent_runs", "session_search_state", "session_dialogue_state", "agent_sessions")
 ROUTER_TABLES = ("router_events", "rule_hit_stats", "router_disagreements", "clarify_memory")
 MOCK_TABLES = ("form_responses", "messages", "applications", "resumes")
-FILES = ("memory.md", "audit", "cache-backups", "skill-history", "skill-proposals",
+FILES = ("memory.md", "audit", "cache-backups", "skill-history", "skill-proposals", "private/interviews",
     "private/resumes", "private/materials", "private/candidate-state", "private/resume-workspace",
     "private/profile.json.enc", "private/browser-evidence", "private/browser-lifecycle.jsonl",
     "private/private/browser-lifecycle.jsonl")

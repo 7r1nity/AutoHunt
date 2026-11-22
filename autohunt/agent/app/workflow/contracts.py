@@ -22,7 +22,7 @@ class PlannedStep(BaseModel):
     questions: list[str] = Field(default_factory=list, max_length=8)
 
 
-EVIDENCE_TOOLS = frozenset({"learning_plan_generate", "mock_delivery_start", "job_results_read", "job_stats_read"})
+EVIDENCE_TOOLS = frozenset({"learning_plan_generate", "interview_preparation_generate", "mock_delivery_start", "job_results_read", "job_stats_read"})
 
 
 class Goal(BaseModel):

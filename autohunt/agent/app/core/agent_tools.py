@@ -136,6 +136,7 @@ class AgentToolRegistry:
         resume_workspace: ResumeWorkspaceStore,
         memory: MemoryStore,
         learning_plans: LearningPlanService | None = None,
+        interview_preparations=None,
         mock_workflow=None,
         response_llm=None,
         confirmation_policy="risk",
@@ -147,6 +148,7 @@ class AgentToolRegistry:
         self.resume_workspace = resume_workspace
         self.memory = memory
         self.learning_plans = learning_plans
+        self.interview_preparations = interview_preparations
         self.mock_workflow = mock_workflow
         self.response_llm = response_llm
         self.call_guard = ToolCallGuard()
@@ -350,11 +352,12 @@ class AgentToolRegistry:
             specs.extend([
                 AgentToolSpec("mock_delivery_start", "将用户要求范围内的已搜索模拟站职位加入有限投递队列。批量补投默认继承上一批完整条件，scope_mode=new用于用户明确另起或替换范围；指定岗位不继承旧批量条件。filters为投递独立条件，可复用搜索判断。内部生成逐职位预览与一次性授权，快速逐个沟通、并行等待HR回复、回复后发送简历；不支持真实网站。",
                     obj({"min_score": {"type": "integer", "minimum": 0, "maximum": 100},
-                         "scope_mode": {"type": "string", "enum": ["inherit", "new"], "description": "默认inherit，补投/漏投继承同一搜索和简历的上一批条件，新条件取交集、分数不降低。用户明确取消/替换旧限制或开启独立范围时new。不是授权令牌。"},
+                         "scope_mode": {"type": "string", "enum": ["inherit", "update", "new"], "description": "inherit为补投/漏投，旧条件取交集且不降分，即使有selector也继承；update修改上一批部分投递条件，未给字段继承、显式字段替换，可降低门槛但须重新核对扩大范围；new为独立新批次完整范围。单岗选择省略本字段时独立。均不修改搜索条件或代替授权。"},
                          "selector": selector_schema(),
                          "selection_mode": {"type": "string", "enum": ["single", "matching"]},
                          "target_step_id": {"type": "string", "pattern": "^[a-zA-Z0-9_-]{1,40}$", "description": "引用本计划已完成job_target_resolve的稳定选择，不重新按名称定位"},
                          "snapshot_id": {"type": "string"},
+                         "allow_outside_search": {"type": "boolean", "description": "仅用户明确指定某岗位且同意业务条件不满足也投时使用；必须有selector或target_step_id，并须一次人工例外确认。不得用于批量绕过筛选或跳过账号/简历/未知发送检查。"},
                          "source_task_id": {"type": "string", "minLength": 1, "maxLength": 120, "description": "指定使用哪一轮已完成搜索的结果；省略时使用本计划前置搜索回执"},
                          "filters": {**filter_schema(), "type": ["object", "null"], "description": "投递分支条件树，不改变搜索条件；未知不投递"}}), "external", self._mock_delivery_start),
                 AgentToolSpec("mock_delivery_cancel", "按明确停止命令取消本会话的模拟站投递队列，已发送结果保留。", obj({}), "external", self._mock_delivery_cancel),
@@ -371,6 +374,18 @@ class AgentToolRegistry:
                                     "description": "仅分析月薪区间下限达到此值的JD，未知、面议、非月薪排除；不改变搜索条件"}}),
                 "write", self._learning_plan_generate,
             ))
+        if self.interview_preparations is not None:
+            specs.append(AgentToolSpec(
+                "interview_preparations_read", "读取当前简历已保存的面试准备，不重新生成；report_id读取一份完整报告，省略则列出最近报告。",
+                obj({"report_id": {"type": "string", "pattern": "^[a-f0-9]{32}$"},
+                     "limit": {"type": "integer", "minimum": 1, "maximum": 10}}), "read", self._interview_preparations_read))
+            specs.append(AgentToolSpec(
+                "interview_preparation_generate",
+                "根据选定岗位JD和当前简历证据生成可能的面试问题、追问和准备要点，保存可追溯报告；不是实际面试题或录用概率。岗位用本轮序号、名称或描述定位，不把序号当数据库ID。",
+                obj({"selector": selector_schema(), "snapshot_id": {"type": "string"},
+                     "target_step_id": {"type": "string", "pattern": "^[a-zA-Z0-9_-]{1,40}$"},
+                     "focus": {"type": "string", "maxLength": 400}}, ["selector"]),
+                "write", self._interview_preparation_generate))
         return specs
 
     def schemas(self) -> list[dict[str, Any]]:
@@ -415,6 +430,8 @@ class AgentToolRegistry:
             self.validate_arguments(spec.parameters, arguments)
             if name == "mock_delivery_start":
                 arguments = self._delivery_arguments(arguments)
+                if arguments.get("allow_outside_search") and not (arguments.get("selector") or arguments.get("target_step_id")):
+                    raise MissingDeliveryEvidence("范围外例外需要明确指定岗位；没有扩大批量投递范围。", missing_slots=["selector"])
             decision = self.authorize(name, arguments)
             emit("action_decision", tool=name, decision=decision.decision.value,
                  code=decision.code, risk=decision.risk.value, **receipt)
@@ -732,7 +749,9 @@ class AgentToolRegistry:
             candidate = self.candidate_state.read().profile
             if not candidate.resume_id:
                 raise PreflightRefused("请先上传并启用一份主简历")
-            eligible = self.jobs.jobs_for_resume_analysis(candidate.resume_id, limit=20, task_id=task_id, **scope) if candidate.resume_id else []
+            from ..memory.resume_workspace import resume_document_digest
+            eligible = self.jobs.jobs_for_resume_analysis(candidate.resume_id, limit=20, task_id=task_id,
+                resume_digest=resume_document_digest(self.resume_workspace.read_document()), **scope) if candidate.resume_id else []
             if not any(len(str(job["description"] or "").strip()) >= 40 for job in eligible):
                 from ..growth.requests import resume_stamp
                 user_message = active_run().user_message if active_run() else args.get("focus", "")
@@ -753,12 +772,27 @@ class AgentToolRegistry:
         previous = (context.dialogue or {}).get("delivery_scope") if context else None
         if context and context.action_authority and "scope_mode" not in args:
             return args  # A compiled action had no remembered scope; do not bind one later.
-        if not previous or args.get("scope_mode") == "new" or args.get("selector") or args.get("target_step_id"):
+        if not previous or args.get("scope_mode") == "new":
             return args
         return materialize_delivery_scope(args, previous, session_id=context.session_id,
             stamp=resume_stamp(self.resume_workspace.read_document(), self.candidate_state),
             task_id=(context.action_authority or {}).get("evidence_task_id")
                     or (context.dialogue or {}).get("tasks", {}).get("browser_id"))
+
+    async def _interview_preparation_generate(self, args: dict) -> dict:
+        selected = await self._resolve_job_targets(args)
+        if len(selected["items"]) != 1:
+            raise TargetClarification("请先选择一个目标岗位生成面试准备；其他搜索、投递和成长计划结果保留。")
+        return await self.interview_preparations.generate(selected["items"][0]["id"], str(args.get("focus") or ""))
+
+    async def _interview_preparations_read(self, args: dict) -> dict:
+        if args.get("report_id"):
+            return self.interview_preparations.get(args["report_id"])
+        reports = self.interview_preparations.list()[:args.get("limit", 5)]
+        summaries = [{key: report.get(key) for key in ("id", "job_id", "job_title", "resume_version", "created_at", "generation_mode", "stale", "summary")} for report in reports]
+        return {"reports": summaries, "message": "已保存的面试准备：\n" + ("\n".join(
+            f"{index}. {report['job_title']} · 简历v{report['resume_version']}" + (" · 材料已变化" if report["stale"] else "")
+            for index, report in enumerate(summaries, 1)) if reports else "暂无当前简历的面试准备报告。")}
 
     async def _mock_delivery_start(self, args: dict) -> dict:
         effect_checkpoint("preparing")
@@ -794,10 +828,15 @@ class AgentToolRegistry:
             raise TargetClarification("这条多目标指令尚未明确投递对象；请说明要投递的岗位，没有退化为批量投递。")
         if selector or args.get("target_step_id"):
             resolved = await self._resolve_job_targets({**args, "selector": selector or "已选岗位"})
+            if args.get("allow_outside_search") and len(resolved["items"]) != 1:
+                raise MissingDeliveryEvidence("范围外例外仅针对一个明确岗位，请从候选中选定一个后确认；没有扩大整批范围。", missing_slots=["selector"])
             kwargs["job_ids"] = [item["id"] for item in resolved["items"]]
             kwargs["selection_evidence"] = {"snapshot_id": resolved["snapshot_id"], "selector": resolved["selector"],
                                            "allow_unverified": True,
+                                           "allow_outside_search": bool(args.get("allow_outside_search")),
                                            "target_fingerprints": {str(item["id"]): item["content_hash"] for item in resolved["items"]}}
+        elif args.get("allow_outside_search"):
+            raise MissingDeliveryEvidence("范围外例外需要明确指定岗位；没有扩大批量投递范围。", missing_slots=["selector"])
         if args.get("filters") is not None:
             kwargs["filters"] = args["filters"]
         result = await self.mock_workflow.queue_deliveries(**kwargs)
@@ -811,6 +850,8 @@ class AgentToolRegistry:
                 "filters": kwargs.get("filters"), "min_score": kwargs["min_score"]})
         if result.get("reason") in {"insufficient_evidence", "no_search_evidence"}:
             raise MissingDeliveryEvidence(result["message"], missing_slots=["min_score", "filters", "source_task_id"])
+        if result.get("reason") == "outside_scope_confirmation_required":
+            raise MissingDeliveryEvidence(result["message"], missing_slots=["allow_outside_search"])
         return result
 
     async def _job_target_resolve(self, args):

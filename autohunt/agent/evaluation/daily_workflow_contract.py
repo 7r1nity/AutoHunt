@@ -48,7 +48,7 @@ class DailyWorkflow(unittest.IsolatedAsyncioTestCase):
         self.clicks = []
         self.on_prepare = self.on_bind = self.on_submit = None
 
-        async def prepare(*args):
+        async def prepare(*args, **kwargs):
             if self.on_prepare:
                 self.on_prepare()
             return NS(intervention_reason=None, hr_reply_text=self.reply, application_submitted=False)

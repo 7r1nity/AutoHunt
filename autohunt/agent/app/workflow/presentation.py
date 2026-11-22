@@ -20,7 +20,7 @@ from ..llm.base import LLMRequest
 TIMEOUT = 18
 READ_TOOLS = frozenset({"job_target_resolve", "job_results_read", "job_detail_read", "job_stats_read",
     "resume_document_read", "context_state_read", "context_history_read",
-    "search_state_read", "preference_read", "memory_read", "mock_delivery_status"})
+    "search_state_read", "preference_read", "memory_read", "mock_delivery_status", "interview_preparations_read"})
 
 INSTRUCTIONS = """你是任务结果回答器，不是规划器，没有工具，不得执行或建议重放动作。
 根据原始请求、后续修订、目标和真实工具结果回答用户，而不是逐个转述工具日志。

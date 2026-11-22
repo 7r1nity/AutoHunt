@@ -31,6 +31,7 @@ from ..core.dependencies import (
     delivery_service,
     job_store,
     learning_plans,
+    interview_preparations,
     llm_credential_store,
     llm_settings_store,
     llm_manager,
@@ -1004,7 +1005,7 @@ async def deliver_selected_job(job_id: int, request: JobDeliveryRequest):
 async def create_delivery_preview(job_id: int) -> DeliveryPreviewView:
     try:
         document = resume_workspace_store.read_document()
-        preview = job_store.create_delivery_preview(
+        preview = await delivery_service.create_preview(
             job_id,
             resume_label=document.source_filename or "候选人主简历",
             resume_document_id=document.id,
@@ -1089,6 +1090,39 @@ async def insights() -> dict:
 @app.get("/api/v1/learning-plans")
 async def list_learning_plans() -> list[dict]:
     return learning_plans.list()
+
+
+class InterviewPreparationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    job_id: int = Field(gt=0, strict=True)
+    focus: str = Field(default="", max_length=400)
+
+
+@app.get("/api/v1/interview-preparations")
+async def list_interview_preparations(job_id: int | None = Query(default=None, gt=0)) -> list[dict]:
+    return interview_preparations.list(job_id=job_id)
+
+
+@app.get("/api/v1/interview-preparations/{report_id}")
+async def get_interview_preparation(report_id: str) -> dict:
+    try:
+        return interview_preparations.get(report_id)
+    except (KeyError, FileNotFoundError, ValueError) as exc:
+        raise HTTPException(status_code=404, detail="面试准备报告不存在或不属于当前简历") from exc
+
+
+@app.post("/api/v1/interview-preparations")
+async def generate_interview_preparation(request: InterviewPreparationRequest) -> dict:
+    try:
+        return await interview_preparations.generate(request.job_id, request.focus)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="目标岗位不存在") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except TimeoutError as exc:
+        raise HTTPException(status_code=504, detail="面试准备生成超时，尚未取得有效报告") from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail="面试准备暂时不可用，请检查模型设置或稍后重试") from exc
 
 
 @app.post("/api/v1/learning-plans")
