@@ -1,5 +1,6 @@
 """Isolated configuration and process-ownership tests; no recruitment operations."""
 import importlib.util
+import json
 import os
 from pathlib import Path
 import socket
@@ -12,6 +13,47 @@ from unittest.mock import patch
 spec = importlib.util.spec_from_file_location('local_launcher', Path(__file__).with_name('local_launcher.py'))
 launcher = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(launcher)
+
+
+class NodeVersionTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix='autohunt node version ')
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.node = self.root / 'node.exe'
+        self.node.touch()
+        patches = [
+            patch.dict(os.environ, {'AUTOHUNT_NODE': str(self.node), 'ProgramFiles': str(self.root)}, clear=True),
+            patch.object(launcher, 'LOGS', self.root),
+            patch.object(launcher.shutil, 'which', return_value=None),
+        ]
+        for item in patches:
+            item.start()
+            self.addCleanup(item.stop)
+
+    def test_node_versions_below_pnpm_minimum_are_rejected(self):
+        for version in ('v20.9.0', 'v20.20.0', 'v22.0.0', 'v22.12.99'):
+            with self.subTest(version=version), \
+                    patch.object(launcher.subprocess, 'check_output', return_value=version + '\n'), \
+                    self.assertRaisesRegex(RuntimeError, r'22\.13\+'):
+                launcher.find_node()
+
+    def test_minimum_and_newer_node_versions_are_accepted(self):
+        for version in ('v22.13.0', 'v22.13.1', 'v22.14.0', 'v24.0.0', 'v24.22.3'):
+            with self.subTest(version=version), \
+                    patch.object(launcher.subprocess, 'check_output', return_value=version + '\n'):
+                self.assertEqual(launcher.find_node(), str(self.node.resolve()))
+
+    def test_missing_node_message_states_current_minimum(self):
+        self.node.unlink()
+        with self.assertRaisesRegex(RuntimeError, r'22\.13\+'):
+            launcher.find_node()
+
+    def test_workspace_and_frontend_declare_same_node_minimum(self):
+        for relative in ('package.json', 'frontend/package.json'):
+            with self.subTest(manifest=relative):
+                metadata = json.loads((launcher.PROJECT / relative).read_text(encoding='utf-8'))
+                self.assertEqual(metadata.get('engines', {}).get('node'), '>=22.13.0')
 
 
 class ConfigurationTests(unittest.TestCase):

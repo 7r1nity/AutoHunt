@@ -22,7 +22,7 @@ python -m venv .venv
 
 ## 完整前端与每日任务
 
-额外需要 Node.js 20.9+ 和 pnpm。在 `autohunt` 工作区根目录安装前端依赖：
+额外需要 Node.js 22.13+ 和仓库锁定的 pnpm 11.19.0；Node.js 最低版本由该 pnpm 版本要求决定。在 `autohunt` 工作区根目录安装前端依赖：
 
 ```powershell
 pnpm install --frozen-lockfile

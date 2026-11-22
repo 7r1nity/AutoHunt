@@ -128,10 +128,11 @@ def find_node():
     for candidate in candidates:
         if candidate and Path(candidate).is_file():
             version = subprocess.check_output([candidate, '--version'], text=True).strip().lstrip('v')
-            if tuple(int(x) for x in version.split('.')[:2]) < (20, 9):
-                raise RuntimeError('Node.js 版本过低，请安装 Node.js 20.9+（推荐 LTS）。')
+            # pnpm 11 requires Node >=22.13, above Next.js's own minimum.
+            if tuple(int(x) for x in version.split('.')[:2]) < (22, 13):
+                raise RuntimeError(f'Node.js 版本过低（当前 {version}），请安装 Node.js 22.13+（pnpm 11 所需，推荐 LTS）。')
             return str(Path(candidate).resolve())
-    raise RuntimeError('未找到 Node.js，请安装 Node.js 20.9+，或设置 AUTOHUNT_NODE 指向 node.exe。')
+    raise RuntimeError('未找到 Node.js，请安装 Node.js 22.13+，或设置 AUTOHUNT_NODE 指向 node.exe。')
 
 
 def service_ports(args):

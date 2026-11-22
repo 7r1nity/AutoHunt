@@ -5,7 +5,7 @@ AutoHunt 是本地单用户求职 Agent。项目介绍与架构概览见 [仓库
 ## 环境准备
 
 - Python 3.12+。
-- 满足仓库锁定 Next.js 与 pnpm 版本要求的 Node.js；pnpm 版本见 [package.json](package.json) 的 `packageManager`。
+- Node.js 22.13+；这是仓库锁定的 pnpm 11.19.0 要求的最低版本，pnpm 版本见 [package.json](package.json) 的 `packageManager`。
 - 浏览器任务需要 Playwright Chromium；连接已有 Chrome 时使用专用调试配置目录。
 - 默认 Mock 模型用于本地开发，不代表真实模型的理解或内容生成能力。
 
@@ -33,7 +33,7 @@ agent/.venv/Scripts/python.exe -m playwright install chromium
 
 在仓库根目录双击 `start-local.cmd`，就绪后自动打开 `http://127.0.0.1:3000`。双击 `stop-local.cmd` 统一关闭本启动器管理的模拟站、后端和前端。模拟招聘站地址为 `http://127.0.0.1:8080`。关闭启动窗口或网页不会停止后台服务。
 
-首次使用需要已安装 **Python 3.12+ 和 Node.js 20.9+**，并可联网下载依赖。启动器会创建缺失的虚拟环境、安装 Agent、完整模拟站及前端依赖和 Playwright Chromium、补齐缺失的本地配置；已经准备好的环境可直接启动。未安装 pnpm 时通过 npm 调用仓库指定版本。也可以用 `AUTOHUNT_PYTHON`、`AUTOHUNT_NODE` 指定解释器路径。
+首次使用需要已安装 **Python 3.12+ 和 Node.js 22.13+**，并可联网下载依赖。启动器会创建缺失的虚拟环境、安装 Agent、完整模拟站及前端依赖和 Playwright Chromium、补齐缺失的本地配置；已经准备好的环境可直接启动。未安装 pnpm 时通过 npm 调用仓库指定版本。也可以用 `AUTOHUNT_PYTHON`、`AUTOHUNT_NODE` 指定解释器路径。
 
 启动器使用当前开发模式（Next.js Webpack），首次页面编译可能需要一两分钟；这是源码一键运行入口，不是独立安装包。配置、模型设置、数据库和简历保留；遇到已有数据但丢失加密密钥、前后端 Token 不一致时，会停止并给出提示，避免替换原配置。
 

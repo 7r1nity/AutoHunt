@@ -42,7 +42,7 @@
 
 应用源码位于 [autohunt/](autohunt/)。安装依赖、初始化配置及启动前后端，见 [安装与运行指南](autohunt/README.md)。
 
-Windows 用户安装 Python 3.12+ 和 Node.js 20.9+ 后，可双击根目录 `start-local.cmd` 一键准备并启动模拟招聘站、Agent 后端和工作台，双击 `stop-local.cmd` 停止服务。详情及日志位置见安装与运行指南。
+Windows 用户安装 Python 3.12+ 和 Node.js 22.13+ 后，可双击根目录 `start-local.cmd` 一键准备并启动模拟招聘站、Agent 后端和工作台，双击 `stop-local.cmd` 停止服务。Node.js 最低版本由仓库锁定的 pnpm 11.19.0 要求决定。详情及日志位置见安装与运行指南。
 
 默认前端地址为 [http://127.0.0.1:3000](http://127.0.0.1:3000)，后端监听 `127.0.0.1:8000`。首次配置默认使用 Mock 模型；真实语义规划需要在设置中配置支持的模型服务。
 

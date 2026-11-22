@@ -7,7 +7,7 @@
 - 一起启动 AutoHunt 与模拟站：双击仓库根目录 `start-local.cmd`。
 - 只启动模拟站：双击本目录 `start-local.cmd`，就绪后打开 <http://127.0.0.1:8080>。
 - 统一停止：双击根目录或本目录 `stop-local.cmd`。**停止当前启动器管理的整个实例**，包括该实例中的 AutoHunt；不关闭手动启动的外部进程。
-- 单独模拟站只需 Python 3.12+，首次安装依赖需要联网；不需要 Node.js、模型密钥或 Chromium。统一模式另需 Node.js 20.9+。
+- 单独模拟站只需 Python 3.12+，首次安装依赖需要联网；不需要 Node.js、模型密钥或 Chromium。统一模式另需 Node.js 22.13+，以满足仓库锁定的 pnpm 11.19.0 要求。
 - 统一使用 `autohunt/agent/.venv`，无需迁移或删除原 `mock-site/.venv`。关闭网页不会停止后台服务。
 - 三种组合 `all`、`autohunt`、`mock` 共享一个启动器实例；切换组合前先停止。端口被占用时明确报错，不误杀占用进程。模拟站固定使用 8080，与 Agent 投递允许列表一致。
 - 日志位于 `autohunt/.runlogs/launcher/mock.log`，状态及停止方式见 [运行指南](../autohunt/README.md)。
