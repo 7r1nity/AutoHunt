@@ -1,0 +1,88 @@
+name: autohunt
+
+services:
+  mock-site:
+    build:
+      context: .
+      dockerfile: docker/mock-site.Dockerfile
+    init: true
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: sqlite+aiosqlite:////data/job_site.db
+    volumes:
+      - mock-data:/data
+    ports:
+      - "127.0.0.1:8080:8080"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import json,urllib.request; d=json.load(urllib.request.urlopen('http://127.0.0.1:8080/api/health',timeout=3)); assert d['service']=='autohunt-mock-site' and d['status']=='ok'"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    stop_grace_period: 25s
+
+  agent:
+    build:
+      context: .
+      dockerfile: docker/agent.Dockerfile
+    init: true
+    restart: unless-stopped
+    depends_on:
+      mock-site:
+        condition: service_healthy
+    environment:
+      AUTOHUNT_DATA_ROOT: /var/lib/autohunt
+      AUTOHUNT_CONFIG_FILE: /run/autohunt-config/runtime.env
+      AUTOHUNT_BROWSER_CDP_URL: http://127.0.0.1:9223
+      AUTOHUNT_BROWSER_HEADLESS: "false"
+      AUTOHUNT_TRUSTED_HOSTS: 127.0.0.1,localhost,agent
+      AUTOHUNT_MOCK_HISTORY_DATABASE: /var/lib/mock-site/job_site.db
+      AUTOHUNT_ALLOWED_ORIGINS: http://127.0.0.1:3000,http://localhost:3000
+      AUTOHUNT_LLM_PROVIDER: mock
+      AUTOHUNT_LLM_MODEL: mock-autohunt-v1
+      DISPLAY: ":99"
+    volumes:
+      - agent-data:/var/lib/autohunt
+      - config:/run/autohunt-config
+      - frontend-config:/run/autohunt-frontend
+      - mock-data:/var/lib/mock-site
+    ports:
+      - "127.0.0.1:6080:6080"
+    shm_size: 1gb
+    healthcheck:
+      test: ["CMD", "python", "/opt/autohunt/docker/healthcheck.py"]
+      interval: 10s
+      timeout: 8s
+      retries: 24
+      start_period: 30s
+    stop_grace_period: 65s
+
+  frontend:
+    build:
+      context: .
+      dockerfile: docker/frontend.Dockerfile
+    init: true
+    restart: unless-stopped
+    depends_on:
+      agent:
+        condition: service_healthy
+    environment:
+      AUTOHUNT_BACKEND_URL: http://agent:8000
+      AUTOHUNT_CONFIG_FILE: /run/autohunt-config/runtime.env
+    volumes:
+      - frontend-config:/run/autohunt-config:ro
+    ports:
+      - "127.0.0.1:3000:3000"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/agent/stats',{signal:AbortSignal.timeout(4000)}).then(async r=>{if(!r.ok)process.exit(1);const d=await r.json();if(!('discovered' in d))process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 6s
+      retries: 18
+      start_period: 20s
+    stop_grace_period: 20s
+
+volumes:
+  agent-data:
+  mock-data:
+  config:
+  frontend-config:

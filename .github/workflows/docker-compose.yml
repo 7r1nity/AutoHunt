@@ -1,0 +1,69 @@
+name: Docker Compose acceptance
+on:
+  push:
+    branches: [main, 'codex/**']
+    paths:
+      - 'compose.yaml'
+      - '.dockerignore'
+      - 'docker/**'
+      - 'autohunt/agent/**'
+      - 'autohunt/frontend/**'
+      - 'autohunt/package.json'
+      - 'autohunt/pnpm-*'
+      - '.github/workflows/docker-compose.yml'
+  pull_request:
+    paths: ['compose.yaml', '.dockerignore', 'docker/**', 'autohunt/**', 'mock-site/**']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: docker-compose-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  compose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    env:
+      COMPOSE_PROJECT_NAME: autohunt-ci-${{ github.run_id }}
+      COMPOSE_FILE: compose.yaml:docker/compose.test.yaml
+      COMPOSE_ENV_FILES: docker/compose.defaults.env
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Offline container contracts
+        run: |
+          python -m pip install cryptography pyyaml python-dotenv
+          python -m unittest discover -s docker/tests -p 'test_*.py' -v
+          node --test docker/tests/frontend-entrypoint.test.mjs
+          docker compose config --quiet
+      - name: Build images from source-only context
+        run: docker compose build --parallel
+      - name: Start and wait for all services
+        run: docker compose up -d --wait --wait-timeout 240
+      - name: Browser login, MFA, desktop and proxy
+        run: docker compose exec -T agent python /opt/autohunt/docker/smoke_test.py --isolated-test --phase seed | tee docker-seed.json
+      - name: Recreate all containers, keeping only persistent volumes
+        run: |
+          docker compose down --timeout 60
+          docker compose up -d --wait --wait-timeout 240
+      - name: Verify persisted browser login, credentials and database
+        run: docker compose exec -T agent python /opt/autohunt/docker/smoke_test.py --isolated-test --phase verify | tee docker-verify.json
+      - name: Logs on failure
+        if: failure()
+        run: docker compose logs --no-color --tail=150
+      - name: Remove isolated test containers and volumes
+        if: always()
+        run: docker compose down -v --timeout 60
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: docker-compose-acceptance-${{ github.run_id }}
+          path: |
+            docker-seed.json
+            docker-verify.json
+          if-no-files-found: ignore

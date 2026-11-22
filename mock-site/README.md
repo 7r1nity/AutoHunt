@@ -2,6 +2,14 @@
 
 本地演示应用：FastAPI + SQLAlchemy/SQLite，静态 HTML/JS/CSS 前端。包含职位筛选、详情、求职者和招聘方中心、模拟 MFA、消息、简历、表单及投递状态。全部用于模拟演练。
 
+## Docker Compose
+
+在仓库根目录双击 `docker-up.cmd`，或执行 `docker compose --env-file docker/compose.defaults.env up -d --build --wait --wait-timeout 240`，一起启动模拟站、AutoHunt 和可视化 Chromium。宿主机只需要 Docker Desktop（Linux 容器，Compose 2.20+），无需 Python 或 Node.js。
+
+模拟站访问 <http://127.0.0.1:8080>。Agent 的求职者登录与验证码需要在 [可视化浏览器](http://127.0.0.1:6080/vnc.html?autoconnect=true&resize=scale) 内完成；宿主机普通浏览器可另开招聘方页面，两者登录状态互不覆盖。Docker 的模拟站数据库位于独立 `mock-data` 卷，与本目录已有 `job_site.db` 不混用；空卷首次生成虚构账号和岗位。
+
+双击根目录 `docker-down.cmd` 停止并保留数据卷。完整说明见 [Docker Compose 指南](../autohunt/docs/docker-compose.md)。
+
 ## Windows 一键运行
 
 - 一起启动 AutoHunt 与模拟站：双击仓库根目录 `start-local.cmd`。

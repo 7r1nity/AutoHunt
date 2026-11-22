@@ -2,7 +2,23 @@
 
 AutoHunt 是本地单用户求职 Agent。项目介绍与架构概览见 [仓库首页](../README.md)，本页说明安装、启动、评估与运行边界。
 
+## Docker Compose 一键运行
+
+安装并启动 Docker Desktop，使用 Linux 容器和 Compose 2.20+，在仓库根目录双击 `docker-up.cmd`；无需在宿主机安装 Python、Node.js 或 pnpm。首次运行会联网下载并构建镜像，然后打开工作台与浏览器接管页。
+
+也可从仓库根目录执行：
+
+```powershell
+docker compose --env-file docker/compose.defaults.env up -d --build --wait --wait-timeout 240
+```
+
+工作台为 <http://127.0.0.1:3000>，模拟站为 <http://127.0.0.1:8080>。在 [可视化浏览器](http://127.0.0.1:6080/vnc.html?autoconnect=true&resize=scale) 内完成登录、验证码或 MFA，再回到工作台继续任务。普通宿主机浏览器的登录状态与容器内 Chromium 不共享。
+
+双击 `docker-down.cmd` 或执行 `docker compose --env-file docker/compose.defaults.env down --timeout 60` 停止并保留数据卷。容器数据与下方 Windows 源码启动器的数据独立；切换启动方式前先正常停止当前实例，避免端口冲突。默认使用 Mock 模型，真实语义规划仍需在设置中配置模型。完整操作、备份和隔离验收说明见 [Docker Compose 指南](docs/docker-compose.md)。
+
 ## 环境准备
+
+以下为宿主机直接运行源码所需的环境；使用 Docker Compose 时由镜像提供这些依赖。
 
 - Python 3.12+。
 - Node.js 22.13+；这是仓库锁定的 pnpm 11.19.0 要求的最低版本，pnpm 版本见 [package.json](package.json) 的 `packageManager`。
@@ -139,6 +155,7 @@ cd agent
 | `scripts/` | 配置、启动、维护和静态检查 |
 
 - [后端说明](agent/README.md)
+- [Docker Compose 与可视化浏览器](docs/docker-compose.md)
 - [完整技术报告（2026-10-23）](docs/technical-report-2026-10-23.md)
 - [源码技术索引](docs/technical-reference.md)
 - [上下文预算与执行账本](docs/context-ledger-refactor.md)
@@ -148,4 +165,4 @@ cd agent
 - [筛选证据与投递范围](docs/delivery-evidence-reuse.md)
 - [变更记录](CHANGELOG.md)
 
-当前不提供容器执行沙箱或多 Agent 系统。后端使用单进程队列与部分进程内状态，不要配置多个 uvicorn worker；也不要让不同数据根同时控制同一个 CDP 会话。运行目录默认 `agent/data/`，可通过 `AUTOHUNT_DATA_ROOT` 指定独立目录。
+Docker Compose 提供应用运行环境与可视化浏览器；当前不提供面向任意代码执行的容器沙箱或多 Agent 系统。后端使用单进程队列与部分进程内状态，不要配置多个 uvicorn worker；也不要让不同数据根同时控制同一个 CDP 会话。源码运行目录默认 `agent/data/`，可通过 `AUTOHUNT_DATA_ROOT` 指定独立目录。

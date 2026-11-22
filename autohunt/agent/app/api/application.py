@@ -126,7 +126,7 @@ app.add_middleware(RateLimitMiddleware, requests_per_minute=settings.rate_limit,
 app.add_middleware(AuditMiddleware, log_path=settings.data_root / "audit" / "events.jsonl")
 app.add_middleware(RequestIdMiddleware)
 app.add_middleware(SecurityHeadersMiddleware)
-app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost", "testserver"])
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(settings.trusted_hosts))
 app.add_middleware(
     CORSMiddleware,
     allow_origins=list(settings.allowed_origins),

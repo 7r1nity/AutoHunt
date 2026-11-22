@@ -42,6 +42,10 @@
 
 应用源码位于 [autohunt/](autohunt/)。安装依赖、初始化配置及启动前后端，见 [安装与运行指南](autohunt/README.md)。
 
+**Docker Compose 一键运行**：安装并启动 Docker Desktop（Linux 容器，Compose 2.20+），Windows 双击根目录 `docker-up.cmd`。也可在仓库根目录执行 `docker compose --env-file docker/compose.defaults.env up -d --build --wait --wait-timeout 240`，统一启动 AutoHunt、模拟站与可视化 Chromium；宿主机无需安装 Python、Node.js 或 pnpm。双击 `docker-down.cmd` 停止容器并保留数据。
+
+浏览器登录、验证码与 MFA 在 [可视化浏览器](http://127.0.0.1:6080/vnc.html?autoconnect=true&resize=scale) 中手动完成，然后回到 AutoHunt 继续任务。该浏览器和 Agent 使用同一份登录状态。启动、持久化和隔离验收说明见 [Docker Compose 指南](autohunt/docs/docker-compose.md)。
+
 Windows 用户安装 Python 3.12+ 和 Node.js 22.13+ 后，可双击根目录 `start-local.cmd` 一键准备并启动模拟招聘站、Agent 后端和工作台，双击 `stop-local.cmd` 停止服务。Node.js 最低版本由仓库锁定的 pnpm 11.19.0 要求决定。详情及日志位置见安装与运行指南。
 
 默认前端地址为 [http://127.0.0.1:3000](http://127.0.0.1:3000)，后端监听 `127.0.0.1:8000`。首次配置默认使用 Mock 模型；真实语义规划需要在设置中配置支持的模型服务。
@@ -67,6 +71,7 @@ Windows 用户安装 Python 3.12+ 和 Node.js 22.13+ 后，可双击根目录 `s
 ## 文档
 
 - [安装与运行](autohunt/README.md)
+- [Docker Compose、可视化浏览器与数据保留](autohunt/docs/docker-compose.md)
 - [完整技术报告：架构、实现细节、闭环与测试（2026-10-23）](autohunt/docs/technical-report-2026-10-23.md)
 - [源码技术索引：全部路由、工具、配置、建表与模块](autohunt/docs/technical-reference.md)
 - [上下文预算与执行账本](autohunt/docs/context-ledger-refactor.md)

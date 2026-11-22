@@ -25,6 +25,10 @@ class Settings:
     data_root: Path = Path(os.getenv("AUTOHUNT_DATA_ROOT", str(BACKEND_ROOT / "data"))).resolve()
     api_key: str | None = os.getenv("AUTOHUNT_API_KEY")
     data_key: str | None = os.getenv("AUTOHUNT_DATA_KEY")
+    trusted_hosts: tuple[str, ...] = tuple(
+        host.strip() for host in os.getenv("AUTOHUNT_TRUSTED_HOSTS", "127.0.0.1,localhost,testserver").split(",")
+        if host.strip()
+    )
     allowed_origins: tuple[str, ...] = tuple(
         origin.strip()
         for origin in os.getenv(

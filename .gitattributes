@@ -5,3 +5,10 @@ autohunt/agent/evaluation/corpora/current-acceptance-v1.sha256 text eol=lf
 # Normalize simulator source; keep Windows launchers native on checkout.
 mock-site/** text=auto
 mock-site/*.cmd text eol=crlf
+
+# Linux image inputs and cross-platform launch wrappers.
+docker/** text eol=lf
+docker-up.cmd text eol=crlf
+docker-down.cmd text eol=crlf
+compose.yaml text eol=lf
+.github/workflows/*.yml text eol=lf

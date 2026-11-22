@@ -1,0 +1,5 @@
+# Only use with a new project name. Never apply to an everyday instance.
+services:
+  agent:
+    environment:
+      AUTOHUNT_DOCKER_TEST: "1"
