@@ -183,6 +183,15 @@ def check_services(token: str) -> None:
         raise AssertionError("Loopback simulator relay did not reach the expected database service")
     direct = http_json(AGENT_ORIGIN + "/api/v1/automation/stats", token=token)
     proxied = http_json(FRONTEND_ORIGIN + "/api/agent/stats")
+    status, workbench = http_request(FRONTEND_ORIGIN + "/")
+    if status != 200 or b"AutoHunt" not in workbench:
+        raise AssertionError("The production workbench HTML was not available")
+    assets = re.findall(rb'src="(/_next/static/[^"<>]+\.js(?:\?[^"<>]*)?)"', workbench)
+    if not assets:
+        raise AssertionError("The production workbench did not reference its JavaScript assets")
+    asset_status, _ = http_request(FRONTEND_ORIGIN + assets[0].decode().replace('&amp;', '&'))
+    if asset_status != 200:
+        raise AssertionError("The production workbench JavaScript asset was not available")
     for name in ("discovered", "stored", "applying"):
         if name not in direct or proxied.get(name) != direct[name]:
             raise AssertionError("The production frontend proxy did not reach the authenticated Agent")
@@ -226,7 +235,8 @@ async def run(phase: str) -> dict:
         if not any(session.get("id") == state["session_id"] for session in sessions):
             raise AssertionError("The Agent database did not preserve the synthetic conversation across restart")
         await check_browser(phase, state)
-    checks = ["simulator_database_health", "authenticated_frontend_proxy", "backend_authentication",
+    checks = ["simulator_database_health", "authenticated_frontend_proxy", "production_workbench_html",
+              "production_workbench_assets", "backend_authentication",
               "novnc_html", "novnc_websocket_vnc", "application_cdp_attach", "adapter_login_evidence"]
     checks += (["wrong_mfa_rejected", "correct_mfa_login", "synthetic_state_saved"] if phase == "seed" else
                ["browser_login_persistence", "agent_database_persistence", "credential_persistence"])

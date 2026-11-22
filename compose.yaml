@@ -55,7 +55,7 @@ services:
       timeout: 8s
       retries: 24
       start_period: 30s
-    stop_grace_period: 65s
+    stop_grace_period: 90s
 
   frontend:
     build:

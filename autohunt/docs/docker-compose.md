@@ -84,3 +84,16 @@ docker compose --env-file docker/compose.defaults.env logs --tail=100
 端口冲突时先正常停止原来的源码或容器实例；Docker Engine 未启动时先打开 Docker Desktop；镜像下载失败时检查网络后重试启动。启动失败不会自动删除数据卷。
 
 仓库提供隔离容器验收脚本，检查服务连通、前端代理、同一 CDP 浏览器的登录、错误与正确验证码、可视化连接以及重启后的持久化。测试只能在专用 Compose 测试项目和全新卷上运行，不能把登录与标记写入日常实例。实际执行结果以当次验收报告和 CI 记录为准；构建或健康检查通过，不等于模型语义、真实招聘网站或完整投递链路通过。
+
+确认日常实例已正常停止、端口空闲后，可使用一个从未使用过的测试项目名复现。以下 `autohunt-check-new` 必须是专用测试项目；两阶段使用相同名称和数据卷：
+
+```sh
+docker compose -p autohunt-check-new --env-file docker/compose.defaults.env -f compose.yaml -f docker/compose.test.yaml up -d --build --wait --wait-timeout 240
+docker compose -p autohunt-check-new --env-file docker/compose.defaults.env -f compose.yaml -f docker/compose.test.yaml exec -T agent python /opt/autohunt/docker/smoke_test.py --isolated-test --phase seed
+docker compose -p autohunt-check-new --env-file docker/compose.defaults.env -f compose.yaml -f docker/compose.test.yaml down
+docker compose -p autohunt-check-new --env-file docker/compose.defaults.env -f compose.yaml -f docker/compose.test.yaml up -d --wait --wait-timeout 240
+docker compose -p autohunt-check-new --env-file docker/compose.defaults.env -f compose.yaml -f docker/compose.test.yaml exec -T agent python /opt/autohunt/docker/smoke_test.py --isolated-test --phase verify
+docker compose -p autohunt-check-new --env-file docker/compose.defaults.env -f compose.yaml -f docker/compose.test.yaml down
+```
+
+`seed` 仅创建虚构求职者登录和合成会话；`verify` 核对重建容器后的同一登录、加密配置和数据库标记。脚本不启动职位搜索、不发招聘消息、不提交简历、不调用外部模型。不要对日常项目添加 `compose.test.yaml`。

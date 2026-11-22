@@ -134,6 +134,37 @@ def stop_process(process, *, timeout):
         process.wait(timeout=5)
 
 
+def close_browser_cdp():
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.connect_over_cdp('http://127.0.0.1:9223', timeout=3000)
+        browser.new_browser_cdp_session().send('Browser.close')
+
+
+def stop_browser(process):
+    if process.poll() is not None:
+        process.wait()
+        return
+    env = {key: value for key, value in os.environ.items() if key not in CONFIG_KEYS}
+    helper = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), '--close-browser'],
+                              env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                              start_new_session=True)
+    try:
+        try:
+            helper.wait(timeout=6)
+        except subprocess.TimeoutExpired:
+            stop_process(helper, timeout=0.5)
+        # Browser.close can close the target before its response reaches the
+        # helper. The owned browser process exiting is the decisive evidence.
+        process.wait(timeout=6)
+    except subprocess.TimeoutExpired:
+        stop_process(process, timeout=3)
+    finally:
+        if helper.poll() is None:
+            stop_process(helper, timeout=0.5)
+
+
 def run():
     config = Path(os.environ.get('AUTOHUNT_CONFIG_FILE', '/run/autohunt-config/runtime.env'))
     data = Path(os.environ.get('AUTOHUNT_DATA_ROOT', '/var/lib/autohunt'))
@@ -189,14 +220,20 @@ def run():
         ordered = sorted(children, key=lambda item: shutdown_order.index(item[0]))
         for name, process in ordered:
             try:
-                stop_process(process, timeout=40 if name == 'agent' else 3)
+                if name == 'browser':
+                    stop_browser(process)
+                else:
+                    stop_process(process, timeout=40 if name == 'agent' else 3)
             except Exception:
                 print(f'Container component cleanup failed: {name}.', file=sys.stderr, flush=True)
 
 
 if __name__ == '__main__':
     try:
-        run()
+        if sys.argv[1:] == ['--close-browser']:
+            close_browser_cdp()
+        else:
+            run()
     except Exception as exc:
         print(f'AutoHunt container could not continue: {exc}', file=sys.stderr, flush=True)
         sys.exit(1)

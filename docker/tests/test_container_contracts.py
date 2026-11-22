@@ -71,6 +71,40 @@ class CredentialContracts(unittest.TestCase):
 
 
 class LifecycleContracts(unittest.TestCase):
+    def test_browser_closes_through_cdp_without_terminating_its_process_group(self):
+        process, helper = Mock(), Mock()
+        process.poll.return_value = None
+        helper.poll.return_value = 0
+        with patch.object(entry.subprocess, 'Popen', return_value=helper) as launch, \
+                patch.object(entry, 'stop_process') as forced_stop:
+            entry.stop_browser(process)
+        self.assertEqual(launch.call_args.args[0][-1], '--close-browser')
+        helper.wait.assert_called_once_with(timeout=6)
+        process.wait.assert_called_once_with(timeout=6)
+        forced_stop.assert_not_called()
+        self.assertNotIn('AUTOHUNT_DATA_KEY', launch.call_args.kwargs['env'])
+
+    def test_browser_close_timeout_falls_back_to_bounded_owned_process_stop(self):
+        process, helper = Mock(), Mock()
+        process.poll.return_value = None
+        process.wait.side_effect = subprocess.TimeoutExpired('synthetic browser', 6)
+        helper.poll.return_value = 0
+        with patch.object(entry.subprocess, 'Popen', return_value=helper), \
+                patch.object(entry, 'stop_process') as forced_stop:
+            entry.stop_browser(process)
+        forced_stop.assert_called_once_with(process, timeout=3)
+
+    def test_frozen_browser_close_helper_is_stopped_before_browser_fallback(self):
+        process, helper = Mock(), Mock()
+        process.poll.return_value = None
+        helper.poll.return_value = 0
+        helper.wait.side_effect = subprocess.TimeoutExpired('synthetic helper', 6)
+        with patch.object(entry.subprocess, 'Popen', return_value=helper), \
+                patch.object(entry, 'stop_process') as forced_stop:
+            entry.stop_browser(process)
+        forced_stop.assert_called_once_with(helper, timeout=0.5)
+        process.wait.assert_called_once_with(timeout=6)
+
     def test_slow_browser_is_awaited_before_agent_may_restore_queues(self):
         process = Mock()
         process.poll.return_value = None
