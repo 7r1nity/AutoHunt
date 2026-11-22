@@ -5,6 +5,7 @@
 - 新增 AutoHunt 前端、Agent 与模拟站的 Compose 运行配置，以及 Windows 一键启动、停止和状态入口；宿主机无需单独安装 Python、Node.js 或 pnpm。
 - 容器内运行可视化 Chromium，通过本机 noVNC 页面手动登录、输入验证码和 MFA，沿用现有 CDP 接管与任务继续流程。
 - 模型配置、加密密钥、求职记录、浏览器登录和模拟站数据库使用持久化数据卷；停止不删除卷，不自动迁移宿主机个人数据。
+- 加入隔离 Docker CI，实际验证验证码、浏览器接管、工作台资源和删除重建容器后的登录/状态保留；补齐 Playwright 系统库，启动等待 CDP 就绪，停止先正常关闭 Chromium 以释放 profile 锁。结果与前两轮失败诊断见 Docker Compose 指南。
 
 ## 2026-11-22 — 修正一键启动的 Node.js 最低版本
 

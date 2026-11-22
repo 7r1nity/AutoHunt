@@ -59,6 +59,8 @@ Compose 管理三个服务：
 - `agent`：单进程 Agent 后端、可视化 Chromium、桌面及 noVNC。浏览器和后端使用同一容器内的 CDP 端点；本机模拟站转发保持现有 `127.0.0.1:8080` 地址与投递允许列表一致。
 - `frontend`：Next.js standalone 生产构建，通过容器网络访问 Agent；后端服务令牌只在 Next.js 服务端读取，不进入浏览器 JavaScript。
 
+Agent 容器先等待可视化 Chromium 的 CDP 和模拟站转发就绪，再启动会恢复任务队列的后端，防止冷启动被误判为浏览器失联。停止时后端先保存状态，再通过限时辅助进程向 Chromium 发送 `Browser.close`，等待浏览器退出后关闭桌面；关闭超时才终止受管进程组。正常关闭会释放 profile 锁，避免重建容器后主机名变化造成“另一台电脑正在使用此 profile”。这不等于已验证断电、磁盘损坏或任意强杀后的恢复。
+
 浏览器接管页绑定宿主机回环地址，仅供当前计算机使用。它没有额外登录密码，能操作浏览器桌面；不要把 6080 映射到公网或不可信局域网。CDP 9223、原始 VNC 5900 和 Agent 8000 不发布到宿主机。
 
 | 数据卷 | 保存内容 |
@@ -97,3 +99,25 @@ docker compose -p autohunt-check-new --env-file docker/compose.defaults.env -f c
 ```
 
 `seed` 仅创建虚构求职者登录和合成会话；`verify` 核对重建容器后的同一登录、加密配置和数据库标记。脚本不启动职位搜索、不发招聘消息、不提交简历、不调用外部模型。不要对日常项目添加 `compose.test.yaml`。
+
+## 2026-11-22 验收记录
+
+容器功能版本：`33c53105da2247fbd7319b9e00420e92ff1acb96`。[隔离 Linux Docker CI 与完整步骤](https://github.com/7r1nity/AutoHunt/actions/runs/44982774328) 全部通过，`docker-seed.json` 和 `docker-verify.json` 保留在该运行的 artifacts 中。
+
+| 验证 | 结果与边界 |
+| --- | --- |
+| Windows 源码启动器回归 | 26/26 通过 |
+| 容器凭证、生命周期、网络和测试隔离契约 | Python 24/24，Node 3/3 通过 |
+| 三个 Linux 镜像 | 从源码构建成功；前端使用无宿主 `.env` 的 standalone 生产构建 |
+| 首次启动和 `seed` | 12 项检查通过，脚本自身耗时 2.161 秒 |
+| 删除并重建三个容器 | 保留四个数据卷，依赖健康检查通过 |
+| 重建后的 `verify` | 12 项检查通过，脚本自身耗时 1.473 秒 |
+
+两个脚本阶段重复检查连通和浏览器接管，因此不能把 24 个检查点当成 24 个独立业务场景。脚本耗时不含镜像构建、下载依赖和服务启动。外部模型调用、职位搜索和简历投递均为 0。
+
+首次实测发现并修复两项环境问题：
+
+1. [第一轮](https://github.com/7r1nity/AutoHunt/actions/runs/44981803877) 构建及健康检查成功，但 Playwright 驱动因缺少 `libatomic.so.1` 无法连接浏览器；镜像补充 `libatomic1`，并在构建时执行驱动版本检查。
+2. [第二轮](https://github.com/7r1nity/AutoHunt/actions/runs/44982144483) 首次登录成功，重建容器后 Chromium 因旧 profile 锁拒绝启动；改为限时 CDP `Browser.close` 后等待实际退出，第三轮重建和登录保留通过。未删除 profile 或绕过锁检查。
+
+本机没有 Docker Engine，本轮实际容器检查在 GitHub Actions 的隔离 Linux 主机进行。Windows 包装脚本已检查语法和 Docker 缺失错误路径，尚未完成 Windows Docker Desktop 实机验收。本轮也不代表真实招聘站、模型语义、投递链路、强杀或断电恢复验收。
