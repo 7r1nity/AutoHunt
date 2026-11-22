@@ -14,7 +14,7 @@ docker compose --env-file docker/compose.defaults.env up -d --build --wait --wai
 
 工作台为 <http://127.0.0.1:3000>，模拟站为 <http://127.0.0.1:8080>。在 [可视化浏览器](http://127.0.0.1:6080/vnc.html?autoconnect=true&resize=scale) 内完成登录、验证码或 MFA，再回到工作台继续任务。普通宿主机浏览器的登录状态与容器内 Chromium 不共享。
 
-双击 `docker-down.cmd` 或执行 `docker compose --env-file docker/compose.defaults.env down --timeout 60` 停止并保留数据卷。容器数据与下方 Windows 源码启动器的数据独立；切换启动方式前先正常停止当前实例，避免端口冲突。默认使用 Mock 模型，真实语义规划仍需在设置中配置模型。完整操作、备份和隔离验收说明见 [Docker Compose 指南](docs/docker-compose.md)。
+双击 `docker-down.cmd` 或执行 `docker compose --env-file docker/compose.defaults.env down` 停止并保留数据卷。停止沿用各服务的退出宽限期，让后端保存任务状态并正常关闭浏览器。容器数据与下方 Windows 源码启动器的数据独立；切换启动方式前先正常停止当前实例，避免端口冲突。默认使用 Mock 模型，真实语义规划仍需在设置中配置模型。完整操作、备份和隔离验收说明见 [Docker Compose 指南](docs/docker-compose.md)。
 
 ## 环境准备
 

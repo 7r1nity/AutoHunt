@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import os
 from pathlib import Path
 import secrets
@@ -9,6 +10,7 @@ import signal
 import subprocess
 import sys
 import time
+from urllib.request import ProxyHandler, build_opener
 
 from cryptography.fernet import Fernet
 
@@ -67,6 +69,34 @@ def wait_display(children, *, timeout=20):
             return
         time.sleep(0.2)
     raise RuntimeError('Virtual display did not become ready.')
+
+
+def desktop_ready() -> bool:
+    opener = build_opener(ProxyHandler({}))
+    with opener.open('http://127.0.0.1:9223/json/version', timeout=2) as response:
+        if not json.load(response).get('webSocketDebuggerUrl', '').startswith('ws://'):
+            return False
+    with opener.open('http://127.0.0.1:9223/json/list', timeout=2) as response:
+        targets = json.load(response)
+    with opener.open('http://127.0.0.1:8080/api/health', timeout=2) as response:
+        if json.load(response).get('service') != 'autohunt-mock-site':
+            return False
+    return any(target.get('type') == 'page' and target.get('url', '').startswith('http://127.0.0.1:8080/')
+               for target in targets)
+
+
+def wait_browser(children, *, timeout=40):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if any(process.poll() is not None for _, process in children):
+            raise RuntimeError('Desktop process exited before browser takeover became ready.')
+        try:
+            if desktop_ready():
+                return
+        except (OSError, ValueError):
+            pass
+        time.sleep(0.3)
+    raise RuntimeError('Browser CDP and simulator relay did not become ready; Agent was not started.')
 
 
 def frontend_credentials(path: Path, credentials: dict[str, str]):
@@ -143,6 +173,9 @@ def run():
                           '--no-default-browser-check', '--password-store=basic', '--disable-session-crashed-bubble',
                           '--remote-debugging-address=127.0.0.1', '--remote-debugging-port=9223',
                           f'--user-data-dir={profile}', '--window-size=1360,900', 'http://127.0.0.1:8080'])
+        # Persisted queues may resume in the ASGI lifespan: never start it before
+        # the same visible browser is actually available for takeover.
+        wait_browser(children)
         start('agent', [sys.executable, '-m', 'uvicorn', 'app.main:app', '--host', '0.0.0.0', '--port', '8000',
                         '--timeout-graceful-shutdown', '35'])
         while not stopping:

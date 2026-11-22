@@ -34,7 +34,7 @@ try {
     $composeArgs = @('compose', '--project-name', 'autohunt', '--project-directory', $projectRoot,
         '--env-file', $defaultsFile, '--file', $composeFile)
     if ($Action -eq 'Stop') {
-        & $dockerExecutable @composeArgs down --timeout 60
+        & $dockerExecutable @composeArgs down
         if ($LASTEXITCODE -ne 0) { throw 'Compose could not stop all services. Inspect docker compose logs.' }
         Write-Host 'AutoHunt containers stopped. Data, login profile and configuration volumes were preserved.'
     } elseif ($Action -eq 'Status') {

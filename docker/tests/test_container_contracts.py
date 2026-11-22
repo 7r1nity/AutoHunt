@@ -71,6 +71,26 @@ class CredentialContracts(unittest.TestCase):
 
 
 class LifecycleContracts(unittest.TestCase):
+    def test_slow_browser_is_awaited_before_agent_may_restore_queues(self):
+        process = Mock()
+        process.poll.return_value = None
+        with patch.object(entry, 'desktop_ready', side_effect=[ConnectionRefusedError(), False, True]) as ready, \
+                patch.object(entry.time, 'sleep') as sleep:
+            entry.wait_browser([('browser', process)])
+        self.assertEqual(ready.call_count, 3)
+        self.assertEqual(sleep.call_count, 2)
+
+    def test_browser_startup_failure_does_not_restore_queues(self):
+        process = Mock()
+        process.poll.return_value = 1
+        with patch.object(entry, 'desktop_ready') as ready, self.assertRaisesRegex(RuntimeError, 'Desktop process exited'):
+            entry.wait_browser([('browser', process)])
+        ready.assert_not_called()
+
+    def test_browser_startup_wait_is_bounded(self):
+        with self.assertRaisesRegex(RuntimeError, 'Agent was not started'):
+            entry.wait_browser([], timeout=0)
+
     def test_live_children_get_graceful_stop_before_bounded_kill(self):
         process = Mock(pid=43210)
         process.poll.return_value = None

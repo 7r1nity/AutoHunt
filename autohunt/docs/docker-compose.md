@@ -28,7 +28,7 @@ docker compose --env-file docker/compose.defaults.env up -d --build --wait --wai
 停止时双击 `docker-down.cmd`，或执行：
 
 ```sh
-docker compose --env-file docker/compose.defaults.env down --timeout 60
+docker compose --env-file docker/compose.defaults.env down
 ```
 
 停止命令保留数据卷。不要附加 `-v`：删除加密配置卷会使与之绑定的旧材料无法解密，删除数据卷会移除记录和登录状态。关闭页面不会停止容器。

@@ -10,6 +10,7 @@ on:
       - 'autohunt/frontend/**'
       - 'autohunt/package.json'
       - 'autohunt/pnpm-*'
+      - 'mock-site/**'
       - '.github/workflows/docker-compose.yml'
   pull_request:
     paths: ['compose.yaml', '.dockerignore', 'docker/**', 'autohunt/**', 'mock-site/**']
@@ -49,7 +50,7 @@ jobs:
         run: docker compose exec -T agent python /opt/autohunt/docker/smoke_test.py --isolated-test --phase seed | tee docker-seed.json
       - name: Recreate all containers, keeping only persistent volumes
         run: |
-          docker compose down --timeout 60
+          docker compose down
           docker compose up -d --wait --wait-timeout 240
       - name: Verify persisted browser login, credentials and database
         run: docker compose exec -T agent python /opt/autohunt/docker/smoke_test.py --isolated-test --phase verify | tee docker-verify.json
@@ -58,7 +59,7 @@ jobs:
         run: docker compose logs --no-color --tail=150
       - name: Remove isolated test containers and volumes
         if: always()
-        run: docker compose down -v --timeout 60
+        run: docker compose down -v
       - uses: actions/upload-artifact@v4
         if: always()
         with:
