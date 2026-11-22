@@ -15,6 +15,7 @@ from app.core.job_filters import evaluate_filter, filter_digest, validate_filter
 from app.core.models import BrowserTaskStatus
 from app.jobs.store import JobStore
 from app.llm.base import LLMResult
+from app.memory.resume_workspace import resume_document_digest
 from app.runtime.context import RunContext, current_run
 from app.workflow.execution import begin
 from app.workflow.mock_coordinator import MockWorkflowCoordinator
@@ -97,15 +98,17 @@ class Refresh(unittest.IsolatedAsyncioTestCase):
         self.jobs.update_task(self.task_id, status=BrowserTaskStatus.COMPLETED)
         self.ids = []
         for i in range(5):
-            job_id, _ = self.jobs.upsert_job({"source": "MockJobSite", "external_id": str(i), "source_url": f"http://127.0.0.1:8080/job.html?id={i}",
+            # Completed matching with an explicit synthetic resume binding;
+            # condition uncertainty remains a separate, refreshable verdict.
+            job_id = self.jobs.admit_search_result(self.task_id, {"source": "MockJobSite", "external_id": str(i), "source_url": f"http://127.0.0.1:8080/job.html?id={i}",
                 "title": "合成分析师", "company": f"合成公司{i}", "location": "深圳", "salary": "28-33K",
                 "description": "招聘类型：社招。" + "合成JD职责和交付说明。" * 8,
                 "score": 88, "decision": "REVIEW", "reasoning": "合成说明", "filter_status": "unknown",
-                "filter_evidence": {"status": "unknown", "conditions": [], "digest": filter_digest(validate_filter(self.old))}})
+                "qualification_evidence": {"status": "pass", "assessed": True, "requirements": [],
+                    "resume_digest": resume_document_digest(self.document)},
+                "filter_evidence": {"status": "unknown", "conditions": [], "digest": filter_digest(validate_filter(self.old))}},
+                limit=None, groups=None)['job_id']
             self.ids.append(job_id)
-            job = self.jobs.get_job(job_id)
-            self.jobs.event(self.task_id, "job_stored", "合成结果", sample={"job_id": job_id, "filter_status": "unknown",
-                "filter_evidence": json.loads(job["filter_evidence"]), "filter_fingerprint": self.jobs.review_fingerprint(job)})
         async def no_model(_):
             raise AssertionError("numeric salary and allowance need no model")
         self.coordinator = object.__new__(MockWorkflowCoordinator)
@@ -170,14 +173,13 @@ class Refresh(unittest.IsolatedAsyncioTestCase):
         self.jobs.create_task(second, "mock", "分析师", resume_id=self.profile.resume_id)
         self.jobs.save_search_request(second, {"conversation_id": "default"})
         self.jobs.update_task(second, status=BrowserTaskStatus.COMPLETED)
-        job_id, _ = self.jobs.upsert_job({"source": "MockJobSite", "external_id": "second",
+        job_id = self.jobs.admit_search_result(second, {"source": "MockJobSite", "external_id": "second",
             "source_url": "http://127.0.0.1:8080/job.html?id=second", "title": "合成分析师",
             "company": "合成二号公司", "location": "深圳", "salary": "30-35K",
             "description": "招聘类型：社招。" + "合成JD职责和交付说明。" * 8,
-            "score": 92, "decision": "REVIEW", "reasoning": "合成说明", "filter_status": "pass"})
-        job = self.jobs.get_job(job_id)
-        self.jobs.event(second, "job_stored", "合成结果", sample={"job_id": job_id, "filter_status": "pass",
-            "filter_fingerprint": self.jobs.review_fingerprint(job)})
+            "score": 92, "decision": "REVIEW", "reasoning": "合成说明", "filter_status": "pass",
+            "qualification_evidence": {"status": "pass", "assessed": True, "requirements": [],
+                "resume_digest": resume_document_digest(self.document)}}, limit=None, groups=None)['job_id']
         result = await self.registry._mock_delivery_start({"min_score": 85, "source_task_id": self.task_id})
         self.assertEqual(result["queued"], 5)
         self.assertNotIn(job_id, result["job_ids"])
@@ -199,6 +201,10 @@ class Refresh(unittest.IsolatedAsyncioTestCase):
         self.owned()
         await self.registry._job_results_refilter({})
         self.jobs.update_job_filter_result(self.ids[0], {"status": "unknown", "conditions": []})
+        ids = {job["id"] for job in self.jobs.jobs_for_resume_analysis(self.profile.resume_id, task_id=self.task_id, min_score=85)}
+        self.assertEqual(ids, set(self.ids))  # Another cache's verdict does not erase this run's receipt.
+        with self.jobs._connect() as db:
+            db.execute('UPDATE jobs SET description=description || ? WHERE id=?', ('实际JD职责已经变化', self.ids[0]))
         ids = {job["id"] for job in self.jobs.jobs_for_resume_analysis(self.profile.resume_id, task_id=self.task_id, min_score=85)}
         self.assertEqual(ids, set(self.ids[1:]))
 

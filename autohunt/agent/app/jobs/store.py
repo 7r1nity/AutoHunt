@@ -848,7 +848,9 @@ class JobStore:
         return dict(db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone())
 
     def list_jobs(self, stage: str | None = None, limit: int = 100) -> list[StoredJobView]:
-        query = "SELECT j.*,d.content_hash AS review_hash FROM jobs j LEFT JOIN job_review_decisions d ON d.job_id=j.id WHERE j.board_visible=1 AND j.removed_at IS NULL AND (j.filter_status='pass' OR j.stage!='review')"
+        # Visibility is an explicit admission/removal decision, not a projection
+        # of whichever search most recently updated the shared verdict cache.
+        query = "SELECT j.*,d.content_hash AS review_hash FROM jobs j LEFT JOIN job_review_decisions d ON d.job_id=j.id WHERE j.board_visible=1 AND j.removed_at IS NULL"
         params: list[Any] = []
         if stage:
             query += " AND j.stage=?"
@@ -1146,7 +1148,7 @@ class JobStore:
     def stats(self) -> AutomationStats:
         task = self.latest_task()
         with self.lock, self._connect() as db:
-            stages = {row["stage"]: row["count"] for row in db.execute("SELECT stage,COUNT(*) AS count FROM jobs WHERE board_visible=1 AND (filter_status='pass' OR stage!='review') GROUP BY stage")}
+            stages = {row["stage"]: row["count"] for row in db.execute("SELECT stage,COUNT(*) AS count FROM jobs WHERE board_visible=1 AND removed_at IS NULL GROUP BY stage")}
         return AutomationStats(
             discovered=task.discovered, stored=task.stored, duplicates=task.duplicates, matched=task.matched,
             review=stages.get("review", 0), applying=stages.get("applying", 0),
@@ -1384,7 +1386,7 @@ class JobStore:
                     updated_digests[selected_task] = filter_digest(validate_filter(value) if value else None)
             events = db.execute(
                 "SELECT task_id,sample_json FROM browser_events WHERE task_id IN (" + placeholders + ") "
-                "AND event_type IN ('job_stored','job_duplicate','job_refiltered') ORDER BY id DESC",
+                "AND event_type IN ('job_stored','job_duplicate','job_refiltered','candidate_recorded') ORDER BY id DESC",
                 task_ids,
             ).fetchall()
             receipts: list[tuple[int, dict]] = []

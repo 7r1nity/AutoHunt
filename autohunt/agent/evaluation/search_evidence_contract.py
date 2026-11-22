@@ -57,6 +57,34 @@ class FrozenSearchEvidence(unittest.TestCase):
         self.assertEqual(json.loads(selected[0]['qualification_evidence'])['status'], 'pass')
         self.assertEqual(gaps['stale_filter'], 0)
 
+    def test_other_search_cache_cannot_implicitly_remove_admitted_board_jobs_or_stats(self):
+        self.new_task('other-search')
+        for status in ('fail', 'unknown'):
+            with self.subTest(status=status):
+                self.jobs.update_job_filter_result(self.ident, {'status': status, 'digest': 'other-scope'})
+                self.assertEqual([item.id for item in self.jobs.list_jobs()], [self.ident])
+                self.assertEqual([item.id for item in self.jobs.list_jobs(stage='review')], [self.ident])
+                self.assertEqual(self.jobs.stats().review, 1)
+
+    def test_unadmitted_candidates_stay_hidden_while_explicit_refilter_and_remove_still_work(self):
+        self.new_task('other-search')
+        self.admit('other-search', job(2, status='unknown'))
+        self.admit('other-search', job(3, status='fail'))
+        self.assertEqual([item.id for item in self.jobs.list_jobs()], [self.ident])
+        self.assertEqual(self.jobs.stats().review, 1)
+        candidates = self.jobs.refilter_candidates('original', resume_id='synthetic-resume', session_id='synthetic-session')
+        self.jobs.save_refilter_results('original', candidates, [{'status': 'fail'}], {})
+        self.assertEqual(self.jobs.list_jobs(), [])
+        self.assertEqual(self.jobs.stats().review, 0)
+        new_id = self.admit('other-search', job(4))
+        self.assertEqual([item.id for item in self.jobs.list_jobs()], [new_id])
+        self.assertEqual(self.jobs.stats().review, 1)
+        row = self.jobs.get_job(new_id)
+        self.jobs.remove_selection([{'id': new_id, 'content_hash': self.jobs.review_fingerprint(row)}],
+            session_id='synthetic-session', run_id='synthetic-removal')
+        self.assertEqual(self.jobs.list_jobs(), [])
+        self.assertEqual(self.jobs.stats().review, 0)
+
     def test_growth_scope_uses_frozen_score_not_new_matching_score(self):
         self.replace_cache()
         self.assertEqual(self.evidence(task_id='original', max_score=84)[0], [])
@@ -118,6 +146,17 @@ class FrozenSearchEvidence(unittest.TestCase):
             'job_id': self.ident, 'admission': 'not_admitted', 'filter_status': 'fail'})
         self.replace_cache()
         self.assertEqual([item['id'] for item in self.evidence()[0]], [self.ident])
+
+    def test_unknown_candidate_receipt_overrides_only_its_own_search_admission(self):
+        self.new_task('other')
+        unknown = {'job_id': self.ident, 'filter_status': 'unknown', 'admission': 'pending_verification'}
+        self.jobs.event('other', 'candidate_recorded', 'other search is uncertain', sample=unknown)
+        self.assertEqual([item['id'] for item in self.evidence()[0]], [self.ident])
+        self.assertEqual([item['id'] for item in self.evidence(task_id='original')[0]], [self.ident])
+        self.jobs.event('original', 'candidate_recorded', 'same search now requires verification', sample=unknown)
+        selected, gaps = self.evidence(task_id='original')
+        self.assertEqual(selected, [])
+        self.assertEqual(gaps['unknown_filter'], 1)
 
     def test_latest_same_task_refilter_replaces_the_old_admission(self):
         candidates = self.jobs.refilter_candidates('original', resume_id='synthetic-resume', session_id='synthetic-session')

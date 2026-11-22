@@ -24,6 +24,7 @@ MODULES = (
     "search_delivery_contract", "systemic_repair_contract", "outreach_contract", "interview_contract",
     "daily_workflow_contract", "daily_scheduler_contract",
     "search_evidence_contract", "provider_json_contract",
+    "condition_refresh_contract",
 )
 
 
