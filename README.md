@@ -1,5 +1,7 @@
 # AutoHunt
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 面向求职流程的本地 AI Agent，将简历材料、自然语言需求、职位筛选、申请跟踪与成长建议组织成可追踪的任务链路。
 
 项目采用 **Plan-and-Execute + 持久化任务状态**：模型负责语义理解与规划，执行器按依赖推进步骤、记录结果，并对有副作用的操作进行授权和结果核验。当前定位为单用户研究与演示项目，不是已完成真实招聘网站验收的自动投递产品。
@@ -84,3 +86,11 @@ Windows 用户安装 Python 3.12+ 和 Node.js 22.13+ 后，可双击根目录 `s
 - [变更记录](autohunt/CHANGELOG.md)
 
 私有原件、简历、聊天、申请历史、数据库、API Key 和浏览器登录信息均不属于仓库交付内容。请勿把本地服务、浏览器调试端口或数据目录暴露到公网。
+
+## 开源与贡献
+
+本仓库自有代码和文档采用 [MIT 许可证](LICENSE)，版权归 7r1nity。第三方依赖遵循各自的许可证。
+
+欢迎通过 [Issue](https://github.com/7r1nity/AutoHunt/issues) 报告可复现问题，或提交 Pull Request。请使用虚构简历、JD 和临时数据库复现；提交前运行相关检查，保留复现步骤与评测边界。真实模型评测需设置明确调用预算。
+
+请勿提交 API Key、个人简历、聊天记录、数据库或浏览器登录资料。安装、测试与运行说明见 [项目指南](autohunt/README.md)。

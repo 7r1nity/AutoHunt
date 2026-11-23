@@ -12,6 +12,7 @@ RUN mkdir -p frontend/public && pnpm --dir frontend build --webpack
 
 FROM node:24-bookworm-slim AS runtime
 WORKDIR /app
+COPY LICENSE ./LICENSE
 ENV NODE_ENV=production \
     NEXT_TELEMETRY_DISABLED=1 \
     HOSTNAME=0.0.0.0 \

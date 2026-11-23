@@ -1,5 +1,6 @@
 # Build contexts contain source only; local configuration and history never enter images.
 **
+!LICENSE
 !docker/
 !docker/*.py
 !docker/*.mjs

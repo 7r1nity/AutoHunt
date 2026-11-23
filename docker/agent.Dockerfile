@@ -8,6 +8,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 1000 autohunt && useradd --uid 1000 --gid 1000 --create-home autohunt
 WORKDIR /opt/autohunt
+COPY LICENSE ./LICENSE
 COPY autohunt/agent/pyproject.toml ./autohunt/agent/pyproject.toml
 COPY autohunt/agent/app ./autohunt/agent/app
 COPY autohunt/agent/evaluation/reports ./autohunt/agent/evaluation/reports
