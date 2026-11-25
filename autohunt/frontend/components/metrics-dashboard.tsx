@@ -42,6 +42,7 @@ function ExecutionDetails({ ledger }: { ledger: ExecutionLedger }) {
   const localOnly = noCalls && !a.model_retries && terminalRun(ledger.status) && ledger.execution_path?.mode === "local_rule";
   const modelGroups = groupRows(ledger.calls, (call) => [call.provider, call.model, call.operation, call.status, call.error_type]);
   const toolGroups = groupRows(ledger.tools, (tool) => [tool.tool, tool.status]);
+  const issueGroups = groupRows(ledger.issues, (issue) => [issue.kind, issue.tool, issue.code, issue.status ?? null, issue.detail, issue.uncertain]);
   return <>
     <dl className="metrics-strip" aria-label="本轮执行指标">
       <div><dt>模型调用</dt><dd>{numberText(a.recorded_model_calls)}</dd><small>{localOnly ? "本地规则处理，未调用模型" : `已记录调用；另有 ${a.model_retries} 次传输重试`}</small></div>
@@ -52,13 +53,26 @@ function ExecutionDetails({ ledger }: { ledger: ExecutionLedger }) {
     </dl>
     {localOnly ? <p className="metrics-help">{ledger.execution_path?.detail}。本轮对话与每日搜索任务分别记账。</p> : noCalls && !a.model_retries ? <p className="metrics-help">本轮没有模型调用记录，可能由本地规则处理。旧记录缺少执行路径说明时，不把未知用量当作 0。</p> : !a.tokens_complete && <p className="metrics-data-note">token 数据不完整：{a.calls_without_complete_usage} 次调用缺少完整 usage，{a.retry_attempts_without_usage} 次传输重试未取得 usage。未记录的用量不按 0 计；旧任务或任务之外的调用可能不在账本中。</p>}
     <section className="metrics-section" aria-label="失败与异常">
-      <div className="metrics-section-heading"><h3>失败与异常</h3><span>{ledger.issues.length} 条过程记录</span></div>
+      <div className="metrics-section-heading"><h3>失败与异常</h3><span>{issueGroups.length} 类，共 {ledger.issues.length} 条过程记录</span></div>
       {ledger.error && <div className="metrics-error" role="status"><strong>本轮结束原因</strong><p>{ledger.error}</p></div>}
       {!ledger.error && !ledger.issues.length && <p className="metrics-empty-inline">本轮未记录失败原因。{terminalRun(ledger.status) ? "" : "任务仍在进行，结果将继续更新。"}</p>}
-      {ledger.issues.length > 0 && <><p className="metrics-help">过程异常可能已恢复，最终结果以本轮状态为准。条件不足、等待处理与执行失败分别保留。</p><ol className="metrics-issues">{ledger.issues.map((issue, index) => <li key={`${issue.seq}-${index}`}>
-        <div><strong>{issue.tool || ({ model_response: "模型请求", plan_failed: "任务规划", watchdog_expired: "执行超时" }[issue.kind] ?? "执行步骤")}</strong><code>{issue.code || "未记录错误码"}</code>{issue.uncertain && <StateBadge status="outcome_indeterminate" />}</div>
-        <p>{issue.detail || issue.code || "未提供详细原因，请核对运行记录。"}</p>
-      </li>)}</ol></>}
+      {ledger.issues.length > 0 && <><p className="metrics-help">过程异常可能已恢复，最终结果以本轮状态为准。条件不足、等待处理与执行失败分别保留。</p><ol className="metrics-issues" aria-label="异常汇总">{issueGroups.map(({ key, items }) => {
+        const issue = items[0];
+        const source = issue.tool || ({ model_response: "模型请求", plan_failed: "任务规划", watchdog_expired: "执行超时" }[issue.kind] ?? "执行步骤");
+        return <li key={key}>
+          <details className="metrics-issue-group">
+            <summary><span className="metrics-issue-summary">
+              <span className="metrics-issue-title"><strong>{source}</strong><code title={issue.code || issue.detail}>{issue.code || issue.detail || "未记录错误码"}</code></span>
+              {issue.uncertain ? <StateBadge status="outcome_indeterminate" /> : issue.status && <StateBadge status={issue.status} />}
+              <span className="metrics-issue-count">{numberText(items.length)} 次</span>
+            </span></summary>
+            <ol className="metrics-issue-records" aria-label={`${source} ${issue.code || "异常"} 详细记录`} tabIndex={0}>{items.map((record, index) => <li key={`${record.seq}-${index}`}>
+              <div><small>记录 #{record.seq}</small>{record.step_id && <code>步骤 {record.step_id}</code>}</div>
+              <p>{record.detail || record.code || "未提供详细原因，请核对运行记录。"}</p>
+            </li>)}</ol>
+          </details>
+        </li>;
+      })}</ol></>}
     </section>
     <section className="metrics-section">
       <div className="metrics-section-heading"><h3>执行步骤</h3><span>仅本轮；独立子任务可在上方切换查看</span></div>

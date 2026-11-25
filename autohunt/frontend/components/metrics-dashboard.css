@@ -50,6 +50,14 @@
 .metrics-issues strong { font-size: 14px; }
 .metrics-issues code { font-size: 12px; color: #7b4130; overflow-wrap: anywhere; }
 .metrics-issues p { margin: 7px 0 0; font-size: 14px; overflow-wrap: anywhere; }
+.metrics-issue-summary { display: inline-flex; align-items: center; gap: 12px; width: calc(100% - 20px); vertical-align: middle; }
+.metrics-issue-title { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.metrics-issue-title strong { display: block; margin-bottom: 4px; }
+.metrics-issue-title code { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 400; }
+.metrics-issue-count { flex-shrink: 0; font-size: 13px; font-variant-numeric: tabular-nums; }
+.metrics-issue-records { max-height: 320px; overflow: auto; margin: 12px 0 0; padding-left: 24px; }
+.metrics-issues .metrics-issue-records > li { border-left: 0; border-top: 1px solid var(--line); padding: 12px 0; background: none; }
+.metrics-issue-records small { color: #52665b; }
 .metrics-empty { padding: 48px 24px; background: white; border: 1px dashed var(--line); margin-top: 24px; color: #52665b; text-align: center; }
 .metrics-report-layout { display: grid; grid-template-columns: 250px minmax(0,1fr); gap: 24px; margin-top: 18px; align-items: start; }
 .metrics-report-list { display: flex; flex-direction: column; max-height: 680px; overflow: auto; border: 1px solid var(--line); border-radius: 10px; background: white; }

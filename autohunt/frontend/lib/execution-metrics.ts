@@ -24,7 +24,7 @@ export type ExecutionLedger = {
     status: string; latency_ms: number | null; prompt_tokens: number | null; completion_tokens: number | null; error_type: string | null }>;
   tools: Array<{ tool: string; status: string; duration_ms: number | null; attempts: number | null }>;
   steps: Array<{ id: string; tool: string; status: string; plan_id: string | null; revision: number | null }>;
-  issues: Array<{ seq: number; kind: string; tool: string | null; step_id: string | null; code: string | null; detail: string; uncertain: boolean }>;
+  issues: Array<{ seq: number; kind: string; tool: string | null; step_id: string | null; code: string | null; status?: string | null; detail: string; uncertain: boolean }>;
   accounting: { recorded_model_calls: number; model_retries: number; tool_retries: number;
     known_prompt_tokens: number; known_completion_tokens: number; tokens_complete: boolean;
     calls_without_complete_usage: number; calls_without_latency: number; retry_attempts_without_usage: number;
