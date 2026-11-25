@@ -34,6 +34,9 @@
 .metrics-dashboard summary { cursor: pointer; font-size: 15px; font-weight: 600; padding: 3px 0; }
 .metrics-dashboard details[open] > summary { margin-bottom: 16px; }
 .metrics-table-wrap { overflow: auto; max-width: 100%; }
+.metrics-records { margin-top: 14px; }
+.metrics-records > summary { font-size: 13px; color: #52665b; }
+.metrics-records .metrics-table-wrap { max-height: 360px; }
 .metrics-dashboard table { width: 100%; border-collapse: collapse; text-align: left; font-size: 13px; font-variant-numeric: tabular-nums; }
 .metrics-dashboard th { color: #52665b; background: #f2f5f2; font-weight: 600; }
 .metrics-dashboard th, .metrics-dashboard td { padding: 12px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }

@@ -13,6 +13,26 @@ function StateBadge({ status }: { status: string }) {
   return <span className={`metrics-state metrics-state-${status}`}>{statusText(status)}</span>;
 }
 
+function groupRows<T,>(rows: T[], identity: (row: T) => unknown[]) {
+  const groups = new Map<string, T[]>();
+  for (const row of rows) {
+    const key = JSON.stringify(identity(row));
+    const group = groups.get(key);
+    if (group) group.push(row);
+    else groups.set(key, [row]);
+  }
+  return Array.from(groups, ([key, items]) => ({ key, items }));
+}
+
+function SumMetric({ values, duration = false }: { values: Array<number | null>; duration?: boolean }) {
+  const known = values.filter((value): value is number => value != null);
+  const missing = values.length - known.length;
+  const total = known.length ? known.reduce((sum, value) => sum + value, 0) : null;
+  return <>{duration ? durationText(total) : numberText(total)}
+    {missing > 0 && known.length > 0 && <small>另 {missing} 次未记录</small>}
+  </>;
+}
+
 function ExecutionDetails({ ledger }: { ledger: ExecutionLedger }) {
   const a = ledger.accounting;
   const knownPrompt = ledger.calls.some((call) => call.prompt_tokens != null);
@@ -20,6 +40,8 @@ function ExecutionDetails({ ledger }: { ledger: ExecutionLedger }) {
   const knownTime = ledger.calls.some((call) => call.latency_ms != null);
   const noCalls = ledger.calls.length === 0;
   const localOnly = noCalls && !a.model_retries && terminalRun(ledger.status) && ledger.execution_path?.mode === "local_rule";
+  const modelGroups = groupRows(ledger.calls, (call) => [call.provider, call.model, call.operation, call.status, call.error_type]);
+  const toolGroups = groupRows(ledger.tools, (tool) => [tool.tool, tool.status]);
   return <>
     <dl className="metrics-strip" aria-label="本轮执行指标">
       <div><dt>模型调用</dt><dd>{numberText(a.recorded_model_calls)}</dd><small>{localOnly ? "本地规则处理，未调用模型" : `已记录调用；另有 ${a.model_retries} 次传输重试`}</small></div>
@@ -44,10 +66,26 @@ function ExecutionDetails({ ledger }: { ledger: ExecutionLedger }) {
       <p className="metrics-help">工具调用成功或进入队列不等于简历已送达；投递结果请结合申请看板核对。</p>
     </section>
     <details className="metrics-section" open><summary>模型调用明细（{ledger.calls.length}）</summary>
-      {ledger.calls.length ? <div className="metrics-table-wrap"><table><thead><tr><th>模型 / 操作</th><th>状态</th><th>输入 token</th><th>输出 token</th><th>耗时</th></tr></thead><tbody>{ledger.calls.map((call) => <tr key={call.call_id}><td><strong>{call.model || "未记录模型"}</strong><small>{call.provider || ""} {call.operation || ""}</small></td><td><StateBadge status={call.status} />{call.error_type && <small>{call.error_type}</small>}</td><td>{numberText(call.prompt_tokens)}</td><td>{numberText(call.completion_tokens)}</td><td>{durationText(call.latency_ms)}</td></tr>)}</tbody></table></div> : <p className="metrics-empty-inline">{localOnly ? "本轮通过本地规则读取记录，没有模型调用。" : "本轮没有记录模型调用，可能由规则处理或缺少历史观测数据。"}</p>}
+      {ledger.calls.length ? <>
+        <div className="metrics-table-wrap" aria-label="模型调用汇总"><table><thead><tr><th>模型 / 操作</th><th>状态</th><th>次数</th><th>输入 token 合计</th><th>输出 token 合计</th><th>累计耗时</th></tr></thead><tbody>{modelGroups.map(({ key, items }) => {
+          const call = items[0];
+          return <tr key={key}><td><strong>{call.model || "未记录模型"}</strong><small>{call.provider || ""} {call.operation || ""}</small></td><td><StateBadge status={call.status} />{call.error_type && <small>{call.error_type}</small>}</td><td>{numberText(items.length)}</td><td><SumMetric values={items.map((item) => item.prompt_tokens)} /></td><td><SumMetric values={items.map((item) => item.completion_tokens)} /></td><td><SumMetric values={items.map((item) => item.latency_ms)} duration /></td></tr>;
+        })}</tbody></table></div>
+        <details className="metrics-records"><summary>展开逐次模型记录（{ledger.calls.length}）</summary>
+          <div className="metrics-table-wrap" tabIndex={0} aria-label="逐次模型调用记录"><table><thead><tr><th>模型 / 操作</th><th>状态</th><th>输入 token</th><th>输出 token</th><th>耗时</th></tr></thead><tbody>{ledger.calls.map((call, index) => <tr key={`${call.call_id}-${index}`}><td><strong>{call.model || "未记录模型"}</strong><small>{call.provider || ""} {call.operation || ""}</small></td><td><StateBadge status={call.status} />{call.error_type && <small>{call.error_type}</small>}</td><td>{numberText(call.prompt_tokens)}</td><td>{numberText(call.completion_tokens)}</td><td>{durationText(call.latency_ms)}</td></tr>)}</tbody></table></div>
+        </details>
+      </> : <p className="metrics-empty-inline">{localOnly ? "本轮通过本地规则读取记录，没有模型调用。" : "本轮没有记录模型调用，可能由规则处理或缺少历史观测数据。"}</p>}
     </details>
     <details className="metrics-section"><summary>工具调用明细（{ledger.tools.length}）</summary>
-      {ledger.tools.length ? <div className="metrics-table-wrap"><table><thead><tr><th>工具</th><th>状态</th><th>尝试次数</th><th>耗时</th></tr></thead><tbody>{ledger.tools.map((tool, index) => <tr key={index}><td>{tool.tool}</td><td><StateBadge status={tool.status} /></td><td>{numberText(tool.attempts)}</td><td>{durationText(tool.duration_ms)}</td></tr>)}</tbody></table></div> : <p className="metrics-empty-inline">本轮没有记录工具调用。</p>}
+      {ledger.tools.length ? <>
+        <div className="metrics-table-wrap" aria-label="工具调用汇总"><table><thead><tr><th>工具</th><th>状态</th><th>调用次数</th><th>尝试次数合计</th><th>累计耗时</th></tr></thead><tbody>{toolGroups.map(({ key, items }) => {
+          const tool = items[0];
+          return <tr key={key}><td>{tool.tool}</td><td><StateBadge status={tool.status} /></td><td>{numberText(items.length)}</td><td><SumMetric values={items.map((item) => item.attempts)} /></td><td><SumMetric values={items.map((item) => item.duration_ms)} duration /></td></tr>;
+        })}</tbody></table></div>
+        <details className="metrics-records"><summary>展开逐次工具记录（{ledger.tools.length}）</summary>
+          <div className="metrics-table-wrap" tabIndex={0} aria-label="逐次工具调用记录"><table><thead><tr><th>工具</th><th>状态</th><th>尝试次数</th><th>耗时</th></tr></thead><tbody>{ledger.tools.map((tool, index) => <tr key={index}><td>{tool.tool}</td><td><StateBadge status={tool.status} /></td><td>{numberText(tool.attempts)}</td><td>{durationText(tool.duration_ms)}</td></tr>)}</tbody></table></div>
+        </details>
+      </> : <p className="metrics-empty-inline">本轮没有记录工具调用。</p>}
     </details>
   </>;
 }
