@@ -249,8 +249,8 @@
 | [frontend/app/api/agent/stats/route.ts:1](../frontend/app/api/agent/stats/route.ts#L1) | 16 |
 | [frontend/app/globals.css:1](../frontend/app/globals.css#L1) | 798 |
 | [frontend/app/layout.tsx:1](../frontend/app/layout.tsx#L1) | 17 |
-| [frontend/app/page.tsx:1](../frontend/app/page.tsx#L1) | 2184 |
-| [frontend/app/workspace.css:1](../frontend/app/workspace.css#L1) | 425 |
+| [frontend/app/page.tsx:1](../frontend/app/page.tsx#L1) | 2188 |
+| [frontend/app/workspace.css:1](../frontend/app/workspace.css#L1) | 427 |
 | [frontend/components/application-export.module.css:1](../frontend/components/application-export.module.css#L1) | 7 |
 | [frontend/components/application-export.tsx:1](../frontend/components/application-export.tsx#L1) | 69 |
 | [frontend/components/evaluation-document.tsx:1](../frontend/components/evaluation-document.tsx#L1) | 35 |
@@ -271,7 +271,7 @@
 | [frontend/lib/job-display.ts:1](../frontend/lib/job-display.ts#L1) | 8 |
 | [frontend/lib/search-condition-display.ts:1](../frontend/lib/search-condition-display.ts#L1) | 38 |
 | [frontend/lib/types.ts:1](../frontend/lib/types.ts#L1) | 403 |
-| [frontend/lib/use-agent-runtime.ts:1](../frontend/lib/use-agent-runtime.ts#L1) | 297 |
+| [frontend/lib/use-agent-runtime.ts:1](../frontend/lib/use-agent-runtime.ts#L1) | 300 |
 | [frontend/next-env.d.ts:1](../frontend/next-env.d.ts#L1) | 6 |
 | [frontend/next.config.ts:1](../frontend/next.config.ts#L1) | 11 |
 

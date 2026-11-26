@@ -45,7 +45,7 @@ const viewDescriptions = {
   profile: "让你的简历和真实经历，成为 Agent 理解你的起点。",
   insights: "从已核对的职位中，了解薪资与岗位要求。",
   metrics: "查看每轮执行的状态与开销，追溯异常和历史评测。",
-  settings: "管理模型配置与模拟站的工作方式。",
+  settings: "管理模型连接与本机 API 配置。",
 };
 
 function now() {
@@ -610,7 +610,7 @@ export default function Home() {
   }, [activeView]);
 
   useEffect(() => {
-    if (activeView !== "settings" && activeView !== "board") return;
+    if (activeView !== "overview" && activeView !== "board") return;
     void fetch("/api/agent/mock-workflow", { cache: "no-store" })
       .then(async (response) => {
         if (response.ok) setWorkflowSettings(await response.json());
@@ -1735,6 +1735,24 @@ export default function Home() {
               <article><span className="stat-icon violet">✦</span><div><small>面试进展</small><strong>{automationStats.interview}</strong><em>{automationStats.waiting} 个等待回复</em></div></article>
             </section>}
 
+            {activeView === "overview" && <section className="dashboard-schedule" aria-label="定时任务设置">
+              <form className="panel settings-form workflow-settings" aria-busy={workflowBusy || !workflowSettings} onSubmit={saveWorkflowSettings}>
+                <div className="field full"><span className="eyebrow">仅限本地模拟站</span><h2>定时任务设置</h2><p>默认关闭。仅操作本地模拟招聘网站；验证码和 MFA 仍由你人工完成。自动投递需单独开启，并为每个岗位生成一次性授权；仅处理开启后收到的回复。定时任务要求 Agent 后端持续运行。</p></div>
+                <div className="field full"><label className="workflow-toggle"><input type="checkbox" checked={workflowSettings?.monitor_enabled ?? false} onChange={(event) => setWorkflowSettings((current) => current ? { ...current, monitor_enabled: event.target.checked, auto_submit: event.target.checked && current.auto_submit, daily_enabled: event.target.checked && current.daily_enabled } : current)} />监测手动沟通和 HR 回复，自动同步申请看板</label></div>
+                <div className="field full"><label className="workflow-toggle"><input type="checkbox" checked={workflowSettings?.auto_submit ?? false} onChange={(event) => setWorkflowSettings((current) => current ? { ...current, monitor_enabled: event.target.checked || current.monitor_enabled, auto_submit: event.target.checked } : current)} />HR 明确回复后，自动在模拟站发送简历</label></div>
+                <div className="field full"><label className="workflow-toggle"><input type="checkbox" checked={workflowSettings?.daily_enabled ?? false} onChange={(event) => setWorkflowSettings((current) => current ? { ...current, monitor_enabled: event.target.checked || current.monitor_enabled, daily_enabled: event.target.checked } : current)} />每天定时搜索并联系高匹配岗位</label></div>
+                <div className="field"><label htmlFor="workflow-time">每天执行时间（北京时间）</label><input id="workflow-time" type="time" value={workflowSettings?.daily_time ?? "09:00"} onChange={(event) => setWorkflowSettings((current) => current ? { ...current, daily_time: event.target.value } : current)} /></div>
+                <div className="field"><label htmlFor="workflow-score">自动沟通最低匹配分</label><input id="workflow-score" type="number" min="0" max="100" value={workflowSettings?.min_score ?? 75} onChange={(event) => setWorkflowSettings((current) => current ? { ...current, min_score: Number(event.target.value) } : current)} /></div>
+                <div className="field"><label htmlFor="workflow-search-jobs">每轮搜索岗位数</label><input id="workflow-search-jobs" type="number" min="1" max="200" step="1" required value={workflowSettings?.max_search_jobs ?? 30} onChange={(event) => setWorkflowSettings((current) => current ? { ...current, max_search_jobs: Number(event.target.value) } : current)} /><small>可设置 1–200 个，限制本轮分析的候选岗位数；实际结果取决于站点和筛选条件。数量越多，耗时与模型用量通常越高。</small></div>
+                <div className="field"><label htmlFor="workflow-contacts">每轮最多自动沟通岗位</label><input id="workflow-contacts" type="number" min="1" max="5" value={workflowSettings?.max_contacts ?? 3} onChange={(event) => setWorkflowSettings((current) => current ? { ...current, max_contacts: Number(event.target.value) } : current)} /><small>从本轮搜索结果中，按最低匹配分选择至多 {workflowSettings?.max_contacts ?? 3} 个发起沟通；收到 HR 回复且授权有效后才能投递。两个数量独立设置，申请看板显示累计记录。</small></div>
+                <div className="field full"><p>停机错过多天时合并补跑最近一轮；重启后核对检查点与发送回执再接续。</p><small>下一次执行：{workflowSettings?.daily_next_due_at ? new Date(workflowSettings.daily_next_due_at).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false }) + "（北京时间）" : "未启用"}</small></div>
+                <div className="field full"><p>立即测试会按已保存设置实际搜索和沟通；修改后请先保存，已开始的轮次继续使用启动时的设置。开启自动投递时，HR 回复后会发送主简历。测试单独记录，不占用当天定时任务。</p><div className="settings-actions"><button className="button secondary" type="button" disabled={workflowBusy || !workflowSettings?.monitor_enabled} onClick={testDailyWorkflow}>{workflowBusy ? "处理中…" : "立即测试每日任务"}</button>{workflowSettings?.daily_run_id && <button className="button secondary" type="button" onClick={() => { runtime.setSessionId("default"); openMetrics(workflowSettings.daily_run_id!); }}>查看最近一轮指标</button>}</div></div>
+                <div className="field"><small>当前绑定的模拟站求职者账号：{workflowSettings?.applicant_id ?? "未绑定；先登录模拟站并完成一次搜索"}。上次执行：{workflowSettings?.last_run_date ?? "暂无"}。</small>{workflowSettings?.last_error && <small className="workflow-error">最近错误：{workflowSettings.last_error}</small>}</div>
+                <div className="settings-actions full"><button className="button primary" disabled={workflowBusy || !workflowSettings} type="submit">保存每日任务设置</button><button className="button secondary" disabled={workflowBusy || !workflowSettings?.applicant_id} type="button" onClick={() => void syncMockWorkflow()}>立即同步一次</button></div>
+                {workflowNotice && <p className="workflow-feedback full">{workflowNotice}</p>}
+              </form>
+            </section>}
+
             {(activeView === "overview" || activeView === "chat") && <section className={activeView === "chat" ? "main-grid chat-only" : "main-grid insight-only"}>
               {activeView === "chat" && <div className={`chat-panel chat-page${chatDetailsOpen ? " details-open" : ""}`}>
                 <div className="chat-page-header">
@@ -2096,21 +2114,7 @@ export default function Home() {
               {llmProvider === "deepseek" && <div className="field full"><label htmlFor="llm-api-key">DeepSeek API Key</label><input id="llm-api-key" type="password" autoComplete="new-password" value={llmApiKey} onChange={(event) => setLlmApiKey(event.target.value)} placeholder={llmConfigured ? "已保存；留空则保持原 Key" : "输入 DeepSeek API Key"} /><small>Key 不会写入 localStorage、日志、memory.md 或技能文件。</small></div>}
               <div className="settings-actions full"><button type="submit" className="button primary" disabled={llmBusy}>{llmBusy ? "处理中…" : "保存设置"}</button><button type="button" className="button secondary" disabled={llmBusy || !llmConfigured} onClick={testLlmConnection}>测试连接</button></div>
             </form>
-            <form className="panel settings-form workflow-settings" onSubmit={saveWorkflowSettings}>
-              <div className="field full"><span className="eyebrow">仅限本地模拟站</span><h2>模拟站会话与每日任务</h2><p>默认关闭。仅操作本地模拟招聘网站；验证码和 MFA 仍由你人工完成。自动投递需单独开启，并为每个岗位生成一次性授权；仅处理开启后收到的回复。定时任务要求 Agent 后端持续运行。</p></div>
-              <div className="field full"><label className="workflow-toggle"><input type="checkbox" checked={workflowSettings?.monitor_enabled ?? false} onChange={(event) => setWorkflowSettings((current) => current ? { ...current, monitor_enabled: event.target.checked, auto_submit: event.target.checked && current.auto_submit, daily_enabled: event.target.checked && current.daily_enabled } : current)} />监测手动沟通和 HR 回复，自动同步申请看板</label></div>
-              <div className="field full"><label className="workflow-toggle"><input type="checkbox" checked={workflowSettings?.auto_submit ?? false} onChange={(event) => setWorkflowSettings((current) => current ? { ...current, monitor_enabled: event.target.checked || current.monitor_enabled, auto_submit: event.target.checked } : current)} />HR 明确回复后，自动在模拟站发送简历</label></div>
-              <div className="field full"><label className="workflow-toggle"><input type="checkbox" checked={workflowSettings?.daily_enabled ?? false} onChange={(event) => setWorkflowSettings((current) => current ? { ...current, monitor_enabled: event.target.checked || current.monitor_enabled, daily_enabled: event.target.checked } : current)} />每天定时搜索并联系高匹配岗位</label></div>
-              <div className="field"><label htmlFor="workflow-time">每天执行时间（北京时间）</label><input id="workflow-time" type="time" value={workflowSettings?.daily_time ?? "09:00"} onChange={(event) => setWorkflowSettings((current) => current ? { ...current, daily_time: event.target.value } : current)} /></div>
-              <div className="field"><label htmlFor="workflow-score">自动沟通最低匹配分</label><input id="workflow-score" type="number" min="0" max="100" value={workflowSettings?.min_score ?? 75} onChange={(event) => setWorkflowSettings((current) => current ? { ...current, min_score: Number(event.target.value) } : current)} /></div>
-              <div className="field"><label htmlFor="workflow-search-jobs">每轮搜索岗位数</label><input id="workflow-search-jobs" type="number" min="1" max="200" step="1" required value={workflowSettings?.max_search_jobs ?? 30} onChange={(event) => setWorkflowSettings((current) => current ? { ...current, max_search_jobs: Number(event.target.value) } : current)} /><small>可设置 1–200 个，限制本轮分析的候选岗位数；实际结果取决于站点和筛选条件。数量越多，耗时与模型用量通常越高。</small></div>
-              <div className="field"><label htmlFor="workflow-contacts">每轮最多自动沟通岗位</label><input id="workflow-contacts" type="number" min="1" max="5" value={workflowSettings?.max_contacts ?? 3} onChange={(event) => setWorkflowSettings((current) => current ? { ...current, max_contacts: Number(event.target.value) } : current)} /><small>从本轮搜索结果中，按最低匹配分选择至多 {workflowSettings?.max_contacts ?? 3} 个发起沟通；收到 HR 回复且授权有效后才能投递。两个数量独立设置，申请看板显示累计记录。</small></div>
-              <div className="field full"><p>停机错过多天时合并补跑最近一轮；重启后核对检查点与发送回执再接续。</p><small>下一次执行：{workflowSettings?.daily_next_due_at ? new Date(workflowSettings.daily_next_due_at).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false }) + "（北京时间）" : "未启用"}</small></div>
-              <div className="field full"><p>立即测试会按已保存设置实际搜索和沟通；修改后请先保存，已开始的轮次继续使用启动时的设置。开启自动投递时，HR 回复后会发送主简历。测试单独记录，不占用当天定时任务。</p><div className="settings-actions"><button className="button secondary" type="button" disabled={workflowBusy || !workflowSettings?.monitor_enabled} onClick={testDailyWorkflow}>{workflowBusy ? "处理中…" : "立即测试每日任务"}</button>{workflowSettings?.daily_run_id && <button className="button secondary" type="button" onClick={() => { runtime.setSessionId("default"); openMetrics(workflowSettings.daily_run_id!); }}>查看最近一轮指标</button>}</div></div>
-              <div className="field"><small>当前绑定的模拟站求职者账号：{workflowSettings?.applicant_id ?? "未绑定；先登录模拟站并完成一次搜索"}。上次执行：{workflowSettings?.last_run_date ?? "暂无"}。</small>{workflowSettings?.last_error && <small className="workflow-error">最近错误：{workflowSettings.last_error}</small>}</div>
-              <div className="settings-actions full"><button className="button primary" disabled={workflowBusy || !workflowSettings} type="submit">保存每日任务设置</button><button className="button secondary" disabled={workflowBusy || !workflowSettings?.applicant_id} type="button" onClick={() => void syncMockWorkflow()}>立即同步一次</button></div>
-              {workflowNotice && <p className="workflow-feedback full">{workflowNotice}</p>}
-            </form>
+
             <div className="panel security-note"><span>🔒</span><div><h3>本地安全边界</h3><p>前端只调用 Next.js 同源接口；真正的 DeepSeek 请求由 FastAPI 后端发出。后端仅允许官方固定地址和两个模型 ID。</p></div></div>
           </section>
         )}

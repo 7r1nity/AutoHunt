@@ -240,6 +240,8 @@
   .board-empty strong { color: #5e7391; font-size: 11px; font-weight: 500; }
   .board-empty p { margin: 0; color: #6a7a91; font-size: 10px; line-height: 1.8; }
 
+  .dashboard-schedule { margin-bottom: 24px; }
+
   .detail-layout { gap: 22px; }
   .profile-hero, .report-hero, .plan-header, .settings-hero { padding: 26px; }
   .profile-hero h2, .report-hero h2, .plan-header h2, .settings-hero h2 { font-size: 24px; letter-spacing: -.025em; }

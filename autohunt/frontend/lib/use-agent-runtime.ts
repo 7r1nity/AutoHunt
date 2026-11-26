@@ -291,7 +291,10 @@ export function useAgentRuntime() {
     if (currentSession.current === session) { setDialogue(value); setSearchState(value.conditions); }
   }
 
-  // Queued deliveries can outlive their completed chat run; stop must remain available.
-  const canInterrupt = true;
+  // Background search/delivery runs can outlive the chat response, including
+  // waiting for HR or verification. Completed history alone is not active work.
+  const canInterrupt = stopping || Boolean(busyRun) || runs.some(
+    (run) => run.session_id === sessionId && !terminalRun(run.status),
+  );
   return { sessionId, setSessionId, sessions, searchState, resetSearchState, updateSearchSource, dialogue, resetContext, runs, progress, busyRun, stopping, canInterrupt, interrupt, notifications, currentSession, newSession, execute, control, chooseTarget, observe };
 }
