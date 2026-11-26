@@ -203,7 +203,7 @@ class MockWorkflowUpdate(BaseModel):
     daily_enabled: bool = False
     daily_time: str = Field(default="09:00", pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")
     min_score: int = Field(default=75, ge=0, le=100)
-    max_contacts: int = Field(default=3, ge=1, le=5)
+    max_contacts: int = Field(default=3, ge=1, le=200, strict=True)
     max_search_jobs: int = Field(default=30, ge=1, le=200, strict=True)
 
 
@@ -222,7 +222,7 @@ class BrowserSearchRequest(BaseModel):
     locations: list[str] | None = Field(default=None, max_length=5)
     dry_run: bool = False
     dry_run_min_score: int = Field(default=75, ge=0, le=100)
-    dry_run_max_contacts: int = Field(default=3, ge=1, le=5)
+    dry_run_max_contacts: int = Field(default=3, ge=1, le=200, strict=True)
     dry_run_simulate_reply: bool = True
 
     @field_validator("filters")

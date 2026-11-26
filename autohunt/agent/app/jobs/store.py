@@ -295,6 +295,8 @@ class JobStore:
     def update_mock_workflow_settings(self, *, monitor_enabled: bool, auto_submit: bool,
                                       daily_enabled: bool, daily_time: str, min_score: int,
                                       max_contacts: int, max_search_jobs: int | None = None) -> dict[str, Any]:
+        if type(max_contacts) is not int or not 1 <= max_contacts <= 200:
+            raise ValueError("每轮自动沟通岗位数必须是 1–200 的整数")
         if max_search_jobs is not None and (type(max_search_jobs) is not int or not 1 <= max_search_jobs <= 200):
             raise ValueError("每轮搜索岗位数必须是 1–200 的整数")
         with self.lock, self._connect() as db:

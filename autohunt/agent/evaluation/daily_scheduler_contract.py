@@ -99,6 +99,41 @@ class Scheduler(unittest.IsolatedAsyncioTestCase):
             self.jobs.update_mock_workflow_settings(**MockWorkflowUpdate(**settings, max_search_jobs=value).model_dump())
             self.assertEqual(self.daily.snapshot()["request"]["max_jobs"], value)
 
+    def test_contact_limit_supports_twenty_and_two_hundred_without_changing_search_or_switches(self):
+        from app.core.models import MockWorkflowUpdate
+        from app.jobs.store import JobStore
+        self.assertEqual(MockWorkflowUpdate().max_contacts, 3)
+        for count in (20, 200):
+            with self.subTest(count=count):
+                settings = MockWorkflowUpdate(max_contacts=count, max_search_jobs=40)
+                self.jobs.update_mock_workflow_settings(**settings.model_dump())
+                stored = JobStore(self.root / "jobs.db").mock_workflow_settings()
+                self.assertEqual(stored["max_contacts"], count)
+                self.assertEqual(stored["max_search_jobs"], 40)
+                self.assertFalse(stored["monitor_enabled"])
+                self.assertFalse(stored["auto_submit"])
+                self.assertFalse(stored["daily_enabled"])
+                self.assertEqual(self.daily.snapshot()["max_contacts"], count)
+
+    def test_contact_limits_reject_invalid_values_without_overwriting_saved_settings(self):
+        from app.core.models import BrowserSearchRequest, MockWorkflowUpdate
+        from pydantic import ValidationError
+        valid = MockWorkflowUpdate(max_contacts=20).model_dump()
+        self.jobs.update_mock_workflow_settings(**valid)
+        before = self.jobs.mock_workflow_settings()
+        for value in (0, -1, 201, 1.5, True, "20", None):
+            with self.subTest(value=value):
+                with self.assertRaises(ValidationError):
+                    MockWorkflowUpdate(max_contacts=value)
+                with self.assertRaises(ValidationError):
+                    BrowserSearchRequest(query="Synthetic AI", dry_run=True, dry_run_max_contacts=value)
+                with self.assertRaises(ValueError):
+                    self.jobs.update_mock_workflow_settings(**{**valid, "max_contacts": value})
+                self.assertEqual(self.jobs.mock_workflow_settings(), before)
+        for count in (20, 200):
+            self.assertEqual(BrowserSearchRequest(query="Synthetic AI", dry_run=True,
+                dry_run_max_contacts=count).dry_run_max_contacts, count)
+
     async def test_all_daily_triggers_pass_saved_search_count_to_request(self):
         self.jobs.update_mock_workflow_settings(monitor_enabled=True, auto_submit=False,
             daily_enabled=True, daily_time="09:00", min_score=75, max_contacts=5, max_search_jobs=7)
@@ -170,6 +205,38 @@ class Scheduler(unittest.IsolatedAsyncioTestCase):
         self.assertIn("本轮核对 30 个候选，其中 6 个达到 75 分", message)
         self.assertIn("自动沟通上限为 5 个，本轮选中 5 个", message)
         self.assertEqual(self.contacts, 0)
+
+    async def _assert_expanded_contact_selection(self, contact_limit, eligible, expected):
+        import copy
+        ident = self.prepared()
+        cp = self.runs.get(ident)["checkpoint"]
+        cp["snapshot"]["max_contacts"] = contact_limit
+        cp["snapshot"]["request"]["max_jobs"] = 40
+        cp.pop("selected")
+        cp["jobs"] = {}
+        self.daily.save(ident, cp)
+        report = self.jobs.search_report("search")
+        base = report["jobs"][0]
+        report.update(covered_jobs=40, qualified_jobs=40,
+            jobs=[{**copy.deepcopy(base), "id": i, "score": 90 if i <= eligible else 70}
+                  for i in range(1, 41)])
+        deliver = AsyncMock()
+        with patch.object(self.jobs, "search_report", return_value=report), \
+                patch("app.workflow.daily_delivery.deliver", deliver):
+            run = await self.execute(ident)
+        self.assertEqual(run["checkpoint"]["selected"], list(range(1, expected + 1)))
+        self.assertEqual(len(deliver.call_args.args[2]["selected"]), expected)
+        self.assertEqual(run["checkpoint"]["snapshot"]["request"]["max_jobs"], 40)
+        self.assertEqual(self.contacts, 0)
+
+    async def test_twenty_contacts_are_selected_without_legacy_five_truncation(self):
+        await self._assert_expanded_contact_selection(20, 25, 20)
+
+    async def test_fewer_eligible_jobs_do_not_get_padded_to_contact_limit(self):
+        await self._assert_expanded_contact_selection(20, 12, 12)
+
+    async def test_contacts_larger_than_candidate_pool_do_not_expand_search(self):
+        await self._assert_expanded_contact_selection(200, 25, 25)
 
     async def test_terminal_recovery_backfills_summary_once_without_reexecution(self):
         ident = self.prepared()
