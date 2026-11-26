@@ -61,7 +61,7 @@ def edited_plan(plan: dict, edit: RevisionDraft, registry, *, stamp: str, sessio
             continue
         old = steps[old_id]
         if old["status"] != "completed" or old["tool"] not in {
-                "job_results_read", "job_stats_read", "job_results_refilter", "learning_plan_generate", "interview_preparation_generate"}:
+                "job_results_read", "job_stats_read", "job_results_refilter", "interview_preparation_generate"}:
             raise ValueError("只能刷新已完成的证据或分析；发送与结果不确定的动作需要核验")
         new_id = f"r{plan.get('revision', 0) + 1}_{old_id}"[:38]
         while new_id in steps:
@@ -127,8 +127,6 @@ def edited_plan(plan: dict, edit: RevisionDraft, registry, *, stamp: str, sessio
         if arguments.get("filters") is not None:
             from ..core.job_filters import validate_filter
             arguments["filters"] = validate_filter(arguments["filters"]).model_dump(mode="json")
-        if step["tool"] == "learning_plan_generate" and arguments.get("min_score", 0) > arguments.get("max_score", 100):
-            raise PlanValidationError("invalid_score_range", "分析分数下界高于上界，请确认范围，未自动交换条件", category="clarify")
         if active_search:
             if update.depends_on is not None:
                 raise ValueError("正在执行的搜索不能改写已生效依赖；请追加后续步骤")

@@ -15,7 +15,7 @@ import unittest
 from cryptography.fernet import Fernet
 
 from app.core.models import ResumeDocumentView, ResumeEntryView
-from app.growth.interview import InterviewPreparationService
+from app.interviews.service import InterviewPreparationService
 from app.jobs.store import JobStore
 from app.llm.base import LLMResult
 

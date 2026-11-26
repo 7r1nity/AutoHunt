@@ -79,10 +79,10 @@ def _approval_detail(tool: str, arguments: dict) -> str:
 
 class AgentRuntime:
     """Durable runs, per-session ordering, bounded concurrency and one deadline."""
-    def __init__(self, store: RunStore, agent, jobs, browser, plans, resume_workspace,
+    def __init__(self, store: RunStore, agent, jobs, browser, resume_workspace,
                  *, queue_timeout=120, chat_timeout=55, plan_timeout=105):
         self.store, self.agent, self.jobs = store, agent, jobs
-        self.browser, self.plans, self.resume_workspace = browser, plans, resume_workspace
+        self.browser, self.resume_workspace = browser, resume_workspace
         self.tasks: dict[str, asyncio.Task] = {}
         self.cancellations: dict[str, asyncio.Task] = {}
         self.sessions: dict[str, asyncio.Lock] = {}
@@ -100,6 +100,15 @@ class AgentRuntime:
         self.recover_search_summaries()
         # Re-enqueue only requests which never began. Side effects are not replayed.
         for run in reversed(self.store.list(active=True, limit=None)):
+            if run["kind"] == "learning_plan":
+                self.finish(run["id"], "cancelled", "该功能已移除；历史记录保留，不再执行")
+                continue
+            from .retired_features import retire_growth_steps
+            checkpoint, retired = retire_growth_steps(run.get("checkpoint"))
+            if retired:
+                self.store.update(run["id"], checkpoint=checkpoint)
+                self.store.event(run["id"], "feature_retired", {"step_ids": retired, "detail": "已取消移除功能的未完成步骤；其他执行记录保留"})
+                run = self.store.get(run["id"])
             if run["kind"] == "daily":
                 continue  # Owned and recovered by DailyWorkflow, using this ledger.
             if run["cancel_requested"]:
@@ -141,7 +150,7 @@ class AgentRuntime:
         if not scope and any(not task.done() for key, task in self.stop_jobs.items()
                              if key in {"*", session_id}):
             raise ValueError("当前正在停止任务，请等待停止结果后再发起新任务")
-        if kind not in {"chat", "learning_plan", "job_analysis"}:
+        if kind not in {"chat", "job_analysis"}:
             raise ValueError("不支持的任务类型")
         run, created = self.store.create(session_id, request_key, kind, payload, parent_id, control=bool(scope))
         if created:
@@ -278,7 +287,7 @@ class AgentRuntime:
             # A model cannot authorize its own speculative external call.
             step_id = "action"
             if not plan:
-                from ..growth.requests import resume_stamp
+                from ..memory.resume_identity import resume_stamp
                 stamp = resume_stamp(self.resume_workspace.read_document(), self.agent.candidate_state)
                 plan = {"id": run_id, "session_id": run["session_id"], "original": context.user_message if context else "",
                     "answers": [], "questions": [], "reply": "", "turn": 0, "expires_at": time.time() + 1800,
@@ -372,7 +381,7 @@ class AgentRuntime:
             if (run["cancel_requested"] or run["status"] in TERMINAL or plan.get("status") == "cancelled" or step.get("withdrawn") or step["status"] != "waiting_input"
                     or plan.get("revision", 0) != decision.expected_revision):
                 raise ValueError("任务已停止、修订或不再等待此选择，请刷新")
-            from ..growth.requests import resume_stamp
+            from ..memory.resume_identity import resume_stamp
             if plan["resume_stamp"] != resume_stamp(self.resume_workspace.read_document(), self.agent.candidate_state):
                 raise ValueError("简历已变化，请核对新的目标范围")
             options = {item["id"]: item for item in choice["options"]}
@@ -421,7 +430,7 @@ class AgentRuntime:
             return self.store.get(run_id)
 
     def _decide_approval(self, run_id: str, approval_id: str, session_id: str, approve: bool) -> dict:
-        from ..growth.requests import resume_stamp
+        from ..memory.resume_identity import resume_stamp
         run = self.store.get(run_id)
         record = self.store.approval(approval_id)
         if record["run_id"] != run_id or record["session_id"] != session_id or run["session_id"] != session_id:
@@ -490,6 +499,9 @@ class AgentRuntime:
 
     async def execute(self, run_id: str, *, watch_only=False):
         run = self.store.get(run_id)
+        if run["kind"] == "learning_plan":
+            self.finish(run_id, "cancelled", "该功能已移除；历史记录保留，不再执行")
+            return
         if watch_only:
             try:
                 await self.watch(run_id)
@@ -531,27 +543,19 @@ class AgentRuntime:
                     token = current_run.set(context)
                     started = time.monotonic()
                     try:
-                        from ..growth.plans import is_explicit_plan_request
-                        from ..core.action_language import plan_scope_answer
                         from ..workflow.planning import PLANNING_TIMEOUT, shortcut_safe
                         from ..workflow.requests import is_continuation
                         resuming_request = bool(is_continuation(run["payload"].get("message", "")) and
                             (context.dialogue or {}).get("task_request"))
-                        plan_followup = bool((context.dialogue or {}).get("learning_request")
-                            and plan_scope_answer(run["payload"].get("message", "")))
-                        budget = self.plan_timeout if run["kind"] == "learning_plan" else (
-                            self.plan_timeout + PLANNING_TIMEOUT if is_explicit_plan_request(run["payload"].get("message", ""))
-                            or plan_followup or resuming_request or ((context.dialogue or {}).get("instruction_request") or {}).get("status") == "clarifying"
+                        budget = (
+                            self.plan_timeout + PLANNING_TIMEOUT if resuming_request or ((context.dialogue or {}).get("instruction_request") or {}).get("status") == "clarifying"
                             else max(self.chat_timeout, PLANNING_TIMEOUT + 20) if not shortcut_safe(run["payload"].get("message", ""))
                             else self.chat_timeout)
                         if run["kind"] == "chat":
                             from ..workflow.presentation import TIMEOUT as RESPONSE_TIMEOUT
                             budget += RESPONSE_TIMEOUT + 2
                         async with asyncio.timeout(budget):
-                            if run["kind"] == "learning_plan":
-                                self.store.event(run_id, "progress", {"detail": "正在核对 JD 证据并生成计划"})
-                                result = await self.plans.generate(run["payload"].get("focus", "")[:400])
-                            elif run["kind"] == "job_analysis":
+                            if run["kind"] == "job_analysis":
                                 from ..jobs.analysis import analyze_job
                                 from ..core.models import JobAnalysisRequest
                                 result = analyze_job(JobAnalysisRequest.model_validate(run["payload"])).model_dump(mode="json")
@@ -938,7 +942,7 @@ class AgentRuntime:
         workflow = saved.get("workflow")
         if not workflow or saved.get("workflow_finished"):
             return
-        from ..growth.requests import resume_stamp
+        from ..memory.resume_identity import resume_stamp
         lock = self.sessions.setdefault(run["session_id"], asyncio.Lock())
         async with lock:
             current = self.store.dialogue_state(run["session_id"]).get("workflow_request") or {}
@@ -967,7 +971,10 @@ class AgentRuntime:
                     if resume_stamp(self.resume_workspace.read_document(), self.agent.candidate_state) != stamp:
                         lines.append("主简历已变更，剩余动作未执行")
                         break
-                    name = "自动投递" if action["kind"] == "delivery" else "成长计划"
+                    if action["kind"] != "delivery":
+                        self.store.event(run_id, "workflow_step", {"action": action["kind"], "status": "skipped", "code": "feature_removed"})
+                        continue
+                    name = "自动投递"
                     try:
                         self.store.event(run_id, "workflow_step", {"action": action["kind"], "status": "started", "scope": action["scope"]})
                         if action["kind"] == "delivery":
@@ -977,13 +984,6 @@ class AgentRuntime:
                             result = await asyncio.wait_for(coordinator.queue_deliveries(
                                 min_score=action["scope"]["min_score"], session_id=run["session_id"], task_id=browser.id), timeout=15)
                             lines.append(result["message"])
-                        else:
-                            if self.plans is None:
-                                raise ValueError("成长计划执行器未配置")
-                            async with asyncio.timeout(self.plan_timeout):
-                                async with self.slots:
-                                    result = await self.plans.generate(action["instruction"], task_id=browser.id, **action["scope"])
-                            lines.append("劣势分析：" + result["summary"] + f"\n已保存成长计划「{result['title']}」，依据本次 {result['jobs_analyzed']} 份 JD。")
                         self.store.event(run_id, "workflow_step", {"action": action["kind"], "status": "completed"})
                     except (ValueError, RuntimeError, TimeoutError) as exc:
                         lines.append(f"{name}未完成：{str(exc) or '超时'}；不会自动重试或扩大范围。")
@@ -1273,7 +1273,7 @@ class AgentRuntime:
         """Session-locked edits; terminal receipts are retained in child additions."""
         from .context import active_run, dialogue_change
         from ..core.models import ChatResponse, AgentLane
-        from ..growth.requests import resume_stamp
+        from ..memory.resume_identity import resume_stamp
         from ..workflow.revision import RevisionDraft, edited_plan
         from ..workflow.requests import TaskRequest
         session_id = self.store.get(run_id)["session_id"]
@@ -1334,11 +1334,6 @@ class AgentRuntime:
             args = step["arguments"]
             if step.get("staged_arguments") is not None:
                 details.append("新搜索条件已暂存；继续时会安全结束旧只读搜索并按新条件启动，旧请求与已有结果保留")
-            elif step["tool"] == "learning_plan_generate":
-                details.append("不足分析/成长计划范围：" + "、".join(text for text in (
-                    f"匹配分数≤{args['max_score']}" if 'max_score' in args else '',
-                    f"匹配分数≥{args['min_score']}" if 'min_score' in args else '',
-                    f"月薪下限≥{args['salary_min']:,}元" if 'salary_min' in args else '') if text))
             else:
                 from ..core.replies import tool_label
                 details.append(tool_label(step["tool"]) + "的未执行参数已更新")
@@ -1369,7 +1364,7 @@ class AgentRuntime:
         from ..workflow.recovery import recover_plan
         from ..workflow.execution import begin
         from ..workflow.requests import request_selector, TaskRequest
-        from ..growth.requests import resume_stamp
+        from ..memory.resume_identity import resume_stamp
         context = active_run()
         run = self.store.get(run_id)
         # Recovery uses execution records, not the UI's recent-500 history window.

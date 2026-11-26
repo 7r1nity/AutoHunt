@@ -218,7 +218,7 @@ class MockWorkflowCoordinator:
         if session_id in self.stopping_sessions or "*" in self.stopping_sessions:
             raise PreflightRefused("当前正在停止任务，未加入投递队列")
         stop_epoch = (self.stop_epochs.get(session_id, 0), self.stop_epochs.get("*", 0))
-        from ..growth.requests import resume_stamp
+        from ..memory.resume_identity import resume_stamp
         if not 0 <= min_score <= 100:
             raise PreflightRefused("匹配分数必须在 0–100 之间")
         profile = self.candidate.read().profile
@@ -592,7 +592,7 @@ class MockWorkflowCoordinator:
         return {"checked": checked, "submitted": submitted}
 
     async def process_delivery_queue(self) -> None:
-        from ..growth.requests import resume_stamp
+        from ..memory.resume_identity import resume_stamp
         async with self.queue_lock:
             if (self.delivery.worker and not self.delivery.worker.done()) or (self.browser.worker and not self.browser.worker.done()):
                 return

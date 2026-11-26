@@ -30,13 +30,12 @@ INSTRUCTIONS = """你是任务结果回答器，不是规划器，没有工具�
 要求查看的原始职位列表/完整详情/简历等（text必须为空），程序保留真实链接和稳定序号。
 不要自动展示为了分析而读取的通用职位列表；根据用户最终问题选择相关产物。
 presentation_role=background_only 的步骤只用于理解前置证据，不能作为sections的step_id。
-分析差距/成长计划时，以该生成步骤自己的 job_sources、score_scope、salary_scope、
-已验证 gaps 和 summary 为依据；不能混入另一个列表中的岗位、分数、统计或结论。
+分析岗位要求时，只依据当前步骤的岗位原文和已验证筛选范围；不能混入另一个列表中的岗位、分数、统计或结论。
 不同筛选分支分开说明；不能把全部搜索结果数当作分析样本数。
 可在 job_ids 中引用当前步骤 job_sources/jobs 中的真实ID，由程序生成来源链接；
 正文不要自编链接或重排职位序号，数据库ID不等于列表序号。
 不要复述入队/保存/成功/失败等执行回执，程序会单独显示真实状态。
-搜索启动不等于搜索完成，投递入队不等于发送成功，计划保存不等于能力已掌握。
+搜索启动不等于搜索完成，投递入队不等于发送成功。
 保留限制和不确定性。简历未体现不等于候选人不会。不要编造未提供的JD或能力。
 投影标记 truncated 表示只提供部分证据，不能声称完整读取；原始记录仍在运行日志。
 空sections仅用于没有需要解释的证据；有用户要求的分析或查询时应给出相关回答。
@@ -78,24 +77,8 @@ def _render(step):
     return public_reply(tool_reply(step["tool"], step["status"], value))
 
 
-def _scope(result):
-    parts = []
-    score, salary = result.get("score_scope") or {}, result.get("salary_scope") or {}
-    for key, label in (("min_score", "匹配分≥"), ("max_score", "匹配分≤")):
-        if score.get(key) is not None:
-            parts.append(f"{label}{score[key]}")
-    if salary.get("salary_min") is not None:
-        parts.append(f"月薪下限≥{salary['salary_min']:,}元")
-    return "；".join(parts)
 
 
-def _receipt(step):
-    result = _result(step)
-    if step["tool"] == "learning_plan_generate" and step["status"] == "completed":
-        scope = _scope(result)
-        return (f"已保存成长计划《{result.get('title', '成长计划')}》，依据 {result.get('jobs_analyzed', '未记录')} 份 JD。"
-                + (f"\n分析范围：{scope}。" if scope else ""))
-    return _render(step)
 
 
 def _clip(value, depth=0):
@@ -181,8 +164,7 @@ def _fallback(steps, reason="", supporting=()):
         return Presentation("")
     snapshots = [_result(step)["snapshot_id"] for step in selected
                  if step["tool"] in {"job_results_read", "resume_document_read"} and _result(step).get("snapshot_id")]
-    text = "\n\n".join(_render(step) + (f"\n分析范围：{_scope(_result(step))}。"
-        if step["tool"] == "learning_plan_generate" and _scope(_result(step)) else "") for step in selected)
+    text = "\n\n".join(_render(step) for step in selected)
     if reason:
         text += "\n\n回答整理暂不可用，以上为已记录结果；未重跑任何操作。中间查询可在运行记录查看。"
     return Presentation(text, snapshots, "fallback" if reason else "receipts", reason)
@@ -194,7 +176,7 @@ async def compose(plan: dict, steps: list[dict], llm=None) -> Presentation:
         return Presentation("")
     supporting = _supporting_ids(plan)
     content = [step for step in steps if step["status"] == "completed"
-               and (step["tool"] in READ_TOOLS or step["tool"] == "learning_plan_generate")]
+               and step["tool"] in READ_TOOLS]
     if not content:
         return _fallback(steps, supporting=supporting)
     if llm is None:
@@ -243,7 +225,7 @@ async def compose(plan: dict, steps: list[dict], llm=None) -> Presentation:
                      and step["tool"] == "job_detail_read" and step["id"] not in seen)
         # Real receipts remain visible even if the model omits a branch or fails
         # to distinguish a queued external action from a confirmed submission.
-        texts.extend(_receipt(step) for step in steps
+        texts.extend(_render(step) for step in steps
                      if step["tool"] not in READ_TOOLS or step["status"] != "completed")
         return Presentation("\n\n".join(texts), snapshots, "model")
     except asyncio.CancelledError:

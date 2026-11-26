@@ -150,10 +150,9 @@ def downstream_condition_scopes(message: str) -> list[tuple[int, int, str]]:
         if boundary:
             end = start.end() + boundary.start()
         quote = message[start.start():end]
-        learning = bool(re.search(r"(?:生成|制定|创建|规划|更新|补充).*(?:学习计划|成长计划|提升计划|行动方案|学习方案)", quote, re.S))
         delivery = bool(re.search(r"投递|提交申请|(?:发送|提交)简历", quote))
-        if learning != delivery:
-            scopes.append((start.start(), end, "learning_plan_generate" if learning else "mock_delivery_start"))
+        if delivery:
+            scopes.append((start.start(), end, "mock_delivery_start"))
     return scopes
 
 

@@ -123,7 +123,7 @@ class Refresh(unittest.IsolatedAsyncioTestCase):
         async def bound(_): return "bound"
         self.coordinator._ensure_applicant_bound = bound
         self.registry = AgentToolRegistry(jobs=self.jobs, browser=NS(llm=NS(generate=no_model)), candidate_state=self.candidate,
-            resume_workspace=self.resume, memory=None, learning_plans=NS(), mock_workflow=self.coordinator)
+            resume_workspace=self.resume, memory=None, mock_workflow=self.coordinator)
         self.events = []
         self.context = RunContext("synthetic-run", asyncio.current_task(), lambda kind,data: self.events.append({"kind":kind,**data}), lambda _: None,
             search_state={"queries": ["分析师"], "locations": [], "filters": self.new},
@@ -132,7 +132,7 @@ class Refresh(unittest.IsolatedAsyncioTestCase):
         from app.runtime.manager import AgentRuntime
         self.runtime_store = RunStore(Path(self.temp.name) / "runtime.db")
         self.runtime_run, _ = self.runtime_store.create("default", "synthetic", "chat", {"message": "合成条件修订"})
-        self.runtime = AgentRuntime(self.runtime_store, NS(tool_registry=self.registry, candidate_state=self.candidate), NS(), NS(), None, self.resume)
+        self.runtime = AgentRuntime(self.runtime_store, NS(tool_registry=self.registry, candidate_state=self.candidate), NS(), NS(), self.resume)
         original_emit = self.context.emit
         self.context.run_id = self.runtime_run["id"]
         self.context.emit = lambda kind,data: (original_emit(kind,data), self.runtime.emit(self.runtime_run["id"], kind,data))

@@ -12,12 +12,12 @@ import time
 import uuid
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ..core.security import redact
 
-Topic = Literal["search", "applications", "resume", "learning", "general"]
-ACTION_TOOLS = {"job_search_start", "learning_plan_generate", "resume_propose_patch", "interview_preparation_generate"}
+Topic = Literal["search", "applications", "resume", "general"]
+ACTION_TOOLS = {"job_search_start", "resume_propose_patch", "interview_preparation_generate"}
 CONFIRM = re.compile(r"^(?:行吧[，, ]*)?(?:好|好的|行|行吧|可以|确认|同意|就这样|照你说的办|那就照你说的办|按这个方案|开始吧)[。！! ]*$")
 REJECT = re.compile(r"^(?:不|不要|算了|取消|不执行|不同意|先不做|先不要)[。！! ]*$")
 
@@ -85,12 +85,29 @@ class DialogueState(Strict):
     summary: list[dict[str, Any]] = Field(default_factory=list, max_length=24)
     clarification: dict[str, Any] | None = None
     selected_job: JobSelection | None = None
-    learning_request: dict[str, Any] | None = None
     workflow_request: dict[str, Any] | None = None
     instruction_request: dict[str, Any] | None = None
     task_request: dict[str, Any] | None = None
     job_target_context: dict[str, Any] | None = None
     delivery_scope: dict[str, Any] | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def discard_retired_state(cls, saved):
+        if not isinstance(saved, dict):
+            return saved
+        # Old encrypted sessions remain readable after the feature is removed.
+        value = copy.deepcopy(saved)
+        value.pop("learning_request", None)
+        if value.get("active_intent") == "learning":
+            value["active_intent"] = "general"
+        if "frames" in value:
+            value["frames"].pop("learning", None)
+        for key in ("snapshots", "pending"):
+            if key in value:
+                value[key] = [item for item in value[key] if item.get("topic") != "learning"
+                              and item.get("tool") != "learning_plan_generate"]
+        return value
 
 
 def topic_for(message: str, previous: str = "general") -> str:
@@ -104,8 +121,6 @@ def topic_for(message: str, previous: str = "general") -> str:
         return previous
     if re.search(r"简历|项目经历|教育经历|实习经历", message):
         return "resume"
-    if re.search(r"学习|成长计划|行动方案", message):
-        return "learning"
     if re.search(r"审核|投递|沟通|回复|看板|前[一二三四五六七八九十\d]+个|第[一二三四五六七八九十\d]+个", message):
         return "applications"
     if re.search(r"搜索|找工作|帮我找|职位|岗位|薪资|月薪|城市|数量|关键词|换成|改成", message):
@@ -166,15 +181,6 @@ def apply_operation(saved: dict | None, operation: dict, *, clock: float | None 
                 frame.last_question, frame.missing_slots = "", []
         message = str(operation["message"])
         next_topic = topic_for(message, state.active_intent)
-        if state.learning_request and state.active_intent == "learning":
-            from ..core.action_language import plan_scope_answer
-            try:
-                if plan_scope_answer(message):
-                    next_topic = "learning"
-            except ValueError:
-                next_topic = "learning"  # Invalid slot values are clarified, never a reset.
-        if state.learning_request and next_topic != "learning":
-            state.learning_request = None
         frame = state.frames.get(state.active_intent)
         if frame and frame.missing_slots and re.fullmatch(r"(?:那就|就|要)?\s*[\d零〇一二两三四五六七八九十百]+(?:个|份|条)?(?:吧)?", message.strip()):
             next_topic = state.active_intent
@@ -252,17 +258,6 @@ def apply_operation(saved: dict | None, operation: dict, *, clock: float | None 
         state.selected_job = JobSelection(job_id=item["id"], snapshot_id=snapshot.id,
             selector=str(operation["selector"]), title=item["title"], company=item.get("company", ""))
         state.active_intent = "applications"
-    elif op == "learning_request":
-        state.learning_request = {"message": str(operation["message"])[:600],
-            "resume_stamp": operation["resume_stamp"], "scope": operation.get("scope", {}),
-            "task_id": operation.get("task_id"),
-            "source": source, "turn": state.turn, "expires_at": now + 600}
-        state.active_intent = "learning"
-    elif op == "learning_consume":
-        state.learning_request = None
-        frame = state.frames.get("learning")
-        if frame:
-            frame.last_question, frame.missing_slots = "", []
     elif op == "question":
         frame = state.frames.setdefault(operation["topic"], Frame())
         frame.last_question = str(operation["question"])[:1000]
@@ -337,7 +332,7 @@ def apply_operation(saved: dict | None, operation: dict, *, clock: float | None 
             state.task_request["status"] = "cancelled"
         if state.instruction_request:
             state.instruction_request = {**state.instruction_request, "status": "cancelled", "expires_at": 0}
-        state.learning_request, state.workflow_request = None, None
+        state.workflow_request = None
         state.tasks["plan_id"] = ""
         trace(state, "rejection", source)
     elif op == "reset":
@@ -492,7 +487,6 @@ def compact_state(saved: dict) -> dict:
                   for item in state.snapshots[-2:] if item.displayed and item.topic == state.active_intent],
         "tasks": state.tasks, "selected_job": state.selected_job.model_dump() if state.selected_job else None,
         "job_target_context": state.job_target_context,
-        "learning_request": state.learning_request,
         "delivery_scope": state.delivery_scope,
         "instruction": state.instruction_request,
         "task_request": state.task_request,

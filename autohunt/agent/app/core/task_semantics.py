@@ -23,7 +23,6 @@ ACTION_PATTERNS = {
     "search_state_update": r"改|换|调整|设置|不限|取消.{0,8}限制|城市|地点|数量|薪资|月薪|方向|关键词",
     "preference_update": r"(?:更新|修改|设置|调整|保存).{0,30}(?:长期|持久化|偏好)",
     "resume_propose_patch": r"(?:修改|更新|补充|润色|优化|美化|精简|压缩|删除|加入|写进).{0,35}(?:简历|项目|经历)|(?:简历|项目|经历).{0,25}(?:改|删|优化|精简|润色)",
-    "learning_plan_generate": r"(?:生成|制定|创建|规划|更新|补充|安排|做|写|给我).{0,35}(?:学习计划|成长计划|提升计划|行动方案|学习方案)",
     "interview_preparation_generate": r"(?:预测|准备|模拟|生成|分析|给我).{0,30}(?:面试|追问)|(?:面试).{0,20}(?:预测|准备)",
     "mock_delivery_start": r"投递|提交申请|(?:发送|提交)简历",
     "mock_delivery_cancel": r"(?:停止|取消|关闭|暂停|不要(?:再)?|先别).{0,8}投递",
@@ -44,7 +43,6 @@ _DATA = re.compile(r"(?:JD|岗位职责|职位描述|项目说明|简历|材料|
 _RETRACTION_TARGETS = {
     "job_search_start": r"搜索|检索|找工作",
     "mock_delivery_start": r"投递|发送简历|提交简历",
-    "learning_plan_generate": r"(?:生成|更新)?(?:成长计划|学习计划|提升计划|行动方案|学习方案)",
     "interview_preparation_generate": r"(?:面试预测|面试准备|面试问题)",
     "resume_propose_patch": r"(?:修改|更新|补充|写入)简历",
 }
@@ -206,7 +204,7 @@ def retained_reference(message: str) -> bool:
     return bool(re.match(
         r"^\s*(?:(?:请|那就|那么|现在|先)\s*)?"
         r"(?:(?:不要|先别|取消|停止|放弃|不再)[^，,。；;]*[，,]\s*)*"
-        r"(?:(?:只|仍|继续)?(?:保留|保持)\s*(?:搜索|检索|成长计划|学习计划|投递)"
+        r"(?:(?:只|仍|继续)?(?:保留|保持)\s*(?:搜索|检索|投递)"
         r"|其他.{0,12}(?:继续|照旧|不变))", text))
 
 
@@ -218,7 +216,6 @@ def retained_tools(message: str) -> set[str] | None:
     if not match:
         return None
     aliases = {"job_search_start": r"搜索|检索", "mock_delivery_start": r"投递",
-               "learning_plan_generate": r"成长计划|学习计划|提升计划|学习方案|行动方案",
                "resume_propose_patch": r"简历修改|修改简历"}
     remaining = match[1]
     keep = set()

@@ -231,57 +231,6 @@ class FrozenSearchEvidence(unittest.TestCase):
         self.assertEqual([row['id'] for row in self.evidence(task_id='original')[0]], [self.ident])
 
 
-class FrozenGrowthEvidence(unittest.IsolatedAsyncioTestCase):
-    def setUp(self):
-        from app.core.models import ResumeDocumentView
-        from app.growth.plans import LearningPlanService
-        from app.memory.resume_workspace import resume_document_digest
-        self.temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
-        self.addCleanup(self.temp.cleanup)
-        self.jobs = JobStore(Path(self.temp.name) / 'jobs.db')
-        self.doc = ResumeDocumentView(id='synthetic-document', version=3, skills=['Python'], summary='使用Python进行数据分析与质量验收。')
-        self.target = {**job(11), 'salary': '28-35K', 'score': 82,
-            'description': '负责使用Python与SQL进行复杂数据分析，维护数据质量与业务指标口径，持续复盘交付效果并为管理团队提供可靠分析报告。',
-            'qualification_evidence': {'status': 'pass', 'resume_digest': resume_document_digest(self.doc)}}
-        self.jobs.create_task('growth-search', 'mock', '合成岗位', resume_id='synthetic-resume')
-        self.jobs.update_task('growth-search', status='completed')
-        self.ident = self.jobs.admit_search_result('growth-search', self.target, limit=20, groups=None)['job_id']
-        from app.llm.base import LLMResult
-        data = {'title': '合成数据分析成长计划', 'summary': '依据本轮已核实JD，补充SQL业务分析和数据质量验收的实践证据。',
-            'gaps': [{'category': 'technical_skill', 'name': 'SQL业务分析', 'priority': 'high',
-                'jd_quotes': [{'job_id': self.ident, 'quote': '使用Python与SQL进行复杂数据分析'}],
-                'rationale': '简历中的Python分析证据尚未覆盖SQL业务口径验收。',
-                'objective': '使用现有Python技能完成有依据的SQL指标质量验收。', 'estimated_hours': 12,
-                'steps': ['搭建虚构订单数据并明确每个字段的数据含义。', '编写SQL聚合指标并核对重复和空值处理规则。', '输出指标核验报告并标注样本来源与限制。'],
-                'practice': '交付虚构订单SQL指标仓库和可复现的数据验收报告。',
-                'acceptance': ['每个指标可以通过固定输入重复运行得到相同结果。', '报告记录至少三个异常数据案例及其修复前后结果。']}]}
-        self.llm = NS(generate=AsyncMock(return_value=LLMResult(text=json.dumps(data), provider='synthetic', model='scripted')))
-        candidates = NS(read=lambda: NS(profile=NS(resume_id='synthetic-resume', resume_activated_at=None)))
-        workspace = NS(read_document=lambda: self.doc, render_markdown=lambda doc: doc.summary)
-        self.service = LearningPlanService(self.jobs, candidates, workspace, self.llm)
-
-    def tearDown(self):
-        gc.collect()
-
-    async def test_real_growth_generation_uses_original_scored_jd_after_other_search(self):
-        self.jobs.update_job_filter_result(self.ident, {'status': 'fail', 'digest': 'other-search'})
-        with self.jobs._connect() as db:
-            db.execute('UPDATE jobs SET score=96 WHERE id=?', (self.ident,))
-        result = await self.service.generate(max_score=84, salary_min=25000, task_id='growth-search')
-        self.assertEqual(result['jobs_analyzed'], 1)
-        self.assertEqual(result['job_sources'][0]['score'], 82)
-        self.assertEqual(result['resume_version'], 3)
-        self.assertEqual(len(self.jobs.learning_plans('synthetic-resume')), 1)
-        self.llm.generate.assert_awaited_once()
-
-    async def test_changed_resume_explains_stale_evidence_instead_of_empty_results(self):
-        self.doc = self.doc.model_copy(update={'version': 4})
-        with self.assertRaisesRegex(ValueError, '简历版本或冻结判定证据已变化'):
-            await self.service.generate(max_score=84, task_id='growth-search')
-        self.llm.generate.assert_not_awaited()
-        self.assertEqual(self.jobs.learning_plans('synthetic-resume'), [])
-
-
 if __name__ == '__main__':
     result = unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromModule(__import__(__name__, fromlist=['*'])))
     output = Path(__file__).parent / 'results' / 'search-evidence' / datetime.now(UTC).strftime('%Y%m%dT%H%M%S')

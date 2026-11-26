@@ -22,7 +22,6 @@ LABELS = {
     "preference_read": "求职偏好", "preference_update": "更新求职偏好",
     "memory_read": "长期记忆", "mock_delivery_start": "模拟站自动投递",
     "mock_delivery_cancel": "停止自动投递", "mock_delivery_status": "投递队列",
-    "learning_plan_generate": "成长计划",
     "interview_preparation_generate": "面试准备",
     "interview_preparations_read": "面试准备报告",
 }
@@ -128,9 +127,6 @@ def tool_reply(tool: str, status: str, result) -> str:
             for index, job in enumerate(jobs, 1) if isinstance(job, dict)) or "暂无符合条件的已保存职位。")
     if tool == "job_review_selection":
         return f"已通过 {len(data.get('reviewed_ids') or [])} 个职位的本地审核；未发起沟通或投递。"
-    if tool == "learning_plan_generate":
-        return (f"已保存成长计划《{data.get('title') or '成长计划'}》，依据 {_count(data.get('jobs_analyzed'))} 份 JD。\n"
-            + ("劣势分析：" + data["summary"] if isinstance(data.get("summary"), str) else "可在成长计划页面查看步骤与验收标准。"))
     if tool == "resume_propose_patch":
         return "已生成简历修改提案，尚未写入；请核对并批准。" if data.get("proposal") else "没有生成可验证的简历修改提案，请明确需要修改的内容。"
     if tool == "context_question_ask":

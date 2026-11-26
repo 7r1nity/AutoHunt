@@ -90,7 +90,7 @@ class Harness:
                        search_conversation_history=lambda *a, **k: [])
         self.browser = NS()
         self.registry = AgentToolRegistry(jobs=self.jobs, browser=self.browser, candidate_state=self.candidate,
-            resume_workspace=self.resumes, memory=None, learning_plans=NS(), mock_workflow=NS())
+            resume_workspace=self.resumes, memory=None, mock_workflow=NS())
         self.behavior = {}
         for name in list(self.registry._tools):
             spec = self.registry._tools[name]
@@ -105,7 +105,7 @@ class Harness:
                 return {"message": "合成回执", "title": "合成分析", "jobs_analyzed": 3}
             self.registry._tools[name] = AgentToolSpec(spec.name, spec.description, spec.parameters, spec.effect, executor)
         self.runtime = AgentRuntime(self.store, NS(tool_registry=self.registry, candidate_state=self.candidate),
-            self.jobs, self.browser, None, self.resumes)
+            self.jobs, self.browser, self.resumes)
         self.runtime.search_state = lambda _: {"queries": ["合成分析师"]}
         self.run, _ = self.store.create("default", "synthetic", "chat", {"message": "合成任务"})
         self.store.update(self.run["id"], status="running")
@@ -166,18 +166,18 @@ def corpus():
         cases.append({"id": f"{family}-{len(cases):04d}", "family": family, "pdf_ids": pdf_ids,
             "payload": payload, "oracle_source": "user-level desired state, independent of existing implementation"})
     for phase, tool, score in itertools.product(PHASES,
-            ("mock_delivery_start", "learning_plan_generate", "job_results_read"), (80, 90)):
+            ("mock_delivery_start", "job_results_read"), (80, 90)):
         add("append", ["A01", "A02", "A07"], phase=phase, tool=tool, score=score)
     for phase, tool, value in itertools.product(PHASES,
-            ("mock_delivery_start", "learning_plan_generate", "job_search_start"), (85, 90)):
+            ("mock_delivery_start", "job_search_start"), (85, 90)):
         # Only search steps currently produce waiting_external. Do not inflate
-        # failures by constructing unreachable delivery/growth node states.
+        # failures by constructing unreachable delivery node states.
         if phase == "waiting_external" and tool != "job_search_start": continue
         add("update", ["B02", "C01", "C04"], phase=phase, tool=tool, value=value)
     for updates in ((10, 20, 15), (20, 15, 10), (15, 10, 20)):
         add("multi_turn", ["B01", "B02", "B05", "B08"], quantities=updates)
     for phase, consumer in itertools.product(("pending", "waiting_approval"),
-            ("learning_plan_generate", "job_results_read")):
+            ("job_results_read",)):
         add("insert_dependency", ["A03", "A08"], phase=phase, consumer=consumer)
     for descendants in (0, 1, 2):
         add("cancel_branch", ["B04", "C05", "D02"], descendants=descendants)
@@ -202,7 +202,7 @@ def corpus():
         add("validation", ["F01", "F02", "F03", "F04", "F07"], variant=case)
     for threshold, salary in itertools.product((80, 85, 90), (15000, 25000, 40000)):
         add("branch_scope", ["H03", "H04"], threshold=threshold, salary=salary)
-    for tool, target in itertools.product(("job_stats_read", "learning_plan_generate"), ("same", "foreign", "resume_changed")):
+    for tool, target in itertools.product(("job_stats_read", "job_results_read"), ("same", "foreign", "resume_changed")):
         add("cas_isolation", ["E04", "E07", "G07"], tool=tool, target=target)
     for status in ("completed", "failed", "outcome_indeterminate"):
         for terminal in (False, True):
@@ -230,7 +230,7 @@ async def scenario(h, case):
     if family == "append":
         old = step("search", "job_search_start", {"queries": ["合成分析师"], "result_limit": 15}, status=p["phase"])
         h.install([old])
-        args = {"min_score": p["score"]} if p["tool"] == "mock_delivery_start" else {"max_score": p["score"]-1} if p["tool"] == "learning_plan_generate" else {"summary": True}
+        args = {"min_score": p["score"]} if p["tool"] == "mock_delivery_start" else {"summary": True}
         h.edit({"add_steps": [{"id": "added", "tool": p["tool"], "arguments": args,
             "depends_on": ["search"], "user_requested": True}]}, "搜索之后追加分析或投递，不重复搜索")
         check(h.plan["steps"][0] == old, "executed_history_changed", old, h.plan["steps"][0])
@@ -243,8 +243,8 @@ async def scenario(h, case):
             check(not any(c["tool"] == p["tool"] for c in h.calls), "dependency_bypassed", "wait for search", h.calls)
     elif family == "update":
         tool = p["tool"]
-        original = {"queries": ["合成分析师"], "result_limit": 15, "locations": ["深圳"], "salary_min": 15000} if tool == "job_search_start" else {"min_score": 80} if tool == "mock_delivery_start" else {"max_score": 84, "salary_min": 25000}
-        field = "result_limit" if tool == "job_search_start" else "min_score" if tool == "mock_delivery_start" else "max_score"
+        original = {"queries": ["合成分析师"], "result_limit": 15, "locations": ["深圳"], "salary_min": 15000} if tool == "job_search_start" else {"min_score": 80}
+        field = "result_limit" if tool == "job_search_start" else "min_score"
         h.install([step("target", tool, original, status=p["phase"])])
         if p["phase"] in {"completed", "claimed", "outcome_indeterminate", "failed"}:
             try: h.edit({"updates": [{"step_id": "target", "arguments": {field: p["value"]}}]})
@@ -281,12 +281,12 @@ async def scenario(h, case):
         await h.tick()
         check([c["tool"] for c in h.calls] == ["job_stats_read", p["consumer"]], "dependency_order_wrong", "analysis then consumer", h.calls)
     elif family == "cancel_branch":
-        steps = [step("delivery", "mock_delivery_start", {"min_score": 85}), step("growth", "learning_plan_generate", {"max_score": 84})]
+        steps = [step("delivery", "mock_delivery_start", {"min_score": 85}), step("stats", "job_stats_read")]
         for n in range(p["descendants"]): steps.append(step(f"report{n}", "job_stats_read", deps=["delivery" if n == 0 else f"report{n-1}"]))
         h.install(steps)
-        h.edit({"remove_steps": ["delivery"]}, "不要投递，只保留成长计划")
+        h.edit({"remove_steps": ["delivery"]}, "不要投递，只保留统计")
         await h.tick()
-        check([c["tool"] for c in h.calls] == ["learning_plan_generate"], "cancel_independent_branch_lost", ["learning_plan_generate"], h.calls)
+        check([c["tool"] for c in h.calls] == ["job_stats_read"], "cancel_independent_branch_lost", ["job_stats_read"], h.calls)
         for item in h.plan["steps"][2:]:
             check((item.get("failure") or {}).get("code") == "user_withdrawn", "cancel_descendant_reported_as_failure", "withdrawn descendant", item)
     elif family == "recovery":
@@ -336,8 +336,8 @@ async def scenario(h, case):
         await asyncio.wait_for(h.runtime.watch_plan(h.run["id"]), 4)
         check(len(h.calls) == 1, "approval_repeated_or_stalled", 1, h.calls)
     elif family == "awaiting_input":
-        h.install([step("growth", "learning_plan_generate")]+([step("report", "job_stats_read", deps=["growth"])] if p["descendants"] else []))
-        async def waiting(*a, **k): return AgentToolOutcome("learning_plan_generate", "awaiting_user", "请补充分析范围", "write")
+        h.install([step("selection", "job_target_resolve", {"selector": "合成岗位"})]+([step("report", "job_stats_read", deps=["selection"])] if p["descendants"] else []))
+        async def waiting(*a, **k): return AgentToolOutcome("job_target_resolve", "awaiting_user", "请明确选中岗位", "session")
         with patch.object(h.registry, "execute", waiting): await h.tick()
         check(h.plan["steps"][0]["status"] in {"waiting_user", "waiting_input"}, "business_wait_became_terminal_block", "durable recoverable input wait", h.plan)
     elif family == "binding_in_progress":
@@ -403,13 +403,13 @@ async def scenario(h, case):
         raw = RequestDraft.model_validate({"steps": [
             {"id": "search", "tool": "job_search_start", "arguments": {"queries": ["合成分析师"], "result_limit": 15, "salary_min": 15000}, "user_requested": True},
             {"id": "delivery", "tool": "mock_delivery_start", "arguments": {"min_score": p["threshold"]}, "user_requested": True},
-            {"id": "growth", "tool": "learning_plan_generate", "arguments": {"max_score": p["threshold"]-1, "salary_min": p["salary"]}, "user_requested": True}]})
-        with h.context(): plan = validate_draft(raw, h.registry, "先搜索，高分投递，低分高薪生成计划", dialogue={}, conditions={}, stamp=STAMP)
+            {"id": "alternate", "tool": "mock_delivery_start", "arguments": {"min_score": p["threshold"], "filters": {"op": "condition", "text": f"月薪区间下限至少{p['salary']}元"}}, "user_requested": True}]})
+        with h.context(): plan = validate_draft(raw, h.registry, "先搜索，再按不同薪资条件分别投递", dialogue={}, conditions={}, stamp=STAMP)
         h.plan = plan; h.store.save_plan(h.run["id"], plan); h.record("normalized_candidate")
         steps = {s["id"]: s for s in plan["steps"]}
-        check(steps["growth"]["arguments"]["salary_min"] == p["salary"] and steps["search"]["arguments"]["salary_min"] == 15000,
+        check(str(p["salary"]) in steps["alternate"]["arguments"]["filters"]["text"] and steps["search"]["arguments"]["salary_min"] == 15000,
               "branch_salary_leaked", "independent branch salaries", steps)
-        check("search" in steps["delivery"]["depends_on"] and "search" in steps["growth"]["depends_on"], "missing_data_dependency", "wait for search", steps)
+        check("search" in steps["delivery"]["depends_on"] and "search" in steps["alternate"]["depends_on"], "missing_data_dependency", "wait for search", steps)
     elif family == "cas_isolation":
         h.install([step("a", p["tool"])])
         old = copy.deepcopy(h.plan)

@@ -35,9 +35,6 @@ def is_search_summary(message: str) -> bool:
 def requested_search_summary(message: str) -> str | None:
     """Ground the summary's object; a gap/resume summary is not a results read."""
     from .task_semantics import understand
-    from .search_contract import downstream_condition_scopes
-    learning_spans = [(start, end) for start, end, tool in downstream_condition_scopes(message)
-                      if tool == "learning_plan_generate"]
     for match in re.finditer(r"总结|汇总|报告", message):
         before = message[:match.start()]
         prefix = re.split(r"[，,。；;\n]|然后|并且|同时|接着", before)[-1]
@@ -45,12 +42,11 @@ def requested_search_summary(message: str) -> str | None:
         clause = prefix + match.group() + suffix
         if not understand(message).bind("job_results_read", clause):
             continue
-        # Explicit results objects still apply, even alongside a learning goal.
+        # Explicit result objects are distinct from resume/gap summaries.
         explicit_search = bool(re.search(
             r"(?:总结|汇总)(?:一下)?(?:本次|这次|本轮|全部|所有)?(?:的)?(?:搜索结果|检索结果)"
             r"|(?:搜索|检索)(?:结果|完成(?:之后|后)?)(?:的)?(?:总结|汇总|报告)", clause))
-        if not explicit_search and (any(start <= match.start() < end for start, end in learning_spans)
-                                    or re.search(r"劣势|不足|差距|学习|成长", clause)):
+        if not explicit_search and re.search(r"劣势|不足|差距", clause):
             continue
         explicit = bool(re.search(
             r"(?:总结|汇总)(?:一下)?(?:本次|这次|本轮|全部|所有|这些|找到的|搜索到的)?(?:的)?"
@@ -59,8 +55,6 @@ def requested_search_summary(message: str) -> str | None:
             r"|(?:职位|岗位)(?:的)?(?:总结|汇总|报告)", clause))
         if explicit:
             return clause.strip()
-        if any(start <= match.start() < end for start, end in learning_spans):
-            continue
         if re.search(r"劣势|不足|差距|简历|学习|成长|项目|经历|材料", clause):
             continue
         if re.search(r"生成|提供|给我|输出|总结|汇总", clause):
@@ -138,7 +132,7 @@ def request_summary(saved: dict, conditions: dict, history: list[dict] | None = 
         if amendments:
             lines += ["后续已记录的补充：", *["- " + item.get("message", "")[:600] for item in amendments[-4:] if item.get("message")]]
         if request.get("revoked_tools"):
-            labels = {"mock_delivery_start": "投递", "learning_plan_generate": "生成成长计划", "job_search_start": "搜索"}
+            labels = {"mock_delivery_start": "投递", "job_search_start": "搜索"}
             lines.append("已撤回的动作：" + "、".join(labels.get(name, name) for name in request["revoked_tools"]) + "；不会因继续任务而恢复授权。")
         if status in {"failed", "timed_out", "interrupted", "planning"} and not request.get("execution_started"):
             lines.append("这项请求尚未执行；可以继续重新规划，不代表浏览器已启动或登录已验证。")

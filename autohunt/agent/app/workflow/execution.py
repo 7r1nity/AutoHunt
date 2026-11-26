@@ -10,7 +10,7 @@ import uuid
 
 from ..core.agent_tools import ToolLoopState
 from ..core.models import AgentLane, ChatResponse, ToolEvent
-from ..growth.requests import resume_stamp
+from ..memory.resume_identity import resume_stamp
 from ..runtime.context import active_run, dialogue_change, emit
 from ..core.replies import tool_reply, tool_label, public_reply
 from ..runtime.resilience import classify_failure
@@ -18,7 +18,7 @@ from .contracts import EXECUTION_BATCH_SIZE
 from .lifecycle import DONE, input_waits, successful_receipt
 
 RESUME_BOUND_TOOLS = {"job_search_start", "job_results_refilter", "mock_delivery_start",
-                      "learning_plan_generate", "interview_preparation_generate", "resume_propose_patch", "job_review_selection"}
+                      "interview_preparation_generate", "resume_propose_patch", "job_review_selection"}
 
 
 def persist(plan: dict, *, activate: bool = False) -> None:
@@ -209,9 +209,8 @@ async def advance(plan: dict, registry) -> list[dict]:
             scope_token = diagnostic_scope.set({"plan_id": plan["id"], "revision": plan.get("revision"),
                 "step_id": step["id"], "execution_id": step["execution_id"]})
             try:
-                # A plan over 20 JDs needs the full analysis budget; a 100s cap cut
-                # it off mid-write and reported "结果未确认" instead of a plan.
-                timeout = 90 if step["tool"] == "interview_preparation_generate" else 180 if step["tool"] in {"learning_plan_generate", "job_results_refilter"} or (
+                # Refiltering may inspect several persisted JDs; reserve its bounded analysis budget.
+                timeout = 90 if step["tool"] == "interview_preparation_generate" else 180 if step["tool"] == "job_results_refilter" or (
                     step["tool"] == "mock_delivery_start" and step["arguments"].get("filters")) else (
                     45 if step["tool"] in {"mock_delivery_start", "job_remove_selection", "job_target_resolve"} and step["arguments"].get("selector") else 20)
                 async with asyncio.timeout(timeout):

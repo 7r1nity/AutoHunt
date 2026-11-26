@@ -39,7 +39,7 @@ export async function POST(request: NextRequest) {
       cache: "no-store",
       // Real LLM providers (DeepSeek) can take well over 10s for one turn;
       // aborting early turns a slow success into a misleading "unavailable".
-      signal: AbortSignal.timeout(/(?:生成|制定|创建|规划|做一份)(?:.{0,12})(?:学习计划|行动方案)/.test(String(body.message ?? "")) ? 105_000 : 60_000),
+      signal: AbortSignal.timeout(60_000),
     });
     const payload = await response.json();
     return NextResponse.json(payload, { status: response.status });

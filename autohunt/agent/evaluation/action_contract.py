@@ -61,10 +61,7 @@ def candidate(*, role="金融风控", delivery=True, requested=True):
         "command_quote": "按专业寻找机会", "user_requested": True}]
     if delivery:
         steps += [{"id": "delivery", "tool": "mock_delivery_start", "arguments": {"min_score": 85},
-            "command_quote": "为高匹配岗位提交", "user_requested": requested, "depends_on": ["search"]},
-            {"id": "growth", "tool": "learning_plan_generate", "arguments": {
-                "max_score": 84, "salary_min": 25000, "focus": "不足与提升"},
-             "user_requested": True, "depends_on": ["search"]}]
+            "command_quote": "为高匹配岗位提交", "user_requested": requested, "depends_on": ["search"]}]
     return {"steps": steps, "goals": [{"quote": "岗位与后续行动", "disposition": "steps",
         "step_ids": [step["id"] for step in steps]}]}
 
@@ -84,11 +81,11 @@ class Contracts(unittest.IsolatedAsyncioTestCase):
         self.candidate = NS(read=lambda: NS(profile=NS(resume_id="synthetic-resume")))
         self.resumes = NS(read_document=lambda: self.document)
         self.registry = AgentToolRegistry(jobs=None, browser=None, candidate_state=self.candidate,
-            resume_workspace=self.resumes, memory=None, learning_plans=NS(), mock_workflow=NS())
+            resume_workspace=self.resumes, memory=None, mock_workflow=NS())
         self.temp = tempfile.TemporaryDirectory()
         self.store = RunStore(Path(self.temp.name) / "runtime.db")
         self.run, _ = self.store.create("default", "synthetic", "chat", {"message": "合成请求"})
-        self.runtime = AgentRuntime(self.store, NS(tool_registry=self.registry, candidate_state=self.candidate), NS(), NS(), None, self.resumes)
+        self.runtime = AgentRuntime(self.store, NS(tool_registry=self.registry, candidate_state=self.candidate), NS(), NS(), self.resumes)
         def event(kind, data):
             self.events.append({"kind": kind, **data})
             self.runtime.emit(self.run["id"], kind, data)
@@ -104,7 +101,7 @@ class Contracts(unittest.IsolatedAsyncioTestCase):
         gc.collect()
         self.temp.cleanup()
 
-    def validate(self, payload=None, message="找十八个工作，85分以上投递，以下且25k以上生成提升计划", **kwargs):
+    def validate(self, payload=None, message="找十八个工作，85分以上投递并总结搜索结果", **kwargs):
         return validate_draft(RequestDraft.model_validate(payload or candidate()), self.registry, message,
             dialogue=self.context.dialogue, conditions=self.context.search_state, stamp=self.stamp, **kwargs)
 
@@ -169,7 +166,7 @@ class Contracts(unittest.IsolatedAsyncioTestCase):
         summary = next(step for step in plan["steps"] if step["tool"] == "job_results_read")
         self.assertEqual(summary["depends_on"], ["search"])
         self.assertTrue(summary["arguments"]["summary"])
-        for name in ["job_search_start", "mock_delivery_start", "learning_plan_generate", "job_results_read"]:
+        for name in ["job_search_start", "mock_delivery_start", "job_results_read"]:
             spec = self.registry._tools[name]
             async def executor(args, tool=name):
                 self.calls.append(tool)
@@ -180,10 +177,10 @@ class Contracts(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.calls, ["job_search_start"])
         plan["steps"][0]["status"] = "completed"
         await advance(plan, self.registry)
-        self.assertEqual(set(self.calls), {"job_search_start", "mock_delivery_start", "learning_plan_generate", "job_results_read"})
+        self.assertEqual(set(self.calls), {"job_search_start", "mock_delivery_start", "job_results_read"})
         self.assertEqual(plan["status"], "finished")
         await advance(plan, self.registry)
-        self.assertEqual(len(self.calls), 4)
+        self.assertEqual(len(self.calls), 3)
 
     async def test_valid_bound_action_does_not_reparse_quotes(self):
         plan = self.validate()
@@ -357,7 +354,7 @@ class Contracts(unittest.IsolatedAsyncioTestCase):
             data = candidate()
             data["steps"][0]["arguments"]["result_limit"] = 15
             after = self.validate(data)
-            for name in ("job_search_start", "job_results_read", "mock_delivery_start", "learning_plan_generate"):
+            for name in ("job_search_start", "job_results_read", "mock_delivery_start"):
                 spec = self.registry._tools[name]
                 async def executor(args, tool=name):
                     saved = store.dialogue_state("default")
@@ -373,9 +370,9 @@ class Contracts(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(self.calls[0]["args"]["result_limit"], 15)
             after["steps"][0]["status"] = "completed"
             await advance(after, self.registry)
-            self.assertEqual(len(self.calls), 4)
+            self.assertEqual(len(self.calls), 3)
             await advance(after, self.registry)
-            self.assertEqual(len(self.calls), 4)
+            self.assertEqual(len(self.calls), 3)
             reopened = RunStore(store.path).dialogue_state("default")
             self.assertEqual(reopened["instruction_request"]["id"], reopened["tasks"]["plan_id"])
             self.assertEqual(reopened["instruction_request"]["status"], "finished")

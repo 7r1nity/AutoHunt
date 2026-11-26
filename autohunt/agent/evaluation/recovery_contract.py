@@ -54,8 +54,8 @@ ERRORS = {
 }
 
 
-def step(tool="learning_plan_generate", *, effect="write", status="pending", ident="growth", deps=()):
-    args = {"max_score": 84, "salary_min": 25000} if tool == "learning_plan_generate" else {}
+def step(tool="resume_propose_patch", *, effect="write", status="pending", ident="proposal", deps=()):
+    args = {"instruction": "补充合成项目描述"} if tool == "resume_propose_patch" else {}
     return {"id": ident, "tool": tool, "effect": effect, "arguments": args,
             "status": status, "depends_on": list(deps), "command_quote": "合成用户明确执行请求",
             "authority_binding": action_binding(tool, args, session_id="default", requested=True),
@@ -63,7 +63,7 @@ def step(tool="learning_plan_generate", *, effect="write", status="pending", ide
 
 
 def plan(steps=None):
-    return {"id": "synthetic-plan", "original": "合成完整搜索、投递和成长任务",
+    return {"id": "synthetic-plan", "original": "合成完整搜索、投递和简历提案任务",
             "answers": [], "questions": [], "resume_stamp": STAMP, "turn": 1,
             "expires_at": 1, "status": "finished", "goals": [], "reply": "合成响应",
             "steps": steps if steps is not None else [step()]}
@@ -105,7 +105,7 @@ def generate_cases():
         cases.append({"id": f"continuation-{index:03d}", "kind": "continuation", "text": text,
                       "expected": text in positives})
     for tool, effect, status, changed, cancelled, masked in itertools.product(
-        ["job_stats_read", "mock_delivery_start", "learning_plan_generate"], ["read", "write", "external"],
+        ["job_stats_read", "mock_delivery_start", "resume_propose_patch"], ["read", "write", "external"],
         ["pending", "failed", "completed"], [False, True], [False, True], [False, True]):
         cases.append({"id": f"boundary-{len(cases):04d}", "kind": "boundary", "tool": tool,
                       "effect": effect, "status": status, "changed": changed,
@@ -124,7 +124,7 @@ def matrix_test(case):
             TRACES.append({"case_id": case["id"], "expected": case["expected"], "actual": actual})
             self.assertEqual(actual, case["expected"])
             return
-        s = step(effect=case["effect"], status=case["status"], tool=case.get("tool", "learning_plan_generate"))
+        s = step(effect=case["effect"], status=case["status"], tool=case.get("tool", "resume_propose_patch"))
         s["failure"] = case.get("failure", {"effect_started": False, "uncertain": False, "code": "timeout"})
         value = plan([s]); source = run(value)
         if case["kind"] == "boundary":
@@ -202,15 +202,15 @@ class RuntimeContracts(unittest.IsolatedAsyncioTestCase):
         self.resumes = NS(read_document=lambda: NS(id="synthetic-document", version=1))
         self.calls = []
         self.registry = AgentToolRegistry(jobs=None, browser=None, candidate_state=self.candidate,
-            resume_workspace=self.resumes, memory=None, learning_plans=NS(), mock_workflow=NS())
-        for name in ["job_stats_read", "job_results_read", "mock_delivery_start", "learning_plan_generate"]:
+            resume_workspace=self.resumes, memory=None, mock_workflow=NS())
+        for name in ["job_stats_read", "job_results_read", "mock_delivery_start", "resume_propose_patch"]:
             spec = self.registry._tools[name]
             async def executor(arguments, name=name):
                 self.calls.append({"tool": name, "arguments": copy.deepcopy(arguments)})
-                return {"title": "合成成长计划", "message": "合成动作已核实完成", "jobs_analyzed": 1}
+                return {"title": "合成简历提案", "message": "合成动作已核实完成", "jobs_analyzed": 1}
             self.registry._tools[name] = AgentToolSpec(spec.name, spec.description, spec.parameters, spec.effect, executor)
         self.runtime = AgentRuntime(self.store, NS(tool_registry=self.registry, candidate_state=self.candidate),
-            NS(), NS(current=lambda: BrowserTaskView(), worker=None), None, self.resumes)
+            NS(), NS(current=lambda: BrowserTaskView(), worker=None), self.resumes)
         self.tokens = []
 
     def source(self, value, **fields):
@@ -248,16 +248,16 @@ class RuntimeContracts(unittest.IsolatedAsyncioTestCase):
         summary["result"] = {"message": "old report"}
         delivery = step("mock_delivery_start", ident="delivery", status="blocked", deps=["search"])
         delivery.update(arguments={"min_score": 85}, evidence_step="search", failure=ERRORS["authority_expired"])
-        growth = step(status="blocked", deps=["search"])
-        growth.update(evidence_step="search", failure=ERRORS["authority_expired"])
-        for s in (delivery, growth):
+        proposal = step(status="blocked", deps=["search"])
+        proposal.update(evidence_step="search", failure=ERRORS["authority_expired"])
+        for s in (delivery, proposal):
             s["authority_binding"] = action_binding(s["tool"], s["arguments"], session_id="default", requested=True)
             s["authority_binding"]["arguments_digest"] = "old-[REDACTED_PHONE]-digest"
-        original = self.source(plan([search, summary, delivery, growth]))
+        original = self.source(plan([search, summary, delivery, proposal]))
         self.store.event(original["id"], "browser_summary", {"task_id": "saved-search", "report_rendered": True, "message": "old report"})
         child, _ = self.enter(original)
         response = await self.runtime.continue_task(child["id"], "继续中断的任务")
-        self.assertEqual([call["tool"] for call in self.calls], ["mock_delivery_start", "learning_plan_generate"])
+        self.assertEqual([call["tool"] for call in self.calls], ["mock_delivery_start", "resume_propose_patch"])
         saved = self.store.get(child["id"])
         self.assertEqual(saved["parent_id"], original["id"])
         self.assertEqual(saved["checkpoint"]["plan"]["steps"][1]["result"], summary["result"])
@@ -288,7 +288,7 @@ class RuntimeContracts(unittest.IsolatedAsyncioTestCase):
         from app.core.agent_tools import ToolLoopState
         result = await self.registry.execute("task_continue", {}, user_message=context.user_message, state=ToolLoopState())
         self.assertEqual(result.status, "ok")
-        self.assertEqual([call["tool"] for call in self.calls], ["learning_plan_generate"])
+        self.assertEqual([call["tool"] for call in self.calls], ["resume_propose_patch"])
         self.assertEqual(self.store.get(child["id"])["checkpoint"]["plan"]["id"], "synthetic-plan")
         context.action_authority = {"plan_id": "new-planner-loop"}
         with self.assertRaises(PreflightRefused): await self.registry._task_continue({})
@@ -466,7 +466,7 @@ class MonitoringContracts(unittest.IsolatedAsyncioTestCase):
         saved["preview_id"] = None; saved["last_checked_at"] = old
         await coordinator.check_reply_queue(); self.assertEqual(len(calls), 1)
         runtime = AgentRuntime(None, None, NS(get_delivery_run=lambda _: DeliveryTaskView(id="old-delivery",
-            status="waiting_for_reply", updated_at=datetime.now(UTC)-timedelta(days=365))), None, None, None)
+            status="waiting_for_reply", updated_at=datetime.now(UTC)-timedelta(days=365))), None, None)
         self.assertEqual(runtime.observe_delivery("old-delivery").status, "waiting_for_reply")
 
     async def test_safe_retry_is_bounded_cancel_propagates_and_writes_never_retry(self):

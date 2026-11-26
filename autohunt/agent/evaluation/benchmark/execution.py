@@ -212,7 +212,7 @@ async def trial(site,browser,case,method,repetition,output,model):
                     raise RuntimeError("Benchmark boundary: browser trial only permits target resolution and isolated delivery")
                 row["plan"]=copy.deepcopy(h.plan); h.store.save_plan(h.run["id"],h.plan)
                 if case["id"]=="missing_resume": candidate.read=lambda:NS(profile=NS(resume_id=None))
-                with patch("app.workflow.execution.resume_stamp",return_value=STAMP),patch("app.growth.requests.resume_stamp",return_value=STAMP):
+                with patch("app.workflow.execution.resume_stamp",return_value=STAMP),patch("app.memory.resume_identity.resume_stamp",return_value=STAMP):
                     await advance(h.plan,h.registry)
                     if case["id"]=="cancel_before_submit":
                         await coordinator.cancel_delivery_queue(session_id="default")

@@ -10,7 +10,7 @@ from pathlib import Path
 
 RESET_PATH = "/api/v1/maintenance/history"
 JOB_TABLES = ("search_candidates", "search_recovery", "mock_delivery_queue", "delivery_runs", "delivery_previews", "job_review_decisions", "job_removals",
-    "browser_events", "jobs", "browser_tasks", "conversation_messages", "learning_plans")
+    "browser_events", "jobs", "browser_tasks", "conversation_messages")
 RUN_TABLES = ("session_memories", "action_approvals", "agent_run_events", "agent_runs", "session_search_state", "session_dialogue_state", "agent_sessions")
 ROUTER_TABLES = ("router_events", "rule_hit_stats", "router_disagreements", "clarify_memory")
 MOCK_TABLES = ("form_responses", "messages", "applications", "resumes")
@@ -114,6 +114,10 @@ class HistoryResetter:
                     connections.append(db)
                     db.execute("PRAGMA foreign_keys=ON")
                     known = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                    if index == 0 and "learning_plans" in known:
+                        # Optional legacy history, never created by the current app.
+                        tables = (*tables, "learning_plans")
+                        specs[index] = (path, tables)
                     if not set(tables) <= known or index == 3 and not {"users", "jobs", "form_templates"} <= known:
                         raise ValueError("数据库结构不符；未授权清理其他数据库")
                     db.execute("BEGIN IMMEDIATE")

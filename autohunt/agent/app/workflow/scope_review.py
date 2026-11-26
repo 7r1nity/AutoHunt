@@ -17,7 +17,7 @@ from ..llm.base import LLMRequest
 from ..runtime.context import emit
 
 SCOPE_FIELDS = frozenset({"filters", "result_groups", "salary_min", "min_score", "max_score", "scope_mode"})
-SCOPE_TOOLS = frozenset({"job_search_start", "search_state_update", "mock_delivery_start", "learning_plan_generate"})
+SCOPE_TOOLS = frozenset({"job_search_start", "search_state_update", "mock_delivery_start"})
 
 
 def salary_examples(arguments):

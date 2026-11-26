@@ -40,15 +40,15 @@ class DurableApprovalContracts(unittest.IsolatedAsyncioTestCase):
         self.candidate = NS(read=lambda: NS(profile=NS(resume_id="synthetic-resume")))
         self.calls = []
         self.registry = AgentToolRegistry(jobs=NS(), browser=NS(), candidate_state=self.candidate,
-            resume_workspace=self.resumes, memory=None, learning_plans=NS(), mock_workflow=NS())
-        for name in ("mock_delivery_start", "learning_plan_generate", "job_stats_read", "browser_task_stop"):
+            resume_workspace=self.resumes, memory=None, mock_workflow=NS())
+        for name in ("mock_delivery_start", "resume_propose_patch", "job_stats_read", "browser_task_stop"):
             spec = self.registry._tools[name]
             async def executor(args, name=name):
                 self.calls.append((name, copy.deepcopy(args)))
                 return {"message": "合成回执", "title": "合成计划", "jobs_analyzed": 0}
             self.registry._tools[name] = AgentToolSpec(spec.name, spec.description, spec.parameters, spec.effect, executor)
         self.runtime = AgentRuntime(self.store, NS(tool_registry=self.registry, candidate_state=self.candidate),
-            NS(add_conversation_message=lambda *a, **kw: None, search_conversation_history=lambda *a, **kw: []), NS(), None, self.resumes)
+            NS(add_conversation_message=lambda *a, **kw: None, search_conversation_history=lambda *a, **kw: []), NS(), self.resumes)
         self.runtime.search_state = lambda _: {"queries": ["合成分析师"]}
         self.run, _ = self.store.create("default", "synthetic", "chat", {"message": "合成请求"})
         self.store.update(self.run["id"], status="running")
@@ -77,9 +77,9 @@ class DurableApprovalContracts(unittest.IsolatedAsyncioTestCase):
             "depends_on": [], "status": "pending", "effect": "external", "user_requested": requested,
             "command_quote": "合成投递范围", "scope_quote": "", "missing_slots": []}]
         if extra:
-            steps.append({"id": "growth", "tool": "learning_plan_generate", "arguments": {"max_score": 84, "salary_min": 25000},
+            steps.append({"id": "proposal", "tool": "resume_propose_patch", "arguments": {"instruction": "补充合成项目描述"},
                 "depends_on": [], "status": "pending", "effect": "write", "user_requested": True,
-                "command_quote": "合成计划范围", "scope_quote": "", "missing_slots": []})
+                "command_quote": "补充合成项目描述", "scope_quote": "", "missing_slots": []})
         value = {"id": "synthetic-plan", "session_id": "default", "original": "合成请求", "answers": [], "questions": [],
             "goals": [], "reply": "", "resume_stamp": STAMP, "revision": 0, "turn": 0,
             "expires_at": time.time()-100, "status": "running", "steps": steps}
@@ -131,7 +131,7 @@ class DurableApprovalContracts(unittest.IsolatedAsyncioTestCase):
         value = self.changed_scope_plan(extra=True)
         await self.tick(value)
         self.assertEqual([s["status"] for s in value["steps"]], ["waiting_approval", "completed"])
-        self.assertEqual([c[0] for c in self.calls], ["learning_plan_generate"])
+        self.assertEqual([c[0] for c in self.calls], ["resume_propose_patch"])
         record = self.store.approvals(self.run["id"])[0]
         self.assertEqual((record["status"], record["source"]), ("pending", "confirmation"))
         self.assertTrue(record["snapshot"]["scope_reset"])
@@ -228,11 +228,11 @@ class DurableApprovalContracts(unittest.IsolatedAsyncioTestCase):
         await self.tick(value)
         self.assertEqual(len(self.calls), 1)
 
-    async def test_pending_confirmation_does_not_claim_effect_or_stop_independent_growth(self):
+    async def test_pending_confirmation_does_not_claim_effect_or_stop_independent_local_proposal(self):
         value = self.plan(extra=True)
         await self.tick(value)
         self.assertEqual([s["status"] for s in value["steps"]], ["waiting_approval", "completed"])
-        self.assertEqual([c[0] for c in self.calls], ["learning_plan_generate"])
+        self.assertEqual([c[0] for c in self.calls], ["resume_propose_patch"])
         starts = [e for e in self.store.all_events(self.run["id"]) if e["kind"] == "tool_started"]
         self.assertFalse(any(e["data"]["tool"] == "mock_delivery_start" for e in starts))
         self.assertEqual(len(public_run(self.store.get(self.run["id"]))["approvals"]), 1)
@@ -256,7 +256,7 @@ class DurableApprovalContracts(unittest.IsolatedAsyncioTestCase):
         value = self.plan(extra=True)
         await self.tick(value)
         await self.finish_approval(value, False)
-        self.assertEqual([c[0] for c in self.calls], ["learning_plan_generate"])
+        self.assertEqual([c[0] for c in self.calls], ["resume_propose_patch"])
         self.assertTrue(self.store.get(self.run["id"])["checkpoint"]["plan"]["steps"][0]["withdrawn"])
 
     async def test_foreign_session_and_action_tampering_cannot_approve(self):
@@ -382,7 +382,7 @@ class DurableApprovalContracts(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             await self.runtime.decide_approval(self.run["id"], old_id, "default", True)
         await self.tick(saved)
-        self.assertEqual(self.calls, [("learning_plan_generate", {"max_score": 84, "salary_min": 25000}),
+        self.assertEqual(self.calls, [("resume_propose_patch", {"instruction": "补充合成项目描述"}),
                                      ("mock_delivery_start", {"min_score": 90})])
 
     async def test_explicit_followup_same_scope_resolves_pending_without_extra_question(self):
@@ -396,15 +396,16 @@ class DurableApprovalContracts(unittest.IsolatedAsyncioTestCase):
 
     async def test_recompute_analysis_keeps_old_receipt_and_does_not_replay_delivery(self):
         value = self.plan(requested=True, extra=True)
+        value["steps"][1].update(tool="job_stats_read", arguments={}, effect="read")
         await self.tick(value)
         original = copy.deepcopy(value)
         updated = edited_plan(value, RevisionDraft(plan_id=value["id"], expected_revision=0,
-            invalidated_steps=["growth"]), self.registry, stamp=STAMP, session_id="default", message="刷新成长分析")
+            invalidated_steps=["proposal"]), self.registry, stamp=STAMP, session_id="default", message="刷新职位统计")
         self.assertEqual(updated["steps"][0], original["steps"][0])
         self.assertEqual(updated["steps"][1]["result"], original["steps"][1]["result"])
         self.assertEqual(updated["steps"][1]["status"], "completed")
         await self.tick(updated)
-        self.assertEqual([c[0] for c in self.calls], ["mock_delivery_start", "learning_plan_generate", "learning_plan_generate"])
+        self.assertEqual([c[0] for c in self.calls], ["mock_delivery_start", "job_stats_read", "job_stats_read"])
         with self.assertRaises(ValueError):
             edited_plan(updated, RevisionDraft(plan_id=value["id"], expected_revision=1, invalidated_steps=["delivery"]),
                 self.registry, stamp=STAMP, session_id="default", message="刷新投递")
@@ -414,12 +415,12 @@ class DurableApprovalContracts(unittest.IsolatedAsyncioTestCase):
         value["steps"][0].update(status="completed", result={"queued": 1})
         updated = edited_plan(value, RevisionDraft(plan_id=value["id"], expected_revision=0, add_steps=[
             {"id": "update", "tool": "search_state_update", "arguments": {"salary_min": 20000}, "user_requested": True},
-            {"id": "new_growth", "tool": "learning_plan_generate", "arguments": {"max_score": 84}, "user_requested": True}]),
-            self.registry, stamp=STAMP, session_id="default", message="更新条件并生成计划")
-        growth = next(step for step in updated["steps"] if step["id"] == "new_growth")
+            {"id": "new_summary", "tool": "job_results_read", "arguments": {"summary": True}, "user_requested": True}]),
+            self.registry, stamp=STAMP, session_id="default", message="更新条件并读取结果")
+        summary = next(step for step in updated["steps"] if step["id"] == "new_summary")
         refresh = next(step for step in updated["steps"] if step["tool"] == "job_results_refilter")
         self.assertEqual(refresh["depends_on"], ["update"])
-        self.assertEqual(growth["evidence_step"], refresh["id"])
+        self.assertEqual(summary["evidence_step"], refresh["id"])
 
     async def test_shutdown_keeps_approval_checkpoint_even_before_wait_status_is_published(self):
         value = self.plan()
@@ -463,7 +464,7 @@ class DurableApprovalContracts(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(saved["checkpoint"]["plan"]["steps"][1]["status"], "completed")
         with self.assertRaises(ValueError):
             await self.runtime.decide_approval(self.run["id"], value["steps"][0]["approval_id"], "default", True)
-        self.assertEqual([c[0] for c in self.calls], ["learning_plan_generate"])
+        self.assertEqual([c[0] for c in self.calls], ["resume_propose_patch"])
 
     async def test_generic_confirmation_does_not_choose_between_delivery_and_resume_proposal(self):
         value = self.plan()

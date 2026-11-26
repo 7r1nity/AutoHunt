@@ -12,7 +12,6 @@ from .models import BrowserMode, BrowserSearchRequest, JobPreferenceUpdate
 from .security import redact
 from ..browser.automation import BrowserAutomationService
 from ..jobs.store import JobStore
-from ..growth.plans import LearningPlanService, is_explicit_plan_request
 from ..memory.candidate_state import CandidateStateStore
 from ..memory.resume_workspace import ResumeWorkspaceStore
 from ..memory.stores import MemoryStore
@@ -34,8 +33,6 @@ class MissingSearchInput(ValueError):
     """Missing role is a question for the user, never permission to guess."""
 
 
-class MissingPlanScope(ValueError):
-    """An explicit action is remembered, but no evidence exists in its scope."""
 
 
 class MissingDeliveryEvidence(ValueError):
@@ -135,7 +132,6 @@ class AgentToolRegistry:
         candidate_state: CandidateStateStore,
         resume_workspace: ResumeWorkspaceStore,
         memory: MemoryStore,
-        learning_plans: LearningPlanService | None = None,
         interview_preparations=None,
         mock_workflow=None,
         response_llm=None,
@@ -147,7 +143,6 @@ class AgentToolRegistry:
         self.candidate_state = candidate_state
         self.resume_workspace = resume_workspace
         self.memory = memory
-        self.learning_plans = learning_plans
         self.interview_preparations = interview_preparations
         self.mock_workflow = mock_workflow
         self.response_llm = response_llm
@@ -210,7 +205,7 @@ class AgentToolRegistry:
             AgentToolSpec("context_action_propose", "把实际可执行方案登记为待确认动作，并追问。不能登记投递、联系方式交换、主简历直接写入或任意工具。不得把聊天文本当授权。",
                 obj({"tool": {"type": "string", "enum": sorted(ACTION_TOOLS)}, "arguments": {"type": "object"}, "description": {"type": "string", "minLength": 2, "maxLength": 500}}, ["tool", "arguments", "description"]), "session", self._action_propose),
             AgentToolSpec("context_question_ask", "当必要参数缺失时登记具体追问及待补槽位；下轮省略回答依据此问题解析，不猜测未提供字段。",
-                obj({"topic": {"type": "string", "enum": ["search", "resume", "learning", "applications"]},
+                obj({"topic": {"type": "string", "enum": ["search", "resume", "applications"]},
                     "question": {"type": "string", "minLength": 2, "maxLength": 1000},
                     "missing_slots": {"type": "array", "items": {"type": "string", "enum": ["queries", "locations", "result_limit", "salary_min", "entry_id", "instruction", "focus", "job_id"]}, "maxItems": 8}}, ["topic", "question", "missing_slots"]), "session", self._question_ask),
             AgentToolSpec("job_review_selection", "按本轮明确审核命令审核已展示职位；只保存本地审核标记，不授权沟通或投递。执行器绑定最近已展示快照；可省略 snapshot_id，不接受任意库ID或未展示对象。",
@@ -242,7 +237,7 @@ class AgentToolRegistry:
                               "source": {"type": "string", "enum": ["mock", "boss", "zhaopin"]},
                               "filters": {**filter_schema(), "type": ["object", "null"], "description": "完整语义条件树；null 显式清除；省略保持"},
                           }), "session", self._search_state_update),
-            AgentToolSpec("job_results_refilter", "仅按已保存的会话条件重算已完成搜索JD的准入证据（含原信息不足结果）。它不改变条件、不移除选中岗位；改变条件用search_state_update，移除岗位用job_remove_selection。不启动浏览器，不沟通或投递；后续使用新证据的投递/成长计划依赖此步骤。最多30个，不补入未读取职位。",
+            AgentToolSpec("job_results_refilter", "仅按已保存的会话条件重算已完成搜索JD的准入证据（含原信息不足结果）。它不改变条件、不移除选中岗位；改变条件用search_state_update，移除岗位用job_remove_selection。不启动浏览器，不沟通或投递；后续使用新证据的投递依赖此步骤。最多30个，不补入未读取职位。",
                 obj({"task_id": {"type": "string", "description": "仅允许result_sources中的真实搜索task_id，不是聊天run_id、计划id或步骤id。省略由应用按前置回执/会话绑定选择；歧义时追问。"}}),
                 "write", self._job_results_refilter),
             AgentToolSpec(
@@ -363,17 +358,6 @@ class AgentToolRegistry:
                 AgentToolSpec("mock_delivery_cancel", "按明确停止命令取消本会话的模拟站投递队列，已发送结果保留。", obj({}), "external", self._mock_delivery_cancel),
                 AgentToolSpec("mock_delivery_status", "读取本会话模拟站自动投递队列状态，不启动或重试。", obj({}), "read", self._mock_delivery_status),
             ])
-        if self.learning_plans is not None:
-            specs.append(AgentToolSpec(
-                "learning_plan_generate",
-                "依据当前主简历搜索命中的真实 JD 生成可追溯的详细跨行业学习计划；仅用户明确要求时调用。",
-                obj({"focus": {"type": "string", "maxLength": 400},
-                     "min_score": {"type": "integer", "minimum": 0, "maximum": 100},
-                     "max_score": {"type": "integer", "minimum": -1, "maximum": 100},
-                     "salary_min": {"type": "integer", "minimum": 0, "maximum": 10000000,
-                                    "description": "仅分析月薪区间下限达到此值的JD，未知、面议、非月薪排除；不改变搜索条件"}}),
-                "write", self._learning_plan_generate,
-            ))
         if self.interview_preparations is not None:
             specs.append(AgentToolSpec(
                 "interview_preparations_read", "读取当前简历已保存的面试准备，不重新生成；report_id读取一份完整报告，省略则列出最近报告。",
@@ -487,10 +471,6 @@ class AgentToolRegistry:
             dialogue_change("question", topic="applications", question=str(exc), missing_slots=["selector"])
             emit("tool_finished", tool=name, status="awaiting_user", detail=str(exc), **receipt)
             return AgentToolOutcome(name, "awaiting_user", str(exc), spec.effect, target_choice=choice)
-        except MissingPlanScope as exc:
-            dialogue_change("question", topic="learning", question=str(exc), missing_slots=["score_scope"])
-            emit("tool_finished", tool=name, status="awaiting_user", detail=str(exc), **receipt)
-            return AgentToolOutcome(name, "awaiting_user", str(exc), spec.effect)
         except MissingDeliveryEvidence as exc:
             dialogue_change("question", topic="applications", question=str(exc), missing_slots=exc.missing_slots)
             failure = {"code": "delivery_evidence_insufficient", "retryable": False,
@@ -687,7 +667,7 @@ class AgentToolRegistry:
         effect_checkpoint("preparing")
         from .job_filters import evaluate_filter, filter_digest, validate_filter
         from .salary_conditions import normalized_search_filters
-        from ..growth.requests import resume_stamp
+        from ..memory.resume_identity import resume_stamp
         context = active_run()
         if context is None:
             raise PreflightRefused("重新筛选需要当前会话")
@@ -733,41 +713,10 @@ class AgentToolRegistry:
         update = JobPreferenceUpdate(**args)
         return self.candidate_state.update_confirmed(update).preferences.model_dump(mode="json")
 
-    async def _learning_plan_generate(self, args: dict[str, Any]) -> Any:
-        if self.learning_plans is None:
-            raise ValueError("学习计划工具未启用")
-        scope = {key: args[key] for key in ("min_score", "max_score", "salary_min") if key in args}
-        authority = active_run().action_authority if active_run() else None
-        task_id = authority.get("evidence_task_id") if authority else None
-        previous = (active_run().dialogue or {}).get("learning_request") if active_run() else None
-        if not authority and previous:
-            from ..growth.requests import continued_plan_scope, resume_stamp
-            if continued_plan_scope(active_run().dialogue or {}, active_run().user_message,
-                    resume_stamp(self.resume_workspace.read_document(), self.candidate_state)) is not None:
-                task_id = previous.get("task_id")
-        if scope:
-            candidate = self.candidate_state.read().profile
-            if not candidate.resume_id:
-                raise PreflightRefused("请先上传并启用一份主简历")
-            from ..memory.resume_workspace import resume_document_digest
-            eligible = self.jobs.jobs_for_resume_analysis(candidate.resume_id, limit=20, task_id=task_id,
-                resume_digest=resume_document_digest(self.resume_workspace.read_document()), **scope) if candidate.resume_id else []
-            if not any(len(str(job["description"] or "").strip()) >= 40 for job in eligible):
-                from ..growth.requests import resume_stamp
-                user_message = active_run().user_message if active_run() else args.get("focus", "")
-                dialogue_change("learning_request", message=previous["message"] if previous and not is_explicit_plan_request(user_message) else user_message,
-                    resume_stamp=resume_stamp(self.resume_workspace.read_document(), self.candidate_state), scope=scope, task_id=task_id)
-                raise MissingPlanScope("指定分数和薪资条件内没有当前简历的有效 JD，没有生成计划；不会擅自扩大范围。可调整分数范围，例如「那就90分以下的」；其他筛选条件和原生成请求保留。")
-        dialogue_change("learning_consume")  # Consumed before the model call: failures never replay.
-        result = await self.learning_plans.generate(str(args.get("focus") or "")[:400], task_id=task_id, **scope)
-        if result.get("id"):
-            dialogue_change("snapshot", topic="learning", kind="plan", displayed=False,
-                items=[{"id": result["id"], "title": result.get("title", "学习计划")}])
-        return result
 
     def _delivery_arguments(self, args: dict) -> dict:
         from ..workflow.delivery_scope import materialize_delivery_scope
-        from ..growth.requests import resume_stamp
+        from ..memory.resume_identity import resume_stamp
         context = active_run()
         previous = (context.dialogue or {}).get("delivery_scope") if context else None
         if context and context.action_authority and "scope_mode" not in args:
@@ -782,7 +731,7 @@ class AgentToolRegistry:
     async def _interview_preparation_generate(self, args: dict) -> dict:
         selected = await self._resolve_job_targets(args)
         if len(selected["items"]) != 1:
-            raise TargetClarification("请先选择一个目标岗位生成面试准备；其他搜索、投递和成长计划结果保留。")
+            raise TargetClarification("请先选择一个目标岗位生成面试准备；其他搜索和投递结果保留。")
         return await self.interview_preparations.generate(selected["items"][0]["id"], str(args.get("focus") or ""))
 
     async def _interview_preparations_read(self, args: dict) -> dict:
@@ -842,7 +791,7 @@ class AgentToolRegistry:
         result = await self.mock_workflow.queue_deliveries(**kwargs)
         if (not selector and not args.get("target_step_id") and self.candidate_state is not None
                 and self.resume_workspace is not None and not result.get("binding")):
-            from ..growth.requests import resume_stamp
+            from ..memory.resume_identity import resume_stamp
             dialogue_change("delivery_scope", scope={"id": uuid.uuid4().hex,
                 "session_id": context.session_id,
                 "resume_stamp": resume_stamp(self.resume_workspace.read_document(), self.candidate_state),
@@ -1127,7 +1076,8 @@ class AgentToolRegistry:
         self.validate_arguments(target.parameters, args["arguments"])
         if args["arguments"].get("dry_run"):
             raise ValueError("通用确认不能授权搜索后的自动沟通与投递；请明确请求模拟试运行")
-        topic = {"job_search_start": "search", "learning_plan_generate": "learning", "resume_propose_patch": "resume"}[target.name]
+        topic = {"job_search_start": "search", "resume_propose_patch": "resume",
+                 "interview_preparation_generate": "applications"}[target.name]
         context = active_run()
         state = dialogue_change("propose", topic=topic, **args, conditions=context.search_state or {})
         dialogue_change("question", topic=topic, question=f"是否执行：{args['description']}？", missing_slots=["confirmation"])

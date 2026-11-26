@@ -175,7 +175,7 @@ async def plan_request(llm, registry, message: str, *, dialogue: dict, condition
             "你是AutoHunt任务解释器，只输出符合schema的JSON，不调用工具。"
             "active_plan是正在执行的原计划。用户追加后续动作或修改条件时operation=revise，revision按revision_schema输出。"
             "plan_id与expected_revision由应用按本次读取的计划快照绑定，你不要填写或推测；dialogue.revision是对话版本，不是计划版本。只描述需要修改的步骤与参数。"
-            "已有步骤改参数用updates，更新未执行步骤的前置关系用updates.depends_on，追加动作用add_steps；原任务只有搜索也可追加投递/分析/成长计划，并依赖原搜索完成。不要重复原已执行步骤。"
+            "已有步骤改参数用updates，更新未执行步骤的前置关系用updates.depends_on，追加动作用add_steps；原任务只有搜索也可追加投递或分析，并依赖原搜索完成。不要重复原已执行步骤。"
             "正在搜索时更新参数会暂存并暂停；继续时安全结束旧只读搜索并按新参数启动，保留旧结果，不会原地修改旧浏览器请求。"
             "active_plan的staged_arguments是已确认但暂未激活的最新条件；继续修改时继承它，不回退到旧arguments。"
             "取消尚未执行的单个分支用remove_steps中的原步骤ID，保留其他分支；已执行步骤只能引用其结果，不能删除或重放。"
@@ -240,9 +240,8 @@ async def plan_request(llm, registry, message: str, *, dialogue: dict, condition
             "用户本轮修改搜索条件并要求对已有结果投递时，不能只生成mock_delivery_start：先search_state_update保存完整新条件树，再job_results_refilter刷新已有JD，投递依赖refilter。"
             "若需要新增候选则按新条件job_search_start，后续依赖搜索；若条件未变化且仅要求投递可直接投递。省略的条件继承，明确修改的条件必须覆盖旧树对应要求，不能丢失。"
             "保留条件否定与组合逻辑，不把不要外包理解成取消搜索；缺JD证据不能猜符合。"
-            "搜索异步，结果读取/总结、投递、成长计划依赖搜索真正完成。默认每次新搜索后生成job_results_read(summary=true)。"
-            "成长/学习/提升计划同义，分析不足并更新成长计划可由learning_plan_generate输出。"
-            "面试预测/面试准备使用interview_preparation_generate，按用户所指岗位selector生成可能问题、追问和准备要点；不是投递，不改变搜索或成长计划，缺岗位对象时只追问该分支。"
+            "搜索异步，结果读取/总结、投递依赖搜索真正完成。默认每次新搜索后生成job_results_read(summary=true)。"
+            "面试预测/面试准备使用interview_preparation_generate，按用户所指岗位selector生成可能问题、追问和准备要点；不是投递，不改变搜索条件，缺岗位对象时只追问该分支。"
             "简历修改只生成提案，不接受提案或直接改主简历。长期偏好更新与会话搜索条件调整分开。"
             "继续/重试指向有效原任务；补充范围或修改条件更新原任务，不把短句替换原始需求。"
             "必要用户信息缺失填对应步骤的missing_slots和questions；独立且参数完整的分支可以执行，不用全局questions阻断它们。工具JSON问题由系统修复，不要求用户说固定短语。"
@@ -412,7 +411,7 @@ def _validate_draft(draft: RequestDraft, registry, message: str, *, dialogue: di
     refreshes = [step for step in steps if step["tool"] == "job_results_refilter"]
     # A condition write invalidates old decisions. This is a data dependency,
     # not another interpretation of the user's language or an authorization gate.
-    if updates and not searches and not refreshes and any(step["tool"] in {"mock_delivery_start", "learning_plan_generate"} for step in steps):
+    if updates and not searches and not refreshes and any(step["tool"] == "mock_delivery_start" for step in steps):
         key = "refilter_results"
         while any(step["id"] == key for step in steps):
             key += "_"
@@ -540,8 +539,6 @@ def _validate_draft(draft: RequestDraft, registry, message: str, *, dialogue: di
                 raise PlanValidationError("invalid_search_state", "搜索参数类型或范围无效，请修正规划", tool=name) from exc
             if len(searches) <= 1 and not step.get("unresolved_arguments"):
                 verified_conditions.update(patch)
-        if name == "learning_plan_generate" and not args.get("focus"):
-            args["focus"] = (step["scope_quote"] or step["command_quote"] or original)[:400]
         if name == "resume_propose_patch" and not args.get("instruction"):
             args["instruction"] = (step["command_quote"] or original)[:spec.parameters["properties"]["instruction"].get("maxLength", 2000)]
         if name == "mock_delivery_start":

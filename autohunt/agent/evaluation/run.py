@@ -43,7 +43,7 @@ from app.workflow.validation import PlanValidationError, preflight, preflight_wa
 
 ROOT = Path(__file__).resolve().parents[1]
 REGISTRY = AgentToolRegistry(jobs=None, browser=None, candidate_state=None,
-    resume_workspace=None, memory=None, learning_plans=NS(), mock_workflow=NS())
+    resume_workspace=None, memory=None, mock_workflow=NS())
 
 
 class ContractFailure(AssertionError):

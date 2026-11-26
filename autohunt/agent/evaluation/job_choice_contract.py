@@ -41,7 +41,7 @@ class Choices(TargetFixtures):
         self.registry.resume_workspace = NS(read_document=lambda: self.document)
         self.runtime_store = RunStore(Path(self.temp.name) / "runtime.db")
         self.run, _ = self.runtime_store.create("default", "synthetic-choice", "chat", {"message": self.context.user_message})
-        self.runtime = AgentRuntime(self.runtime_store, NS(candidate_state=self.registry.candidate_state), self.jobs, NS(), None, self.registry.resume_workspace)
+        self.runtime = AgentRuntime(self.runtime_store, NS(candidate_state=self.registry.candidate_state), self.jobs, NS(), self.registry.resume_workspace)
         self.scheduled = []
         self.runtime.schedule = lambda run_id, **kw: self.scheduled.append((run_id, kw))
 

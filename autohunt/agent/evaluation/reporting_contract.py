@@ -39,12 +39,12 @@ def fixture():
     delivery = {"id": "delivery", "tool": "mock_delivery_start", "arguments": {"min_score": 85},
                 "status": "completed", "depends_on": ["search"],
                 "result": {"message": "合成投递已入队，不是已投递"}}
-    growth = {"id": "growth", "tool": "learning_plan_generate", "arguments": {"max_score": 84},
+    analysis = {"id": "analysis", "tool": "job_stats_read", "arguments": {},
               "status": "completed", "depends_on": ["search"],
-              "result": {"title": "合成成长计划", "jobs_analyzed": 1, "summary": "补充财务建模证据"}}
+              "result": {"message": "补充财务建模证据"}}
     plan = {"id": "synthetic-plan", "original": "合成搜索及后续动作", "answers": [], "questions": [],
             "resume_stamp": "synthetic-resume", "turn": 1, "expires_at": time.time() + 60,
-            "status": "finished", "goals": [], "steps": [search, summary, delivery, growth]}
+            "status": "finished", "goals": [], "steps": [search, summary, delivery, analysis]}
     event = {"kind": "browser_summary", "data": {"task_id": browser.id, "report_rendered": True}}
     return browser, report, plan, event
 
@@ -114,7 +114,7 @@ class RuntimePublicationContracts(unittest.IsolatedAsyncioTestCase):
             self.messages.setdefault(kwargs["run_id"], text)
 
         self.jobs = NS(search_report=report, add_conversation_message=message)
-        self.runtime = AgentRuntime(self.store, NS(tool_registry=NS()), self.jobs, None, None, None)
+        self.runtime = AgentRuntime(self.store, NS(tool_registry=NS()), self.jobs, None, None)
 
     async def asyncTearDown(self):
         TRACES.append({"test": self.id(), "events": self.store.public_events(self.run["id"]),

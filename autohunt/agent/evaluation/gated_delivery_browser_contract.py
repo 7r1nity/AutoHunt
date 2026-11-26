@@ -100,7 +100,7 @@ async def run():
                 jobs.enqueue_mock_deliveries([jobs.get_job(i) for i in ids], session_id="default", resume_stamp="synthetic",
                     binding=binding, min_score=0, scope_evidence={i: {"delivery_flow": "direct"} for i in ids})
                 started = time.monotonic()
-                with patch("app.growth.requests.resume_stamp", return_value="synthetic"):
+                with patch("app.memory.resume_identity.resume_stamp", return_value="synthetic"):
                     for _ in ids:
                         await coordinator.process_delivery_queue()
                         await service.worker

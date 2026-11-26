@@ -7,13 +7,14 @@ import { RuntimePanel } from "@/components/runtime-panel";
 import { MetricsDashboard } from "@/components/metrics-dashboard";
 import { JobTargetChoices } from "@/components/job-target-choices";
 import { InterviewPreparation } from "@/components/interview-preparation";
+import { ApplicationExport } from "@/components/application-export";
 import { WorkspaceIcon } from "@/components/workspace-icon";
 import { interruptionCommand, terminalRun } from "@/lib/agent-runtime";
 import { createChatTurn, createMessageId } from "@/lib/chat-message";
 import { chatDisplay } from "@/lib/chat-display";
 import { inventoryRequest, inventoryError } from "@/lib/inventory-request";
 import { shortJobDate } from "@/lib/job-display";
-import type { AgentStatus, AutomationStats, BrowserTask, CandidateMaterial, CandidateState, ClarifyOption, DeliveryPreview, DeliveryTask, Insights, Job, JobStage, LearningPlan, Material, MaterialIngestResult, DocumentIngestResult, Message, MockWorkflowSettings, ResumeDocumentMeta, ResumeIngestResult, ResumeProfile, ResumeProposal, SearchReport } from "@/lib/types";
+import type { AgentStatus, AutomationStats, BrowserTask, CandidateMaterial, CandidateState, ClarifyOption, DeliveryPreview, DeliveryTask, Insights, Job, JobStage, Material, MaterialIngestResult, DocumentIngestResult, Message, MockWorkflowSettings, ResumeDocumentMeta, ResumeIngestResult, ResumeProfile, ResumeProposal, SearchReport } from "@/lib/types";
 
 const stageMeta: Record<JobStage, { title: string; hint: string }> = {
   review: { title: "待审核", hint: "待人工核验或确认；结果不确定时禁止重发" },
@@ -34,7 +35,6 @@ const navItems = [
   ["profile", "◫", "简历"],
   ["insights", "⌗", "统计"],
   ["metrics", "✓", "验收与指标"],
-  ["plans", "✓", "成长计划"],
   ["settings", "⚙", "模型设置"],
 ] as const;
 
@@ -45,7 +45,6 @@ const viewDescriptions = {
   profile: "让你的简历和真实经历，成为 Agent 理解你的起点。",
   insights: "从已核对的职位中，了解薪资与岗位要求。",
   metrics: "查看每轮执行的状态与开销，追溯异常和历史评测。",
-  plans: "把岗位差距转化为学习与实践。",
   settings: "管理模型配置与模拟站的工作方式。",
 };
 
@@ -436,14 +435,6 @@ export default function Home() {
   const [workflowNotice, setWorkflowNotice] = useState("");
   const [automationStats, setAutomationStats] = useState<AutomationStats>({ discovered: 0, stored: 0, duplicates: 0, matched: 0, review: 0, applying: 0, waiting: 0, interview: 0, indeterminate: 0, dry_run_candidates: 0, dry_run_contacted: 0, dry_run_replied: 0, dry_run_submitted: 0, dry_run_waiting_reply: 0, dry_run_failed: 0 });
   const [insights, setInsights] = useState<Insights | null>(null);
-  const [learningPlans, setLearningPlans] = useState<LearningPlan[]>([]);
-  const [planBusy, setPlanBusy] = useState(false);
-  const [planNotice, setPlanNotice] = useState("");
-  const [planFocus, setPlanFocus] = useState("");
-  const [completionEvidence, setCompletionEvidence] = useState<Record<string, string>>({});
-  const [completionTargets, setCompletionTargets] = useState<Record<string, "skill" | "project" | "none">>({});
-  const [completionTitles, setCompletionTitles] = useState<Record<string, string>>({});
-  const [planProposals, setPlanProposals] = useState<Record<string, ResumeProposal>>({});
   const uploadRef = useRef<HTMLInputElement>(null);
   const materialUploadRef = useRef<HTMLInputElement>(null);
   const chatUploadRef = useRef<HTMLInputElement>(null);
@@ -544,7 +535,6 @@ export default function Home() {
       if (event.kind === "browser_summary") void fetchInsights();
       if (event.kind === "workflow_summary") {
         void fetchInsights();
-        if (event.data.plans_changed) void fetchLearningPlans();
       }
       if (event.kind === "delivery") {
         const task = event.data.task as DeliveryTask | undefined;
@@ -632,12 +622,6 @@ export default function Home() {
     void fetchInsights();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeView]);
-
-  useEffect(() => {
-    if (activeView !== "plans") return;
-    void fetchLearningPlans();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeView, candidateState?.profile.resume_id]);
 
   useEffect(() => {
     let cancelled = false;
@@ -790,78 +774,6 @@ export default function Home() {
     } catch {
       // Statistics stay on the last loaded snapshot while the backend restarts.
     }
-  }
-
-  async function fetchLearningPlans() {
-    try {
-      const [plansResponse, proposalsResponse] = await Promise.all([
-        fetch("/api/agent/learning-plans", { cache: "no-store" }),
-        fetch("/api/agent/resume-proposals?status=pending", { cache: "no-store" }),
-      ]);
-      if (!plansResponse.ok) throw new Error("学习计划读取失败，请确认后端已启动");
-      setLearningPlans(await plansResponse.json() as LearningPlan[]);
-      if (proposalsResponse.ok) {
-        const pending = await proposalsResponse.json() as ResumeProposal[];
-        setPlanProposals(Object.fromEntries(pending.map((item) => [item.id, item])));
-      }
-    } catch (error) {
-      setPlanNotice(error instanceof Error ? error.message : "学习计划读取失败");
-    }
-  }
-
-  async function generateLearningPlan() {
-    if (!window.confirm("将当前简历正文和本简历搜索命中的最多 20 份 JD 发送给已配置模型，分析岗位差距并生成学习计划。继续吗？")) return;
-    setPlanBusy(true);
-    setPlanNotice("正在核对 JD 原文并生成逐步计划；模型响应较慢时最长等待约 90 秒…");
-    try {
-      const payload = await runtime.execute("learning_plan", { focus: planFocus.trim() }, (event) => {
-        if (typeof event.data.detail === "string") setPlanNotice(event.data.detail);
-      }) as Partial<LearningPlan>;
-      setLearningPlans((current) => [payload as LearningPlan, ...current]);
-      setPlanNotice(`已生成 ${payload.gaps?.length ?? 0} 项有 JD 原文依据的学习任务。`);
-    } catch (error) {
-      setPlanNotice(error instanceof Error ? error.message : "生成计划失败");
-    } finally { setPlanBusy(false); }
-  }
-
-  async function completeLearningGap(planId: string, gapId: string, defaultTarget: "skill" | "project" | "none") {
-    const evidence = (completionEvidence[gapId] ?? "").trim();
-    const resumeTarget = completionTargets[gapId] ?? defaultTarget;
-    if (evidence.length < 30) { setPlanNotice("请先写至少 30 字的真实完成证据；仅勾选不能证明已经掌握。 "); return; }
-    if (!window.confirm("标记完成并保存这段实践证据？若补充简历，会先生成可审核的修改提案。")) return;
-    setPlanBusy(true);
-    try {
-      const response = await fetch(`/api/agent/learning-plans/${planId}/gaps/${gapId}/complete`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ evidence, resume_target: resumeTarget, project_title: completionTitles[gapId] ?? "" }),
-      });
-      const payload = await response.json();
-      if (!response.ok) throw new Error(payload.detail ?? "标记完成失败");
-      setLearningPlans((current) => current.map((item) => item.id === planId ? payload.plan as LearningPlan : item));
-      if (payload.resume_proposal) {
-        const proposal = payload.resume_proposal as ResumeProposal;
-        setPlanProposals((current) => ({ ...current, [proposal.id]: proposal }));
-      }
-      setPlanNotice(payload.resume_proposal ? "已标记完成；下方简历补充提案待你审核。" : "已标记完成，主简历未被修改。");
-    } catch (error) {
-      setPlanNotice(error instanceof Error ? error.message : "标记完成失败");
-    } finally { setPlanBusy(false); }
-  }
-
-  async function decideLearningProposal(proposal: ResumeProposal, decision: "approve" | "reject") {
-    setPlanBusy(true);
-    try {
-      const response = await fetch("/api/agent/resume-proposals", {
-        method: "PUT", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id: proposal.id, decision, operation_ids: proposal.operations.map((item) => item.id) }),
-      });
-      const payload = await response.json();
-      if (!response.ok) throw new Error(payload.detail ?? "处理简历提案失败");
-      if (decision === "approve" && payload.candidate_state) setCandidateState(payload.candidate_state);
-      setPlanProposals((current) => { const next = { ...current }; delete next[proposal.id]; return next; });
-      setPlanNotice(decision === "approve" ? "已审核并写入主简历新版本。" : "已拒绝补充，主简历保持不变。 ");
-    } catch (error) { setPlanNotice(error instanceof Error ? error.message : "处理简历提案失败"); }
-    finally { setPlanBusy(false); }
   }
 
   async function stopAgent() {
@@ -1543,10 +1455,6 @@ export default function Home() {
           const stateResponse = await fetch("/api/agent/candidate-state", { cache: "no-store" });
           if (stateResponse.ok) setCandidateState(await stateResponse.json());
         }
-        if (payload.lane === "growth" && /(?:生成|制定|创建|规划|做一份)(?:.{0,12})(?:学习计划|行动方案)/.test(value)) {
-          await fetchLearningPlans();
-          setActiveView("plans");
-        }
       }
     } catch (error) {
       responseText = error instanceof Error ? error.message : "连接已中断，请查看运行记录";
@@ -1851,7 +1759,7 @@ export default function Home() {
                     <div className="chat-starters">
                       <button onClick={() => setChatText("帮我找15份工作，上海或深圳，月薪15k以上")}><WorkspaceIcon name="search" /><strong>找到适合的岗位</strong><small>告诉我城市、薪资和方向</small></button>
                       <button onClick={() => setChatText("查看当前申请进度")}><WorkspaceIcon name="board" /><strong>跟进我的申请</strong><small>查看沟通与投递进展</small></button>
-                      <button onClick={() => setChatText("根据最近的 JD 和我的简历，分析差距并生成成长计划")}><WorkspaceIcon name="plans" /><strong>规划下一步成长</strong><small>从岗位要求找到提升方向</small></button>
+                      <button onClick={() => setChatText("查看已保存的面试准备")}><WorkspaceIcon name="interview" /><strong>准备下一场面试</strong><small>根据岗位与简历梳理可能问题</small></button>
                     </div>
                     <small className="starter-hint">点击填入消息，确认后再发送。</small>
                   </div>}
@@ -1953,7 +1861,7 @@ export default function Home() {
                     <button onClick={() => setChatText("根据我选择的岗位生成针对性简历")}>生成针对性简历</button>
                     <button onClick={() => setChatText("我在实习中完成了一个项目：请把下面的经历加入简历，并提取技能与成果：")}>描述经历并更新简历</button>
                     <button onClick={() => setChatText("查看当前申请进度")}>查看申请进度</button>
-                    <button onClick={() => setChatText("根据最近的 JD 生成学习计划")}>生成学习计划</button>
+                    <button onClick={() => setChatText("为第1个岗位预测面试问题")}>准备岗位面试</button>
                   </div>
                   <form className="composer" onSubmit={sendMessage}>
                     <button type="button" onClick={() => chatUploadRef.current?.click()} aria-label="上传简历或候选人材料"><WorkspaceIcon name="plus" /></button>
@@ -1993,13 +1901,13 @@ export default function Home() {
               {activeView === "overview" && <aside className="panel next-actions">
                 <div className="panel-heading"><h2>继续你的求职准备</h2></div>
                 <button onClick={() => setActiveView("profile")}><WorkspaceIcon name="profile" /><div><strong>完善简历与经历</strong><small>上传材料，核对并更新主简历</small></div><WorkspaceIcon name="arrow" /></button>
-                <button onClick={() => setActiveView("plans")}><WorkspaceIcon name="plans" /><div><strong>查看成长计划</strong><small>让岗位差距变成下一步实践</small></div><WorkspaceIcon name="arrow" /></button>
+                <button onClick={() => setActiveView("board")}><WorkspaceIcon name="interview" /><div><strong>准备岗位面试</strong><small>打开岗位详情，生成面试准备</small></div><WorkspaceIcon name="arrow" /></button>
                 <button onClick={() => setActiveView("settings")}><WorkspaceIcon name="settings" /><div><strong>检查模型配置</strong><small>配置理解、分析与规划所用的模型</small></div><WorkspaceIcon name="arrow" /></button>
               </aside>}
             </section>}
 
             {activeView === "board" && <section className="board-section panel standalone-board">
-              <div className="section-heading"><div><h2>每一份申请，都有下一步</h2><div className="board-actions"><button className="button secondary compact" onClick={() => void importMockJob()}>导入模拟职位</button><button className="button secondary compact" disabled={workflowBusy} onClick={() => void syncMockWorkflow()}>同步模拟站会话</button></div></div><div className="legend"><span><i className="auto" />允许自动投递</span><span><i />需要人工确认</span><span className="click-hint">点击卡片查看详情</span></div></div>
+              <div className="section-heading"><div><h2>每一份申请，都有下一步</h2><div className="board-actions"><button className="button secondary compact" onClick={() => void importMockJob()}>导入模拟职位</button><button className="button secondary compact" disabled={workflowBusy} onClick={() => void syncMockWorkflow()}>同步模拟站会话</button><ApplicationExport /></div></div><div className="legend"><span><i className="auto" />允许自动投递</span><span><i />需要人工确认</span><span className="click-hint">点击卡片查看详情</span></div></div>
               {workflowNotice && <p className="workflow-feedback">{workflowNotice}</p>}
               <div className="kanban">
                 {boardStages.map((stage) => (
@@ -2017,7 +1925,7 @@ export default function Home() {
                           {job.stage === "review" && <button className="reject" onClick={(event) => { event.stopPropagation(); rejectJob(job.id); }}>跳过这个职位</button>}
                         </article>
                       ))}
-                      {jobs.filter((job) => inBoardStage(job, stage)).length === 0 && <div className="empty-state board-empty"><WorkspaceIcon name={stage === "review" ? "search" : stage === "interview" ? "plans" : "board"} /><strong>{stage === "review" ? "等待发现好机会" : "还没有申请到这一步"}</strong><p>{stage === "review" ? "搜索后的待审核职位及结果待核验的申请会显示在这里。" : stageMeta[stage].hint}</p></div>}
+                      {jobs.filter((job) => inBoardStage(job, stage)).length === 0 && <div className="empty-state board-empty"><WorkspaceIcon name={stage === "review" ? "search" : stage === "interview" ? "interview" : "board"} /><strong>{stage === "review" ? "等待发现好机会" : "还没有申请到这一步"}</strong><p>{stage === "review" ? "搜索后的待审核职位及结果待核验的申请会显示在这里。" : stageMeta[stage].hint}</p></div>}
                     </div>
                   </div>
                 ))}
@@ -2163,39 +2071,6 @@ export default function Home() {
           </section>
         )}
 
-        {activeView === "plans" && (
-          <section className="detail-layout learning-page">
-            <RuntimePanel runtime={runtime} notice={setPlanNotice} onInspect={openMetrics} />
-            <div className="panel plan-header">
-              <div><span className="eyebrow">依据当前简历与岗位要求</span><h2>成长计划</h2><p>对照当前主简历与真实 JD，优先分析专业技术、行业知识和实习方向。明确点击后才调用模型生成计划；岗位原文可追溯，完成时需提交实践证据。</p></div>
-              <div className="plan-generate"><input aria-label="计划关注方向" value={planFocus} maxLength={400} onChange={(event) => setPlanFocus(event.target.value)} placeholder="可选：本次优先关注的岗位或方向" /><button className="button primary" disabled={planBusy || !candidateState?.profile.resume_id} onClick={() => void generateLearningPlan()}>{planBusy ? "处理中…" : "分析差距并生成计划"}</button></div>
-            </div>
-            {planNotice && <div className="panel workflow-feedback">{planNotice}</div>}
-            {!learningPlans.length && <div className="panel empty-state">暂无当前简历的学习计划。先完成职位搜索，再点击上方按钮；不会凭空生成技能差距。</div>}
-            {learningPlans.map((plan) => (
-              <article className="panel learning-plan" key={plan.id}>
-                <div className="learning-plan-head"><div><span className="eyebrow">{new Date(plan.created_at).toLocaleDateString("zh-CN")} · {plan.jobs_analyzed} 份 JD · 简历 v{plan.resume_version}</span><h3>{plan.title}</h3><p>{plan.summary}</p></div><strong>{plan.gaps.filter((gap) => gap.status === "completed_user_reported").length}/{plan.gaps.length} 已完成</strong></div>
-                <div className="learning-gap-list">{plan.gaps.map((gap) => {
-                  const target = completionTargets[gap.id] ?? gap.resume_target;
-                  const proposal = gap.resume_proposal_id ? planProposals[gap.resume_proposal_id] : undefined;
-                  return <div className="learning-gap" key={gap.id}>
-                    <div className="learning-gap-head"><div><small>{gap.category === "internship_direction" ? "实习方向" : gap.category === "technical_skill" ? "专业技术" : gap.category === "domain_knowledge" ? "行业知识" : "职业能力"} · {gap.priority === "high" ? "高优先级" : gap.priority === "medium" ? "中优先级" : "补充项"}</small><h4>{gap.name}</h4></div><span>{gap.status === "completed_user_reported" ? "已标记完成" : `${gap.estimated_hours} 小时`}</span></div>
-                    <p>{gap.rationale}</p>
-                    <p className="learning-assessment">{gap.assessment === "resume_not_shown" ? "当前简历未体现，不能据此断定不会" : `简历已有证据：${gap.resume_quote}`}</p>
-                    <div className="learning-jd"><strong>JD 原文依据 · {gap.frequency} 个岗位</strong>{gap.jd_quotes.map((quote, index) => {
-                      const source = plan.job_sources.find((job) => job.id === quote.job_id);
-                      return <p key={`${quote.job_id}-${index}`}>#{quote.job_id} {source && /^https?:\/\//.test(source.source_url) ? <a href={source.source_url} target="_blank" rel="noreferrer">{source.title}</a> : source?.title ?? "岗位"}：{quote.quote}</p>;
-                    })}</div>
-                    <details><summary>查看详细学习任务与验收标准</summary><div className="learning-detail"><p><strong>目标：</strong>{gap.objective}</p>{gap.prerequisites.length > 0 && <p><strong>前置知识：</strong>{gap.prerequisites.join("、")}</p>}<ol>{gap.steps.map((step, index) => <li key={index}>{step}</li>)}</ol><p><strong>实践产物：</strong>{gap.practice}</p><strong>验收标准</strong><ul>{gap.acceptance.map((item, index) => <li key={index}>{item}</li>)}</ul></div></details>
-                    {gap.status === "todo" ? <div className="learning-complete"><label>完成证据：具体做了什么、产物与可验证结果<textarea value={completionEvidence[gap.id] ?? ""} onChange={(event) => setCompletionEvidence((current) => ({ ...current, [gap.id]: event.target.value }))} placeholder="不要只写‘已学会’。请描述练习、项目、产物、结果或链接。" /></label><div className="learning-complete-row"><label>写入简历<select value={target} onChange={(event) => setCompletionTargets((current) => ({ ...current, [gap.id]: event.target.value as "skill" | "project" | "none" }))}><option value="none">不补充</option><option value="skill">补充简洁技能</option><option value="project">补充项目经历</option></select></label>{target === "project" && <label>真实项目名称<input value={completionTitles[gap.id] ?? ""} onChange={(event) => setCompletionTitles((current) => ({ ...current, [gap.id]: event.target.value }))} placeholder="例如：信用风险评分模型" /></label>}<button className="button primary compact" disabled={planBusy} onClick={() => void completeLearningGap(plan.id, gap.id, gap.resume_target)}>标记完成</button></div></div> : <div className="learning-done">已保存你的完成说明；这属于用户报告，简历内容仍需审核。{gap.resume_proposal_id && !proposal && <span> 简历提案已处理或待刷新。</span>}</div>}
-                    {proposal && <div className="learning-proposal"><strong>简历补充提案 · 待审核</strong><p>{proposal.reason}</p>{proposal.operations.map((operation) => <div key={operation.id}><b>{operation.label}</b><ProposalValue value={operation.new_value} /></div>)}<div className="learning-complete-row"><button className="button secondary compact" disabled={planBusy} onClick={() => void decideLearningProposal(proposal, "reject")}>不写入简历</button><button className="button primary compact" disabled={planBusy} onClick={() => void decideLearningProposal(proposal, "approve")}>核对无误，写入简历</button></div></div>}
-                  </div>;
-                })}</div>
-              </article>
-            ))}
-          </section>
-        )}
-
         {activeView === "settings" && (
           <section className="detail-layout settings-layout">
             <div className="panel settings-hero">
@@ -2244,7 +2119,7 @@ export default function Home() {
           <div className="delivery-modal panel history-reset-modal">
             <span className="eyebrow">本地数据管理</span>
             <h2 id="history-reset-title">清除历史数据？</h2>
-            <p id="history-reset-description">清空所有会话、简历与上传材料、求职偏好与搜索条件、搜索记录、申请看板及成长计划。同时关闭监测和每日任务。</p>
+            <p id="history-reset-description">清空所有会话、简历与上传材料、求职偏好与搜索条件、搜索记录、申请看板与面试准备。同时关闭监测和每日任务。</p>
             <p>保留模型配置、API Key、浏览器登录、规则及技能。清理前自动备份到本地；有任务运行时不会清理。</p>
             {historyResetOptions?.mock_available && <label className="workflow-toggle history-reset-scope"><input type="checkbox" checked={historyResetMock} disabled={historyResetBusy} onChange={(event) => setHistoryResetMock(event.target.checked)} />同时清空模拟招聘网站的简历、沟通、投递和表单作答；保留账号与职位库</label>}
             {historyResetOptions && !historyResetOptions.mock_available && <p>未配置模拟站数据库：本次仅清空 AutoHunt，不会修改模拟网站。</p>}

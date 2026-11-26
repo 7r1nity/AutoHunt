@@ -26,6 +26,7 @@ MODULES = (
     "delivery_evidence_contract",
     "recovery_memory_contract",
     "systemic_repair_contract",
+    "application_export_contract", "application_export_api_contract", "removed_growth_contract", "retired_feature_migration_contract",
 )
 
 

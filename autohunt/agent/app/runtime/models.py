@@ -12,9 +12,8 @@ class SessionCreate(BaseModel):
 class RunCreate(BaseModel):
     conversation_id: str = Field(default="default", pattern=r"^[a-zA-Z0-9_-]{1,80}$")
     request_id: str = Field(pattern=r"^[a-zA-Z0-9_:-]{1,100}$")
-    kind: Literal["chat", "learning_plan"] = "chat"
+    kind: Literal["chat"] = "chat"
     message: str = Field(default="", max_length=4000)
-    focus: str = Field(default="", max_length=400)
 
     @model_validator(mode="after")
     def valid_message(self):
@@ -68,7 +67,7 @@ def public_run(run: dict) -> dict:
                            for step in ((run["checkpoint"] or {}).get("plan") or {}).get("steps", [])
                            if not run["cancel_requested"] and run["status"] not in {"completed", "failed", "cancelled", "timed_out", "interrupted", "outcome_indeterminate"}
                            and step.get("status") == "waiting_input" and step.get("target_choice", {}).get("status") == "pending"],
-        "can_resume": bool(run["status"] in {"waiting_user", "waiting_reply"} or (
+        "can_resume": bool(run["kind"] != "learning_plan" and (run["status"] in {"waiting_user", "waiting_reply"} or (
             run["status"] in {"interrupted", "timed_out", "failed"} and not run["mutation_started"] and (
-                run["kind"] == "learning_plan" or (run["checkpoint"] or {}).get("phase") == "tool_loop"))),
+                (run["checkpoint"] or {}).get("phase") == "tool_loop")))),
     })

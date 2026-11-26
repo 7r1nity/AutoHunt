@@ -166,14 +166,14 @@ class DurableCommandContracts(unittest.IsolatedAsyncioTestCase):
 
     async def test_remove_pending_branch_preserves_progress_and_cannot_be_resumed(self):
         self.enter()
-        update = edited_plan(self.value, RevisionDraft(plan_id="plan-1", expected_revision=0, remove_steps=["growth"]),
-            self.registry, stamp=STAMP, session_id="default", message="取消成长计划，保留搜索和投递")
+        update = edited_plan(self.value, RevisionDraft(plan_id="plan-1", expected_revision=0, remove_steps=["inspection"]),
+            self.registry, stamp=STAMP, session_id="default", message="取消明细复核，保留搜索和投递")
         self.assertEqual(update["steps"][:3], self.value["steps"][:3])
         removed = update["steps"][3]
         self.assertTrue(removed["withdrawn"])
         source = {**self.store.get(self.parent["id"]), "checkpoint": {"plan": update}}
         recovered = recover_plan(source, session_id="default", stamp=STAMP)
-        self.assertNotIn("growth", recovered.plan.get("recovery_pending", []))
+        self.assertNotIn("inspection", recovered.plan.get("recovery_pending", []))
 
     async def test_cycle_invalid_tools_and_changed_completed_step_remain_internal_errors(self):
         self.enter(); self.search_only()

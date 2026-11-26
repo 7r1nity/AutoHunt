@@ -46,7 +46,7 @@ class Contracts(unittest.IsolatedAsyncioTestCase):
         self.profile = NS(read=lambda: NS(profile=NS(resume_id="synthetic-resume")))
         self.document = NS(id="synthetic-document", version=1)
         self.registry = AgentToolRegistry(jobs=None, browser=None, candidate_state=self.profile,
-            resume_workspace=NS(read_document=lambda: self.document), memory=None, learning_plans=NS(), mock_workflow=NS())
+            resume_workspace=NS(read_document=lambda: self.document), memory=None, mock_workflow=NS())
         self.context = RunContext("synthetic-graph-run", asyncio.current_task(), lambda kind,data:self.events.append({"kind":kind,**data}), lambda _:None,
             search_state={"queries":["合成分析师"],"query_source":"session","source":"mock","result_limit":15,"locations":[]}, dialogue={})
         self.token = current_run.set(self.context)

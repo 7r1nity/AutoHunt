@@ -110,9 +110,9 @@ class PlanningContracts(unittest.IsolatedAsyncioTestCase):
     owned = Contracts.owned
     validate = Contracts.validate
 
-    async def test_growth_follows_search_not_the_reverse(self):
+    async def test_stats_follows_search_not_the_reverse(self):
         value = self.validate(draft([step("search", "job_search_start", deps=["grow"]),
-                                    step("grow", "learning_plan_generate")], ["grow"]))
+                                    step("grow", "job_stats_read")], ["grow"]))
         by_id = {item["id"]: item for item in value["steps"]}
         self.assertNotIn("grow", by_id["search"]["depends_on"])
         self.assertIn("search", by_id["grow"]["depends_on"])
@@ -128,7 +128,7 @@ class PlanningContracts(unittest.IsolatedAsyncioTestCase):
 
     async def test_indirect_reverse_needs_replanning_not_edge_deletion(self):
         nodes = [step("search", "job_search_start", deps=["read"]),
-                 step("read", "context_state_read", deps=["grow"]), step("grow", "learning_plan_generate")]
+                 step("read", "context_state_read", deps=["grow"]), step("grow", "job_stats_read")]
         with self.assertRaises(PlanValidationError):
             depend_on(nodes, nodes[2], nodes[0])
         self.assertEqual(nodes[0]["depends_on"], ["read"])
@@ -189,7 +189,7 @@ class PlanningContracts(unittest.IsolatedAsyncioTestCase):
 
     async def test_ambiguous_producer_does_not_select_first(self):
         value = self.validate(draft([step("s1", "job_search_start"), step("s2", "job_search_start"),
-                                    step("grow", "learning_plan_generate")], ["grow"]))
+                                    step("grow", "job_stats_read")], ["grow"]))
         input_waits(value)
         grow = next(item for item in value["steps"] if item["id"] == "grow")
         self.assertEqual(grow["status"], "waiting_input")
@@ -197,7 +197,7 @@ class PlanningContracts(unittest.IsolatedAsyncioTestCase):
 
     async def test_explicit_producer_kept_even_if_not_first(self):
         value = self.validate(draft([step("s1", "job_search_start"), step("s2", "job_search_start"),
-                                    step("grow", "learning_plan_generate", deps=["s2"])], ["grow"]))
+                                    step("grow", "job_stats_read", deps=["s2"])], ["grow"]))
         self.assertEqual(next(item for item in value["steps"] if item["id"] == "grow")["evidence_step"], "s2")
 
     async def test_dedup_does_not_merge_across_a_read_barrier(self):
@@ -219,7 +219,7 @@ class PlanningContracts(unittest.IsolatedAsyncioTestCase):
 
     async def test_resume_change_is_clarification_not_late_execution_failure(self):
         value = task_plan()
-        edit = RevisionDraft(plan_id=value["id"], expected_revision=0, updates=[{"step_id": "growth", "arguments": {"salary_min": 25000}}])
+        edit = RevisionDraft(plan_id=value["id"], expected_revision=0, updates=[{"step_id": "inspection", "arguments": {"limit": 20}}])
         with self.assertRaises(PlanValidationError) as raised:
             edited_plan(value, edit, self.registry, stamp="changed", session_id="default", message="合成修改")
         self.assertEqual(raised.exception.issue.category, "clarify")
@@ -240,25 +240,25 @@ class PlanningContracts(unittest.IsolatedAsyncioTestCase):
     async def test_repeated_revision_patches_merge_without_losing_fields(self):
         value = task_plan()
         edit = RevisionDraft(plan_id=value["id"], expected_revision=0, updates=[
-            {"step_id": "growth", "arguments": {"salary_min": 25000}},
-            {"step_id": "growth", "arguments": {"max_score": 84}}])
+            {"step_id": "inspection", "arguments": {"limit": 20}},
+            {"step_id": "inspection", "arguments": {"stage": "waiting"}}])
         result = edited_plan(value, edit, self.registry, stamp=STAMP, session_id="default", message="合成追加条件")
-        args = next(item for item in result["steps"] if item["id"] == "growth")["arguments"]
-        self.assertEqual(args["salary_min"], 25000)
-        self.assertEqual(args["max_score"], 84)
+        args = next(item for item in result["steps"] if item["id"] == "inspection")["arguments"]
+        self.assertEqual(args["limit"], 20)
+        self.assertEqual(args["stage"], "waiting")
 
     async def test_conflicting_revision_does_not_choose_first_or_last(self):
         value = task_plan()
         edit = RevisionDraft(plan_id=value["id"], expected_revision=0, updates=[
-            {"step_id": "growth", "arguments": {"salary_min": 25000}},
-            {"step_id": "growth", "arguments": {"salary_min": 35000}}])
+            {"step_id": "inspection", "arguments": {"limit": 20}},
+            {"step_id": "inspection", "arguments": {"limit": 30}}])
         with self.assertRaises(PlanValidationError) as raised:
             edited_plan(value, edit, self.registry, stamp=STAMP, session_id="default", message="合成条件冲突")
         self.assertEqual(raised.exception.issue.category, "clarify")
 
     async def test_completed_producer_receipt_cannot_be_rewritten(self):
         nodes = [dict(step("search", "job_search_start", deps=["grow"]), status="completed"),
-                 step("grow", "learning_plan_generate")]
+                 step("grow", "job_stats_read")]
         with self.assertRaises(PlanValidationError):
             depend_on(nodes, nodes[1], nodes[0])
         self.assertEqual(nodes[0]["depends_on"], ["grow"])
@@ -302,7 +302,7 @@ class ApprovalContracts(unittest.IsolatedAsyncioTestCase):
     async def test_cancellation_checked_at_shared_tool_gateway(self):
         self.enter()
         self.store.update(self.run["id"], cancel_requested=True)
-        self.assertEqual(self.registry.authorize("learning_plan_generate", {}).code, "task_cancelled")
+        self.assertEqual(self.registry.authorize("resume_propose_patch", {"instruction": "补充合成项目描述"}).code, "task_cancelled")
         self.assertEqual(self.registry.authorize("browser_task_stop", {}).decision, Decision.ALLOW)
 
     async def test_confirmation_card_creates_no_provider_or_background_task(self):
@@ -316,8 +316,8 @@ class ApprovalContracts(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.runtime.tasks)
 
     async def test_configured_strict_policy_still_applies_to_local_mutations(self):
-        self.assertEqual(ActionPolicy().evaluate("learning_plan_generate", {}, "write").decision, Decision.ALLOW)
-        self.assertEqual(ActionPolicy(AlwaysConfirm()).evaluate("learning_plan_generate", {}, "write").decision, Decision.REQUIRE_APPROVAL)
+        self.assertEqual(ActionPolicy().evaluate("resume_propose_patch", {"instruction": "补充合成项目描述"}, "write").decision, Decision.ALLOW)
+        self.assertEqual(ActionPolicy(AlwaysConfirm()).evaluate("resume_propose_patch", {"instruction": "补充合成项目描述"}, "write").decision, Decision.REQUIRE_APPROVAL)
 
     async def test_mock_trial_not_misrepresented_as_no_effect(self):
         self.assertEqual(grade_action("job_search_start", {"dry_run": True, "source": "mock"}, effect="external").risk, SecurityRisk.HIGH)

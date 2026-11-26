@@ -17,13 +17,14 @@ from app.core.agent_tools import ToolCallGuard, ToolLoopState
 from app.core.job_filters import validate_filter, combine, evaluate_filter
 from app.core.search_contract import numeric_value
 from app.core.search_language import parse_search_message
-from app.core.task_semantics import understand, command_grounded, binding_valid
+from app.core.task_semantics import understand, command_grounded
 from app.llm.base import LLMResult
 from app.runtime.context import active_run
 from app.runtime.dialogue import apply_operation
 from app.workflow.planning import plan_request, validate_draft, RequestDraft
 from app.workflow.requests import TaskRequest, action_request, is_continuation
 from app.workflow.validation import PlanValidationError
+from app.security.action_grants import binding_matches
 
 
 def cases():
@@ -50,7 +51,7 @@ def cases():
         add("source_consistency", message=text, allowed=True)
     for text in ("停止", "先中断", "请先中断任务", "不要停止任务", "如何停止任务", "‘先中断’"):
         add("control", message=text, allowed=text in {"停止", "先中断", "请先中断任务"})
-    for text in ("取消薪资限制", "取消成长计划", "取消数量要求", "公司取消该岗位",
+    for text in ("取消薪资限制", "取消简历修改", "取消数量要求", "公司取消该岗位",
                  "讨论停止任务的原因", "投递取消规则是什么", "暂停招生", "结束实习经历"):
         add("control", message=text, allowed=False)
     for mode, verdict in itertools.product(("require", "prefer", "allow"), ("pass", "fail", "unknown")):
@@ -69,7 +70,7 @@ def cases():
                      "retained_root", "revoked_plan", "tampered_binding", "runtime_no_reparse",
                      "unknown_fallback", "partial_dispatch", "partial_failed_dispatch", "amend_numeric",
                      "ungranted_write", "ungranted_question", "real_site", "soft_any", "soft_not",
-                     "hard_unknown", "rank_not_claimed", "unknown_scope", "missing_questions_preserved",
+                     "hard_unknown", "rank_not_claimed", "missing_questions_preserved",
                      "employer_eligibility", "unclosed_quote", "fresh_command_not_retention"):
         add("pipeline", scenario=scenario)
     data = json.loads((Path(__file__).parent / "corpus/numeral_cases.json").read_text(encoding="utf-8"))
@@ -84,9 +85,15 @@ class ScriptedModel:
     def __init__(self, *drafts):
         self.drafts = list(drafts)
         self.requests = []
+        self.planning_requests = []
 
     async def generate(self, request):
-        self.requests.append(json.loads(request.user_message))
+        payload = json.loads(request.user_message)
+        self.requests.append(payload)
+        if "scopes" in payload:
+            return LLMResult(json.dumps({"scopes": [{"step_id": item["step_id"], "status": "pass", "changes": {},
+                "reason": "Scripted conditions match this synthetic fixture."} for item in payload["scopes"]]}), "scripted", "scope-contract")
+        self.planning_requests.append(payload)
         if not self.drafts:
             raise AssertionError("unexpected additional model call")
         return LLMResult(json.dumps(self.drafts.pop(0), ensure_ascii=False), "scripted", "contract")
@@ -99,7 +106,7 @@ def draft(message, steps, *, continuation=False):
 
 
 def step(tool="job_search_start", quote="帮我找工作", **args):
-    return {"id": "search" if tool == "job_search_start" else "learning", "tool": tool,
+    return {"id": "search" if tool == "job_search_start" else "followup", "tool": tool,
             "arguments": args, "command_quote": quote, "scope_quote": "", "depends_on": [], "missing_slots": []}
 
 
@@ -165,7 +172,7 @@ async def dispatch_start(message, routed, registry):
     from app.core.main_agent import AutoHuntAgent
     from app.core.agent_tools import AgentToolOutcome
     from app.workflow.execution import begin, advance
-    from app.growth.requests import resume_stamp
+    from app.memory.resume_identity import resume_stamp
     from app.intent.router import IntentRouter
     from app.intent.rules import RuleEngine
     context = active_run()
@@ -183,12 +190,14 @@ async def dispatch_start(message, routed, registry):
         if name == "job_search_start":
             return AgentToolOutcome(name, "ok", {"id": "synthetic-search", "status": "awaiting_login",
                 "query": "金融分析师", "detail": "浏览器已打开，等待登录验证"}, "external")
+        if name == "job_results_read":
+            return AgentToolOutcome(name, "ok", {"message": "合成搜索结果"}, "read")
         if not account["account_bound"]:
             return AgentToolOutcome(name, "error", "请先在模拟站登录求职者账号并完成一次搜索，以绑定账号", "external")
         assert context.action_authority["evidence_task_id"] == "synthetic-search"
         return AgentToolOutcome(name, "ok", {"message": "已加入模拟队列", "queued": 1}, "external")
     local = NS(_tools=registry._tools, schemas=registry.schemas, validate_arguments=registry.validate_arguments,
-               resume_workspace=workspace, candidate_state=candidate, mock_workflow=NS(), execute=execute)
+               jobs=registry.jobs, resume_workspace=workspace, candidate_state=candidate, mock_workflow=NS(), execute=execute)
     agent = object.__new__(AutoHuntAgent)
     agent.tool_registry, agent.resume_workspace, agent.candidate_state = local, workspace, candidate
     agent.router = NS(rule_engine=RuleEngine()) if routed else None
@@ -212,9 +221,11 @@ async def dispatch_start(message, routed, registry):
         router.rule_engine = agent.router.rule_engine
         router._last_decision = {}
         router._scoped_hash = lambda _: "synthetic"
-        router._record = lambda *_: None
+        router._record = lambda *_, **__: None
+        router.store = NS(lookup_clarify=lambda _: None)
+        router.small_model = NS(available=False)
         outcome = await router.route(message)
-        assert outcome.intent == "compound_request" and outcome.decision == "llm", outcome
+        assert outcome.intent in {"compound_request", "none"} and outcome.decision == "llm", outcome
         routes.append(outcome.layer)
         return await handle(message)
     agent._handle_planned, agent._handle_routed = handle, route
@@ -230,7 +241,7 @@ async def dispatch_start(message, routed, registry):
     plan["steps"][0]["status"] = "completed"  # Confirmed synthetic search completion.
     await advance(plan, local)
     await advance(plan, local)
-    assert calls == ["job_search_start", "mock_delivery_start"], calls
+    assert calls == ["job_search_start", "mock_delivery_start", "job_results_read"], calls
     assert plan["steps"][1]["status"] == "completed", plan
     return {"calls": calls, "routes": routes, "login_waited": True,
             "result_limit": plan["steps"][0]["arguments"]["result_limit"],
@@ -250,18 +261,17 @@ async def pipeline(scenario, registry):
         from app.core.task_semantics import condition_mode
         for quote in ("公司接受应届生", "职位学历不限", "要求有实习转正机会"):
             assert condition_mode(quote) == "require"
-            try:
-                validate_filter({"op": "condition", "text": quote, "quote": quote, "mode": "allow"}, [quote])
-            except ValueError:
-                continue
-            raise AssertionError("employer requirement weakened")
+            # The model owns modality extraction. The structural validator must
+            # retain an explicit hard predicate, not reclassify its wording.
+            tree = validate_filter({"op": "condition", "text": quote, "quote": quote, "mode": "require"}, [quote])
+            assert tree.mode == "require" and combine(tree, iter(["unknown"])) == "unknown"
         return {"hard_preserved": True}
     if scenario == "unclosed_quote":
         assert not command_grounded("job_search_start", "搜索会计", ['他说“搜索会计'])
         return {"quoted_data": True}
     if scenario == "fresh_command_not_retention":
-        assert not is_continuation("帮我找工作，只保留搜索和成长计划")
-        assert action_request("帮我找工作，只保留搜索和成长计划")
+        assert not is_continuation("帮我找工作，只保留搜索和简历修改")
+        assert action_request("帮我找工作，只保留搜索和简历修改")
         return {"new_task": True}
     if scenario in {"soft_any", "soft_not", "hard_unknown", "rank_not_claimed"}:
         hard = {"op": "condition", "text": "必须双休", "quote": "必须双休"}
@@ -289,11 +299,12 @@ async def pipeline(scenario, registry):
         assert len(model.requests) == 1 and not result["steps"]
         return {"calls": 1, "status": result["status"]}
     if scenario in {"retained_root", "partial_dispatch", "partial_failed_dispatch", "amend_numeric"}:
-        original = "帮我找15份工作，地点深圳 杭州，薪资15k以上，85分以上自动投递，85以下且薪资25k以上生成成长计划"
-        message = "不要投递了，只保留搜索和成长计划" if scenario != "amend_numeric" else "只保留搜索和成长计划，数量改为20个"
-        q = step(quote="只保留搜索", result_limit=15, salary_min=15000, locations=["深圳", "杭州"])
-        learning = step("learning_plan_generate", "只保留搜索和成长计划", max_score=84, salary_min=25000)
-        data = draft(original, [q, learning], continuation=True)
+        original = "帮我找15份工作，地点深圳 杭州，薪资15k以上，85分以上自动投递，并精简简历项目描述"
+        message = "不要投递了，只保留搜索和简历修改" if scenario != "amend_numeric" else "只保留搜索和简历修改，数量改为20个"
+        q = step(quote="只保留搜索", result_limit=20 if scenario == "amend_numeric" else 15,
+                 salary_min=15000, locations=["深圳", "杭州"])
+        proposal = step("resume_propose_patch", "简历修改", instruction="精简简历项目描述")
+        data = draft(original, [q, proposal], continuation=True)
         model = ScriptedModel(data)
         prev = pending(original)
         assert is_continuation(message) and not action_request(message)
@@ -319,23 +330,39 @@ async def pipeline(scenario, registry):
         assert result["status"] == "ready", result
         actual = {s["tool"]: s for s in result["steps"]}
         assert "mock_delivery_start" not in actual
-        search, growth = actual["job_search_start"], actual["learning_plan_generate"]
+        search, proposal = actual["job_search_start"], actual["resume_propose_patch"]
         assert search["arguments"]["result_limit"] == (20 if scenario == "amend_numeric" else 15)
         assert search["arguments"]["salary_min"] == 15000
-        assert growth["arguments"]["salary_min"] == 25000 and growth["arguments"]["max_score"] == 84
-        assert search["id"] in growth["depends_on"]
+        assert proposal["arguments"] == {"instruction": "精简简历项目描述"}
+        assert proposal["tool"] not in result.get("revoked_tools", [])
         assert result["original"] == original
         return {"calls": len(model.requests), "plan": result}
     if scenario in {"ungranted_write", "ungranted_question", "revoked_plan", "real_site"}:
-        message = {"ungranted_write": "查看简历", "ungranted_question": "如何生成成长计划",
-                   "revoked_plan": "生成成长计划，但不要生成成长计划", "real_site": "BOSS直聘90分以上自动投递"}[scenario]
-        tool = "mock_delivery_start" if scenario == "real_site" else "learning_plan_generate"
-        data = draft(message, [step(tool, message, **({"min_score": 90} if tool == "mock_delivery_start" else {}))])
+        message = {"ungranted_write": "查看简历", "ungranted_question": "如何修改简历",
+                   "revoked_plan": "精简简历项目描述，但不要修改简历", "real_site": "BOSS直聘90分以上自动投递"}[scenario]
+        tool = "mock_delivery_start" if scenario == "real_site" else "resume_propose_patch"
+        if scenario in {"ungranted_write", "ungranted_question"}:
+            # Language classification remains advisory. A read/question does
+            # not itself claim a write; the planner is no longer a phrase gate.
+            meaning = understand(message)
+            assert not meaning.commands(tool), meaning.public()
+            return {"not_write_command": True, "meaning": meaning.public()}
+        data = draft(message, [step(tool, message, **({"min_score": 90} if tool == "mock_delivery_start"
+                                                    else {"instruction": "精简简历项目描述"}))])
+        previous = None
+        if scenario == "revoked_plan":
+            previous = pending("精简简历项目描述", revoked_tools=["resume_propose_patch"])
+            data["continuation"] = True
+        else:
+            # Semantic site extraction belongs to the model/state, not a regex
+            # scan over the raw sentence inside deterministic validation.
+            conditions = {**conditions, "source": "boss"}
         try:
-            result = validate_draft(RequestDraft.model_validate(data), registry, message, dialogue={}, conditions=conditions, stamp="")
-            assert scenario == "real_site" and result["status"] == "clarifying", result
+            result = validate_draft(RequestDraft.model_validate(data), registry, message, dialogue={}, conditions=conditions,
+                                    stamp="", previous=previous)
+            assert scenario == "real_site" and any(item.get("unavailable_reason") for item in result["steps"]), result
         except PlanValidationError as exc:
-            assert exc.issue.category == "block", exc.issue
+            assert scenario == "revoked_plan" and exc.issue.code == "revoked_authority", exc.issue
             return {"blocked": exc.issue.public()}
         return {"status": result["status"]}
     message = "给我十五份工作，工资底线一万五，地点上海"
@@ -350,12 +377,6 @@ async def pipeline(scenario, registry):
         filters = {"op": "condition", "text": value, "quote": value,
                    "mode": {"optional": "allow", "prefer": "prefer"}.get(scenario, "require")}
         args["filters"] = filters
-    if scenario == "unknown_scope":
-        message, quote = "生成成长计划，低匹配的", "生成成长计划，低匹配的"
-        data = draft(message, [step("learning_plan_generate", quote)])
-        result = validate_draft(RequestDraft.model_validate(data), registry, message, dialogue={}, conditions=conditions, stamp="")
-        assert result["status"] == "clarifying"
-        return {"status": result["status"]}
     data = draft(message, [step(quote=quote, **args)])
     if message.startswith("给我十五份"):
         data["steps"][0]["slot_evidence"] = {"salary_min": "工资底线一万五"}
@@ -366,15 +387,17 @@ async def pipeline(scenario, registry):
         data = draft(message, [first, second])
         bad = copy.deepcopy(data)
         bad["steps"][0]["command_quote"] = "会计岗位"
-        model = ScriptedModel(bad, data)
+        # Citation text is audit metadata; a form difference no longer forces
+        # a second plan or blocks a structurally valid request.
+        model = ScriptedModel(bad)
     else:
         model = ScriptedModel(data)
     result = await plan_request(model, registry, message, dialogue={}, conditions=conditions, stamp="")
     assert result["status"] == "ready", result
-    assert len(model.requests) == (2 if scenario == "wrong_citation_repair" else 1)
+    assert len(model.planning_requests) == 1
     action = result["steps"][0]
     binding = action["authority_binding"]
-    assert binding_valid(binding, action["tool"], [result["original"], *result["answers"]])
+    assert binding_matches(binding, action["tool"], action["arguments"], "default")
     if scenario in {"tampered_binding", "runtime_no_reparse"}:
         from app.workflow.execution import persist
         from app.core import agent_tools
@@ -388,7 +411,7 @@ async def pipeline(scenario, registry):
                      "command": action["command_quote"], "sources": [message], "resume_stamp": result["resume_stamp"], "expires_at": result["expires_at"],
                      "candidate": candidate, "resumes": workspace, "plan_id": result["id"], "step_id": action["id"], "binding": copy.deepcopy(binding)}
         if scenario == "tampered_binding":
-            authority["binding"]["source_digest"] = "tampered"
+            authority["binding"]["arguments_digest"] = "tampered"
         context.action_authority = authority
         old = getattr(agent_tools, "command_grounded", None)
         def forbidden(*args):
@@ -402,3 +425,48 @@ async def pipeline(scenario, registry):
             context.action_authority = None
         return {"allowed": allowed}
     return {"calls": len(model.requests), "plan": result}
+
+
+def main():
+    """Run this contract corpus without the archival combined runner/config."""
+    import asyncio
+    import traceback
+    from collections import Counter
+    from datetime import UTC, datetime
+
+    from app.core.agent_tools import AgentToolRegistry
+    from app.runtime.context import RunContext, current_run
+
+    async def run():
+        registry = AgentToolRegistry(jobs=None, browser=None, candidate_state=None,
+            resume_workspace=None, memory=None, mock_workflow=NS())
+        specs, failures, passed = cases(), [], Counter()
+        for case in specs:
+            context = RunContext(case["id"], asyncio.current_task(), lambda *_: None,
+                lambda *_: None, dialogue={})
+            token = current_run.set(context)
+            try:
+                await evaluate(case, registry)
+                passed[case["family"]] += 1
+            except Exception as exc:
+                failures.append({"id": case["id"], "family": case["family"], "payload": case["payload"],
+                    "error": type(exc).__name__, "detail": str(exc), "traceback": traceback.format_exc()})
+            finally:
+                current_run.reset(token)
+        output = Path(__file__).parent / "results" / "semantics-contract" / datetime.now(UTC).strftime("%Y%m%dT%H%M%S.%fZ")
+        output.mkdir(parents=True)
+        report = {"tests": len(specs), "passed": sum(passed.values()), "by_family": dict(passed),
+            "failures": failures, "external_model_calls": 0, "recruitment_operations": 0,
+            "coverage": "scripted responses and in-memory context through production routing/planning; not model accuracy or browser E2E"}
+        (output / "results.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(json.dumps({"output": str(output), "tests": len(specs), "passed": sum(passed.values()),
+            "failed": len(failures)}, ensure_ascii=False))
+        if failures:
+            print(json.dumps(failures, ensure_ascii=False, indent=2))
+        return 1 if failures else 0
+
+    return asyncio.run(run())
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

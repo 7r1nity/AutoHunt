@@ -48,7 +48,7 @@ def task_plan():
         ("search", "job_search_start", {"queries": ["数据分析师"], "result_limit": 15, "salary_min": 15000, "filters": either()}, "waiting_external", [], "external"),
         ("summary", "job_results_read", {"summary": True}, "pending", ["search"], "read"),
         ("delivery", "mock_delivery_start", {"min_score": 85}, "pending", ["summary"], "external"),
-        ("growth", "learning_plan_generate", {"max_score": 84, "focus": "基于现有技术栈分析"}, "pending", ["summary"], "write")]:
+        ("inspection", "job_results_read", {"summary": False, "limit": 10, "stage": "review"}, "pending", ["summary"], "read")]:
         steps.append(dict(id=ident, tool=tool, arguments=args, status=status, depends_on=deps, effect=effect,
             missing_slots=[], user_requested=True, command_quote="合成用户明确要求执行", scope_quote="", task_id="browser-1" if ident == "search" else None,
             authority_binding=action_binding(tool, args, session_id="default", requested=True)))
@@ -145,8 +145,8 @@ class RevisionContracts(unittest.IsolatedAsyncioTestCase):
         self.resumes = NS(read_document=lambda: NS(id="synthetic-document", version=1))
         self.calls = []
         self.registry = AgentToolRegistry(jobs=None, browser=None, candidate_state=self.candidate,
-                                         resume_workspace=self.resumes, memory=None, learning_plans=NS(), mock_workflow=NS())
-        for name in ("learning_plan_generate", "mock_delivery_start", "job_results_read"):
+                                         resume_workspace=self.resumes, memory=None, mock_workflow=NS())
+        for name in ("mock_delivery_start", "job_results_read"):
             spec = self.registry._tools[name]
             async def executor(args, name=name):
                 self.calls.append((name, copy.deepcopy(args)))
@@ -160,7 +160,7 @@ class RevisionContracts(unittest.IsolatedAsyncioTestCase):
         async def resume():
             self.view.status = BrowserTaskStatus.RUNNING
         self.browser = NS(current=lambda: self.view, pause=pause, resume=resume)
-        self.runtime = AgentRuntime(self.store, NS(tool_registry=self.registry, candidate_state=self.candidate), NS(), self.browser, None, self.resumes)
+        self.runtime = AgentRuntime(self.store, NS(tool_registry=self.registry, candidate_state=self.candidate), NS(), self.browser, self.resumes)
         self.parent, _ = self.store.create("default", "parent", "chat", {"message": "原请求"})
         self.value = task_plan()
         self.store.update(self.parent["id"], status="running", checkpoint={"plan": self.value, "browser_id": "browser-1"})
@@ -189,7 +189,7 @@ class RevisionContracts(unittest.IsolatedAsyncioTestCase):
 
     def edit(self, **extra):
         return {"plan_id": "plan-1", "expected_revision": 0, "pause": True,
-                "updates": [{"step_id": "growth", "arguments": {"salary_min": 25000}}], **extra}
+                "updates": [{"step_id": "inspection", "arguments": {"limit": 20}}], **extra}
 
     async def test_pause_edit_keeps_original_dependencies_authority_and_progress(self):
         self.enter()
@@ -198,14 +198,14 @@ class RevisionContracts(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(updated["paused"])
         self.assertEqual(updated["revision"], 1)
         self.assertEqual(updated["steps"][:3], self.value["steps"][:3])
-        growth = updated["steps"][3]
-        self.assertEqual(growth["depends_on"], ["summary"])
-        self.assertEqual(growth["arguments"], {"max_score": 84, "salary_min": 25000, "focus": "基于现有技术栈分析"})
-        self.assertTrue(binding_matches(growth["authority_binding"], growth["tool"], growth["arguments"], "default"))
+        inspection = updated["steps"][3]
+        self.assertEqual(inspection["depends_on"], ["summary"])
+        self.assertEqual(inspection["arguments"], {"summary": False, "limit": 20, "stage": "review"})
+        self.assertTrue(binding_matches(inspection["authority_binding"], inspection["tool"], inspection["arguments"], "default"))
         self.assertEqual(self.pause_count, 1)
         self.assertEqual(self.calls, [])
         self.assertNotIn("plan", self.store.get(self.edit_run["id"])["checkpoint"] or {})
-        self.assertIn("25,000", response.message)
+        self.assertIn("更新", response.message)
         self.assertEqual(await advance(updated, self.registry), [])
         with self.assertRaises(ValueError):
             await self.runtime.revise_plan(self.edit_run["id"], self.edit(), "旧版本修改")
@@ -219,7 +219,7 @@ class RevisionContracts(unittest.IsolatedAsyncioTestCase):
         for extra in ({"expected_revision": 8}, {"plan_id": "other"}):
             with self.assertRaises(ValueError):
                 edited_plan(self.value, RevisionDraft.model_validate(self.edit(**extra)), self.registry, stamp=STAMP, session_id="default", message="修改")
-        source = task_plan(); source["revoked_tools"] = ["learning_plan_generate"]
+        source = task_plan(); source["revoked_tools"] = ["job_results_read"]
         with self.assertRaises(ValueError):
             edited_plan(source, RevisionDraft.model_validate(self.edit()), self.registry, stamp=STAMP, session_id="default", message="修改")
         with self.assertRaises(ValueError):
@@ -236,7 +236,7 @@ class RevisionContracts(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(draft["operation"], "revise")
         self.assertEqual(captured[0]["active_plan"]["steps"][0]["status"], "waiting_external")
         self.assertNotIn("result", captured[0]["active_plan"]["steps"][0])
-        addition = RequestDraft(operation="revise", revision=self.edit(), steps=[{"id": "new", "tool": "learning_plan_generate"}])
+        addition = RequestDraft(operation="revise", revision=self.edit(), steps=[{"id": "new", "tool": "resume_propose_patch", "arguments": {"instruction": "补充合成项目描述"}}])
         normalized = validate_draft(addition, self.registry, "修改", dialogue={}, conditions={}, stamp=STAMP)
         self.assertEqual(normalized["revision"]["add_steps"][0]["id"], "new")
         self.assertEqual(self.calls, [])  # Normalization is never execution.
@@ -273,8 +273,8 @@ class RevisionContracts(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.calls, [])
         await self.runtime.continue_task(self.edit_run["id"], "继续任务")
         await asyncio.wait_for(asyncio.shield(watcher), timeout=4)
-        self.assertEqual([name for name, _ in self.calls], ["job_results_read", "mock_delivery_start", "learning_plan_generate"])
-        self.assertEqual(self.calls[-1][1]["salary_min"], 25000)
+        self.assertEqual([name for name, _ in self.calls], ["job_results_read", "mock_delivery_start", "job_results_read"])
+        self.assertEqual(self.calls[-1][1]["limit"], 20)
         self.assertEqual(self.runtime.store.get(self.parent["id"])["status"], "completed")
 
     async def test_explicit_continue_unpauses_same_live_plan(self):
@@ -286,7 +286,7 @@ class RevisionContracts(unittest.IsolatedAsyncioTestCase):
         updated = self.store.get(self.parent["id"])["checkpoint"]["plan"]
         self.assertFalse(updated["paused"])
         self.assertEqual(updated["revision"], 2)
-        self.assertEqual(updated["steps"][3]["arguments"]["salary_min"], 25000)
+        self.assertEqual(updated["steps"][3]["arguments"]["limit"], 20)
         self.assertEqual(self.view.status, BrowserTaskStatus.RUNNING)
         self.assertEqual(self.calls, [])
         self.assertIn("原任务", answer.message)
@@ -308,8 +308,8 @@ class RevisionContracts(unittest.IsolatedAsyncioTestCase):
         updated["steps"][0]["status"] = "completed"
         updated["steps"][1]["status"] = "completed"
         await advance(updated, self.registry)
-        self.assertEqual([name for name, _ in self.calls], ["mock_delivery_start", "learning_plan_generate"])
-        self.assertEqual(self.calls[-1][1]["salary_min"], 25000)
+        self.assertEqual([name for name, _ in self.calls], ["mock_delivery_start", "job_results_read"])
+        self.assertEqual(self.calls[-1][1]["limit"], 20)
         await advance(updated, self.registry)
         self.assertEqual(len(self.calls), 2)
 

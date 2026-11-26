@@ -11,7 +11,6 @@ from ..resume_layout import ResumeLayoutReport
 class AgentLane(StrEnum):
     CANDIDATE = "candidate"
     MARKET = "market"
-    GROWTH = "growth"
     APPLICATION = "application"
 
 

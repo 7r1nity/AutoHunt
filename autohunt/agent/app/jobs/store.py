@@ -158,13 +158,6 @@ class JobStore:
                     run_id TEXT, detail TEXT NOT NULL DEFAULT '',
                     updated_at TEXT NOT NULL
                 );
-                CREATE TABLE IF NOT EXISTS learning_plans (
-                    id TEXT PRIMARY KEY, resume_id TEXT NOT NULL,
-                    payload_json TEXT NOT NULL, created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_learning_plans_resume
-                    ON learning_plans(resume_id, created_at DESC);
                 """
             )
 
@@ -869,6 +862,40 @@ class JobStore:
             filter_status=row["filter_status"],
         ) for row in rows]
 
+    def application_export_rows(self, *, scope: str = "all") -> list[dict[str, Any]]:
+        """A consistent, unbounded read projection for Harness result delivery.
+
+        One row per saved job, including hidden/removed history by default. The
+        latest delivery attempt owns the receipt, even if an older run was later
+        updated. No resume, conversation body or authorization payload is read.
+        """
+        if scope not in {"all", "board"}:
+            raise ValueError("导出范围必须是 all 或 board")
+        condition = " WHERE j.board_visible=1 AND j.removed_at IS NULL" if scope == "board" else ""
+        query = """
+            SELECT j.id AS job_id,j.title,j.company,j.location,j.salary,j.score,
+                   j.stage AS board_stage,j.mode AS board_mode,j.board_visible,j.removed_at,
+                   j.source,j.source_url,j.first_seen_at,j.last_seen_at,
+                   CASE WHEN TRIM(COALESCE(j.recruiter_reply,''))<>'' THEN 1 ELSE 0 END AS has_recruiter_reply,
+                   j.recruiter_reply_at,q.status AS queue_status,q.updated_at AS queue_updated_at,
+                   r.id AS delivery_run_id,r.status AS delivery_status,r.checkpoint AS delivery_checkpoint,
+                   r.submitted AS delivery_submitted,r.started_at AS delivery_started_at,
+                   r.updated_at AS delivery_updated_at,r.reconciled_at AS delivery_reconciled_at,
+                   CASE WHEN json_valid(r.reconciliation_json)
+                        THEN json_extract(r.reconciliation_json,'$.status') END AS receipt_status,
+                   CASE WHEN json_valid(r.reconciliation_json)
+                        THEN json_extract(r.reconciliation_json,'$.application_id') END AS receipt_application_id,
+                   (SELECT COUNT(*) FROM delivery_runs attempts WHERE attempts.job_id=j.id) AS delivery_run_count
+              FROM jobs j
+              LEFT JOIN mock_delivery_queue q ON q.job_id=j.id
+              LEFT JOIN delivery_runs r ON r.rowid=(
+                   SELECT latest.rowid FROM delivery_runs latest WHERE latest.job_id=j.id
+                    ORDER BY latest.started_at DESC,latest.rowid DESC LIMIT 1)
+        """ + condition + " ORDER BY j.id"
+        with self.lock, self._connect() as db:
+            db.execute("PRAGMA query_only=ON")
+            return [dict(row) for row in db.execute(query).fetchall()]
+
     def job_id_for_source_url(self, source_url: str) -> int | None:
         with self.lock, self._connect() as db:
             row = db.execute("SELECT id FROM jobs WHERE source_url=?", (source_url,)).fetchone()
@@ -1469,16 +1496,6 @@ class JobStore:
             min_score=min_score, max_score=max_score, salary_min=salary_min, task_id=task_id,
             resume_digest=resume_digest)[0]
 
-    def save_learning_plan(self, plan: dict[str, Any]) -> None:
-        now = utc_now()
-        with self.lock, self._connect() as db:
-            db.execute(
-                "INSERT INTO learning_plans(id,resume_id,payload_json,created_at,updated_at) "
-                "VALUES (?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET payload_json=excluded.payload_json,updated_at=excluded.updated_at",
-                (plan["id"], plan["resume_id"], json.dumps(plan, ensure_ascii=False),
-                 plan.get("created_at", now), now),
-            )
-
     def enqueue_mock_deliveries(self, items: list[dict], *, session_id: str, resume_stamp: str,
                                 binding: dict, min_score: int, scope: dict | None = None,
                                 scope_evidence: dict | None = None) -> list[int]:
@@ -1732,21 +1749,6 @@ class JobStore:
                        (status, detail[:400], run_id, utc_now(), job_id, status))
             if status == "cancelled":
                 db.execute("UPDATE jobs SET mode='自动投递·已停止' WHERE id=? AND stage IN ('review','applying')", (job_id,))
-
-    def learning_plans(self, resume_id: str) -> list[dict[str, Any]]:
-        with self.lock, self._connect() as db:
-            rows = db.execute(
-                "SELECT payload_json FROM learning_plans WHERE resume_id=? ORDER BY created_at DESC LIMIT 20",
-                (resume_id,),
-            ).fetchall()
-        return [json.loads(row["payload_json"]) for row in rows]
-
-    def learning_plan(self, plan_id: str) -> dict[str, Any]:
-        with self.lock, self._connect() as db:
-            row = db.execute("SELECT payload_json FROM learning_plans WHERE id=?", (plan_id,)).fetchone()
-        if row is None:
-            raise KeyError(plan_id)
-        return json.loads(row["payload_json"])
 
     def update_stage(self, job_id: int, stage: str) -> None:
         with self.lock, self._connect() as db:

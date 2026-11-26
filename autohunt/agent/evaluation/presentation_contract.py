@@ -22,21 +22,21 @@ TRACES = []
 
 def fixture():
     _, _, plan, _ = report_fixture()
-    plan.update(original="85分以下且月薪25k以上，分析不足并生成学习计划", reply="", answers=["结合现有技术栈"])
+    plan.update(original="只分析已选中低分高薪岗位，不展示全部职位", reply="", answers=["结合现有技术栈"])
     jobs = [{"id": i, "title": f"合成职位{i}", "company": "合成公司", "salary": "28-33K",
              "score": 88 if i < 6 else 82, "source_url": f"https://example.org/jobs/{i}"} for i in range(1, 11)]
     read = {"id": "read", "tool": "job_results_read", "status": "completed", "depends_on": [],
             "arguments": {}, "result": {"snapshot_id": "synthetic-list", "jobs": jobs}}
-    growth = plan["steps"][-1]
-    growth.update(depends_on=["read"], result={"id": "synthetic-growth", "title": "合成成长计划",
-        "summary": "简历未体现业务验收实践。", "jobs_analyzed": 5,
+    analysis = plan["steps"][-1]
+    analysis.update(tool="job_stats_read", depends_on=["read"], result={"id": "synthetic-analysis", "title": "合成岗位分析",
+        "message": "已核对指定岗位：简历未体现业务验收实践。", "summary": "简历未体现业务验收实践。", "jobs_analyzed": 5,
         "score_scope": {"min_score": None, "max_score": 84}, "salary_scope": {"salary_min": 25000},
         "job_sources": jobs[5:], "gaps": [{"name": "业务验收", "jd_quotes": [{"job_id": 6, "quote": "制定验收标准"}]}]})
-    plan["steps"] = [read, growth]
+    plan["steps"] = [read, analysis]
     return plan
 
 
-def section(step="growth", text="这些岗位的差距是简历未体现业务验收实践。", ids=None, kind="summary"):
+def section(step="analysis", text="这些岗位的差距是简历未体现业务验收实践。", ids=None, kind="summary"):
     return {"step_id": step, "kind": kind, "text": text, "job_ids": ids or []}
 
 
@@ -62,9 +62,6 @@ class CompositionContracts(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(answer.mode, "model")
         self.assertNotIn("匹配 88", answer.text)
         self.assertNotIn("职位简表", answer.text)
-        self.assertIn("匹配分≤84", answer.text)
-        self.assertIn("月薪下限≥25,000元", answer.text)
-        self.assertIn("依据 5 份 JD", answer.text)
         self.assertIn("业务验收实践", answer.text)
         self.assertIn("](<https://example.org/jobs/6>)", answer.text)
         self.assertEqual(answer.snapshot_ids, [])
@@ -76,9 +73,9 @@ class CompositionContracts(unittest.IsolatedAsyncioTestCase):
         payload = json.loads(llm.requests[0].context)
         self.assertEqual(payload["request"], plan["original"])
         self.assertEqual(payload["amendments"], plan["answers"])
-        growth = payload["results"][1]
-        self.assertEqual(growth["scope"]["score_scope"]["max_score"], 84)
-        self.assertTrue(all(item["score"] == 82 for item in growth["result"]["job_sources"]))
+        analysis = payload["results"][1]
+        self.assertEqual(analysis["scope"]["score_scope"]["max_score"], 84)
+        self.assertTrue(all(item["score"] == 82 for item in analysis["result"]["job_sources"]))
         self.assertEqual(plan, before)
         self.assertTrue(llm.requests[0].json_output)
 
@@ -96,7 +93,7 @@ class CompositionContracts(unittest.IsolatedAsyncioTestCase):
         answer = await compose(plan, plan["steps"], ScriptedLLM([section(ids=[1])]))
         self.assertEqual(answer.mode, "fallback")
         self.assertNotIn("职位简表", answer.text)
-        self.assertIn("已保存成长计划", answer.text)
+        self.assertIn("已核对指定岗位", answer.text)
         self.assertEqual(plan, before)
 
     async def test_supporting_list_cannot_be_presented_as_deliverable(self):
@@ -108,7 +105,7 @@ class CompositionContracts(unittest.IsolatedAsyncioTestCase):
     async def test_independent_list_goal_can_be_shown_beside_analysis(self):
         plan = fixture()
         plan["goals"] = [{"step_ids": ["read"], "quote": "列出全部结果"},
-                         {"step_ids": ["read", "growth"], "quote": "再分析低分岗位"}]
+                         {"step_ids": ["read", "analysis"], "quote": "再分析低分岗位"}]
         answer = await compose(plan, plan["steps"], ScriptedLLM([section("read", "", kind="result"), section()]))
         self.assertEqual(answer.mode, "model")
         self.assertEqual(answer.snapshot_ids, ["synthetic-list"])
@@ -127,7 +124,7 @@ class CompositionContracts(unittest.IsolatedAsyncioTestCase):
         plan = fixture()
         answer = await compose(plan, plan["steps"], ScriptedLLM([section(), section()]))
         self.assertEqual(answer.mode, "fallback")
-        self.assertEqual(answer.text.count("已保存成长计划"), 1)
+        self.assertEqual(answer.text.count("已核对指定岗位"), 1)
 
     async def test_provider_failure_only_falls_back(self):
         plan, llm = fixture(), ScriptedLLM(error=RuntimeError("synthetic failure"))
@@ -191,7 +188,7 @@ class CompositionContracts(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("javascript:", answer.text)
         self.assertIn("岗位 ID 6", answer.text)
 
-    async def test_legacy_growth_without_new_source_fields_still_answers(self):
+    async def test_legacy_analysis_without_new_source_fields_still_answers(self):
         plan = fixture()
         for source in plan["steps"][1]["result"]["job_sources"]:
             source.pop("score"); source.pop("salary")
@@ -206,7 +203,7 @@ class CompositionContracts(unittest.IsolatedAsyncioTestCase):
         self.assertIn("业务验收实践", response.message)
         selected = next(data for kind, data in events if kind == "plan_response_selection")
         self.assertEqual(selected["displayed_snapshot_ids"], [])
-        self.assertEqual(selected["completed_step_ids"], ["read", "growth"])
+        self.assertEqual(selected["completed_step_ids"], ["read", "analysis"])
 
 
 class RuntimeSynthesisContracts(unittest.IsolatedAsyncioTestCase):

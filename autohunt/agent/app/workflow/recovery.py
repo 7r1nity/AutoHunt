@@ -6,6 +6,7 @@ import time
 from dataclasses import dataclass
 
 from ..security.action_grants import action_binding
+from ..runtime.retired_features import retire_growth_steps
 from .lifecycle import successful_receipt
 
 
@@ -56,7 +57,8 @@ def recover_plan(run: dict, *, session_id: str, stamp: str,
     """
     if run["session_id"] != session_id:
         return RecoveryDecision("clarify", "任务不属于当前会话，未恢复其他会话的操作。")
-    plan = copy.deepcopy((run.get("checkpoint") or {}).get("plan"))
+    checkpoint, _ = retire_growth_steps(run.get("checkpoint"))
+    plan = checkpoint.get("plan")
     if not plan:
         return RecoveryDecision("no_plan", "原请求还没有执行计划，需要按原请求重新规划。")
     reconcile_receipts(plan, list(events))
@@ -78,6 +80,8 @@ def recover_plan(run: dict, *, session_id: str, stamp: str,
         status, effect = step["status"], step.get("effect", "unknown")
         if status == "completed":
             step["retained_result"] = True
+            continue
+        if status == "skipped" and (step.get("failure") or {}).get("code") == "feature_removed":
             continue
         if step["tool"] in revoked or step.get("withdrawn"):
             step.update(status="blocked", detail="用户已撤回此动作，续接不恢复授权")

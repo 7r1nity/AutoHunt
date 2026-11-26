@@ -7,7 +7,7 @@ export const runLabels: Record<string, string> = {
   claimed: "执行中", skipped: "未执行", incomplete: "记录不完整", succeeded: "成功",
 };
 export const statusText = (status: string) => runLabels[status] ?? status;
-export const runKind = (kind: string) => ({ chat: "Agent 对话", browser: "职位搜索", delivery: "简历投递", job_analysis: "职位分析", learning_plan: "学习计划", daily: "每日模拟站任务" }[kind] ?? "Agent 任务");
+export const runKind = (kind: string) => ({ chat: "Agent 对话", browser: "职位搜索", delivery: "简历投递", job_analysis: "职位分析", daily: "每日模拟站任务" }[kind] ?? "Agent 任务");
 export const numberText = (n: number | null | undefined) => n == null ? "未记录" : n.toLocaleString("zh-CN");
 export function durationText(ms: number | null | undefined) {
   if (ms == null) return "未记录";

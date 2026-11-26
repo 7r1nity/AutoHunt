@@ -21,7 +21,7 @@ from cryptography.fernet import Fernet
 from app.core.models import ResumeDocumentView, ResumeEntryView
 from app.core.security import redact
 from app.delivery.outreach import OutreachService
-from app.growth.interview import InterviewPreparationService
+from app.interviews.service import InterviewPreparationService
 from evaluation.benchmark.common import CASE, PhysicalBudget, append, write
 from evaluation.run import consented_provider
 

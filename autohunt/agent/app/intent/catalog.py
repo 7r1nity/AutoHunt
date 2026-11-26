@@ -25,8 +25,6 @@ class IntentSpec:
 INTENT_SPECS: dict[str, IntentSpec] = {
     "compound_request": IntentSpec("compound_request", "多目标任务", True, True,
         "包含多个独立目标，交给完整目标/参数/依赖规划，不可按单标签执行"),
-    "learning_plan": IntentSpec("learning_plan", "生成成长计划", True, True,
-        "依据有效 JD 显式生成或更新学习/成长计划"),
     "mock_delivery": IntentSpec("mock_delivery", "模拟站投递", True, True,
         "按明确范围启动或停止本地模拟站有限投递队列，不支持真实站"),
     "search_conditions": IntentSpec("search_conditions", "调整会话搜索条件", True, False,
@@ -83,7 +81,7 @@ INTENT_SPECS: dict[str, IntentSpec] = {
     ),
     "manage_skills": IntentSpec(
         "manage_skills", "管理技能", True, True,
-        "查看/添加成长计划技能（受提案审批机制约束）",
+        "查看/添加简历技能（受提案审批机制约束）",
     ),
     "update_preferences": IntentSpec(
         "update_preferences", "更新求职偏好", True, True,
@@ -133,10 +131,9 @@ DEFAULT_DIRECT_INTENTS = frozenset({
 # Few-shot corpus (text, intent_id). Rendered into the small-model prompt.
 # ---------------------------------------------------------------------------
 FEWSHOT_EXAMPLES: tuple[tuple[str, str], ...] = (
-    ("先找15个工作，匹配90分以上投递，低于90分的生成成长计划", "compound_request"),
+    ("先找15个工作，匹配90分以上投递，然后生成岗位总结", "compound_request"),
     ("先查看简历，再优化项目描述", "compound_request"),
     ("详细了解第8个，同时看看职位统计", "compound_request"),
-    ("根据最近JD更新成长计划", "learning_plan"),
     ("匹配90分以上自动投递", "mock_delivery"),
     ("城市换成武汉，数量改为15个", "search_conditions"),
     ("我想详细了解第8个", "job_detail"),
@@ -197,7 +194,7 @@ FEWSHOT_EXAMPLES: tuple[tuple[str, str], ...] = (
     ("帮我润色简历里的项目描述", "tailor_resume"),
     ("按这个 JD 定制简历", "tailor_resume"),
     # manage_skills
-    ("添加一个技能到成长计划", "manage_skills"),
+    ("添加一个技能到简历", "manage_skills"),
     ("查看我的技能清单", "manage_skills"),
     ("把 Rust 加进技能列表", "manage_skills"),
     # update_preferences

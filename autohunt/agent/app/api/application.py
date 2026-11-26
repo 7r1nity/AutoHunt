@@ -30,7 +30,6 @@ from ..core.dependencies import (
     document_router,
     delivery_service,
     job_store,
-    learning_plans,
     interview_preparations,
     llm_credential_store,
     llm_settings_store,
@@ -49,6 +48,7 @@ from ..runtime.history_reset import HistoryResetter, ResetBusy, RESET_PATH
 from ..runtime.models import RunCreate, SessionCreate, ApprovalDecision, TargetChoiceDecision, DailyTestRequest, public_run
 from ..delivery.automation import UnsupportedDeliverySite
 from ..jobs.analysis import analyze_job
+from ..jobs.application_export import export_applications
 from ..core.middleware import (
     ApiKeyMiddleware,
     AuditMiddleware,
@@ -91,7 +91,6 @@ from ..core.models import (
     StoredJobView,
     TaskRecord,
 )
-from ..growth.plans import LearningCompletion
 from ..memory.data_files import DataFileError
 from ..memory.resume_store import ResumeError
 from ..memory.resume_workspace import resume_document_digest
@@ -295,7 +294,7 @@ async def reset_conversation_search_state(session_id: str) -> dict:
 @app.post("/api/v1/runs", status_code=202)
 async def create_run(payload: RunCreate) -> dict:
     try:
-        data = {"message": payload.message.strip()} if payload.kind == "chat" else {"focus": payload.focus}
+        data = {"message": payload.message.strip()}
         return public_run(agent_runtime.submit(payload.conversation_id, payload.request_id, payload.kind, data))
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -971,6 +970,21 @@ async def list_stored_jobs(stage: str | None = None) -> list[StoredJobView]:
     return job_store.list_jobs(stage=stage)
 
 
+@app.get("/api/v1/applications/export")
+def download_applications(
+    format: Literal["csv", "xlsx"] = "xlsx",
+    scope: Literal["all", "board"] = "all",
+) -> Response:
+    """Harness delivery: export durable receipts without LLM or external effects."""
+    try:
+        artifact = export_applications(job_store, format=format, scope=scope)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return Response(artifact.content_bytes, media_type=artifact.media_type,
+                    headers={"Content-Disposition": f'attachment; filename="{artifact.filename}"',
+                             "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
+
+
 @app.put("/api/v1/jobs/{job_id}/stage", status_code=204)
 async def update_job_stage(job_id: int, update: JobStageUpdate) -> None:
     try:
@@ -1087,11 +1101,6 @@ async def insights() -> dict:
     )
 
 
-@app.get("/api/v1/learning-plans")
-async def list_learning_plans() -> list[dict]:
-    return learning_plans.list()
-
-
 class InterviewPreparationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     job_id: int = Field(gt=0, strict=True)
@@ -1123,37 +1132,6 @@ async def generate_interview_preparation(request: InterviewPreparationRequest) -
         raise HTTPException(status_code=504, detail="面试准备生成超时，尚未取得有效报告") from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail="面试准备暂时不可用，请检查模型设置或稍后重试") from exc
-
-
-@app.post("/api/v1/learning-plans")
-async def generate_learning_plan(payload: dict) -> dict:
-    run = None
-    try:
-        run = agent_runtime.submit("default", uuid.uuid4().hex, "learning_plan", {"focus": str(payload.get("focus") or "")[:400]})
-        return await agent_runtime.wait_response(run["id"])
-    except asyncio.TimeoutError as exc:
-        raise HTTPException(
-            status_code=504,
-            detail="学习计划生成超时（90 秒）。本次未保存计划；请稍后重试，或先缩小分析范围。",
-        ) from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except RuntimeError as exc:
-        if run and run_store.get(run["id"])["status"] == "timed_out":
-            raise HTTPException(status_code=504, detail="学习计划生成超时（90 秒）。本次未保存计划；请稍后重试，或先缩小分析范围。") from exc
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-
-
-@app.post("/api/v1/learning-plans/{plan_id}/gaps/{gap_id}/complete")
-async def complete_learning_gap(plan_id: str, gap_id: str, payload: LearningCompletion) -> dict:
-    try:
-        return await learning_plans.complete(plan_id, gap_id, payload)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail="学习计划或任务不存在") from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except RuntimeError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @app.get("/api/v1/memory")

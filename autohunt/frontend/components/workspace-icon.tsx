@@ -7,7 +7,7 @@ const paths = {
   profile: "M6 3h8l4 4v14H6z M14 3v5h4 M9 12h6 M9 16h6",
   insights: "M4 3v17h17 M8 16v-5 M13 16V7 M18 16V4",
   metrics: "M4 3h16v18H4z M8 7h8 M8 12l2 2 4-4 M8 18h8",
-  plans: "M4 5h16v16H4z M8 3v4 M16 3v4 M8 14l3 3 5-6",
+  interview: "M4 5h16v16H4z M8 3v4 M16 3v4 M8 14l3 3 5-6",
   settings: "M4 6h16 M4 12h16 M4 18h16 M9 3v6 M16 9v6 M8 15v6",
   arrow: "M4 12h16 M14 6l6 6-6 6",
   search: "M16 16l5 5 M18 10a8 8 0 1 1-16 0 8 8 0 0 1 16 0Z",

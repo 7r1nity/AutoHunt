@@ -10,8 +10,7 @@ from ..intent.rules import RuleEngine
 from ..intent.small_model import SmallModelClient
 from ..intent.store import RouterStore
 from ..jobs.store import JobStore
-from ..growth.plans import LearningPlanService
-from ..growth.interview import InterviewPreparationService
+from ..interviews.service import InterviewPreparationService
 from ..llm.manager import LLMManager
 from ..memory.document_router import DocumentRouter
 from ..memory.candidate_state import CandidateEvidenceExtractor, CandidateProfileExtractor, CandidateStateStore, RESUME_PROJECT_PROMPT
@@ -50,7 +49,6 @@ candidate_evidence_extractor = CandidateEvidenceExtractor(llm_manager, resume_pr
 resume_document_extractor = ResumeDocumentExtractor(llm_manager)
 document_router = DocumentRouter(llm_manager)
 job_store = JobStore(settings.data_root / "autohunt.db")
-learning_plans = LearningPlanService(job_store, candidate_state_store, resume_workspace_store, llm_manager, resume_store)
 interview_preparations = InterviewPreparationService(job_store, candidate_state_store, resume_workspace_store,
     llm_manager, settings.data_root, settings.data_key)
 browser_service = BrowserAutomationService(
@@ -80,7 +78,6 @@ agent_tool_registry = AgentToolRegistry(
     candidate_state=candidate_state_store,
     resume_workspace=resume_workspace_store,
     memory=memory_store,
-    learning_plans=learning_plans,
     interview_preparations=interview_preparations,
     mock_workflow=mock_workflow,
     response_llm=llm_manager,
@@ -112,10 +109,9 @@ agent = AutoHuntAgent(
     job_store,
     agent_tool_registry,
     router=intent_router,
-    learning_plans=learning_plans,
 )
 run_store = RunStore(settings.data_root / "runtime.db", settings.data_key)
-agent_runtime = AgentRuntime(run_store, agent, job_store, browser_service, learning_plans, resume_workspace_store)
+agent_runtime = AgentRuntime(run_store, agent, job_store, browser_service, resume_workspace_store)
 from ..workflow.daily import DailyWorkflow
 daily_workflow = DailyWorkflow(job_store, run_store, browser_service, delivery_service, candidate_state_store, resume_workspace_store)
 mock_workflow.daily = daily_workflow

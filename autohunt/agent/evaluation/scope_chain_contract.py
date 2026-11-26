@@ -80,7 +80,6 @@ class ScopeHarness(Harness):
         self.replace("job_target_resolve", self.registry._job_target_resolve)
         self.replace("job_search_start", self.search)
         self.replace("job_results_read", self.summary)
-        self.replace("learning_plan_generate", self.growth)
         self.browser.current = lambda: BrowserTaskView(id="synthetic-search", status="running", source="mock")
         self.browser.can_start_search = lambda: True
         self.browser.stop = self.stop_browser
@@ -166,11 +165,6 @@ class ScopeHarness(Harness):
     async def summary(self, args):
         self.log_call("job_results_read", args)
         return {"message": "合成搜索整体总结（非真实职位）", "jobs": [self.rows[1], self.rows[2]]}
-
-    async def growth(self, args):
-        self.log_call("learning_plan_generate", args)
-        effect_checkpoint("committed")
-        return {"id": "synthetic-growth", "title": "合成成长计划", "jobs_analyzed": 2, "message": "合成差距和计划已保存"}
 
     async def interview(self, job_id, focus):
         self.log_call("interview_preparation_generate", {"job_id": job_id, "focus": focus})
@@ -315,8 +309,7 @@ async def run_case(h, case, phase):
         planned = [step("search", "job_search_start", search),
             step("summary", "job_results_read", {"summary": True}, ["search"]),
             step("delivery", "mock_delivery_start", {"min_score": p["threshold"]}, ["summary"]),
-            step("growth", "learning_plan_generate", {"max_score": p["max_score"], "salary_min": p["growth_salary"]}, ["delivery"]),
-            step("interview", "interview_preparation_generate", {"selector": f"第{p['interview_ordinal']}个", "snapshot_id": h.snapshot_id}, ["growth"])]
+            step("interview", "interview_preparation_generate", {"selector": f"第{p['interview_ordinal']}个", "snapshot_id": h.snapshot_id}, ["delivery"])]
         h.compile(planned, case["turns"][0], paused=phase == "paused")
         await h.tick()
         if phase == "paused":
@@ -331,7 +324,6 @@ async def run_case(h, case, phase):
         check([c["tool"] for c in h.calls] == oracle["order"], "chain_missing_or_out_of_order", oracle["order"], h.calls)
         check(all(s["status"] == "completed" for s in h.plan["steps"]), "chain_incomplete", "all completed", h.plan)
         check(h.queues[0]["min_score"] == p["threshold"], "chain_threshold_wrong", p["threshold"], h.queues)
-        check(h.calls[-2]["arguments"]["max_score"] == p["max_score"], "growth_scope_lost", p, h.calls)
         check(h.calls[-1]["arguments"]["job_id"] == p["interview_ordinal"], "interview_target_wrong", p, h.calls[-1])
         count = len(h.calls)
         with h.context():
@@ -345,7 +337,7 @@ async def run_case(h, case, phase):
         if p["status"] in {"failed", "outcome_indeterminate"}:
             main["failure"] = {"code": "synthetic_interruption", "effect_started": p["execution_phase"] != "preparing",
                 "uncertain": p["execution_phase"] != "preparing" and p["effect"] != "read"}
-        h.install([main, step("analysis", "learning_plan_generate", {"max_score": 84, "salary_min": 25000})])
+        h.install([main, step("analysis", "job_stats_read")])
         if p["variant"] == "withdraw":
             h.edit({"remove_steps": ["action"]}, "取消投递，继续独立分析")
         if p["variant"] == "hr-wait":
@@ -362,7 +354,7 @@ async def run_case(h, case, phase):
         action_calls = [c for c in h.calls if c["tool"] == p["tool"]]
         expected_calls = 1 if p["variant"] in {"preparing-send", "read-failure"} else 0
         check(len(action_calls) == expected_calls, "recovery_replayed_send_or_lost_safe_retry", expected_calls, h.calls)
-        check(any(c["tool"] == "learning_plan_generate" for c in h.calls), "independent_analysis_lost", "analysis call", h.calls)
+        check(any(c["tool"] == "job_stats_read" for c in h.calls), "independent_analysis_lost", "analysis call", h.calls)
         if p["variant"] == "unknown-send":
             check(h.plan["steps"][0]["status"] == "outcome_indeterminate", "unknown_send_retried", "outcome_indeterminate", h.plan)
         if p["variant"] == "hr-wait":
@@ -442,9 +434,21 @@ async def run_case(h, case, phase):
         raise ValueError(f"Unknown family {family}")
 
 
+def current_case(source):
+    """Version engineering chains after retiring a former goal; keep source cases archival."""
+    case = copy.deepcopy(source)
+    if case["family"] == "full_chain":
+        case["source_case_id"] = source["id"]
+        case["id"] += "-current-chain"
+        case["retired_goals"] = ["learning_plan_generate"]
+        case["turns"] = ["按原条件搜索并汇总结果，按指定门槛投递，然后准备指定岗位的面试。"]
+        case["oracle"]["order"] = [name for name in case["oracle"]["order"] if name != "learning_plan_generate"]
+    return case
+
+
 async def main_async(args):
     corpus = json.loads(CORPUS.read_text(encoding="utf-8"))
-    selected = [c for c in corpus["cases"] if not args.family or c["family"] == args.family]
+    selected = [current_case(c) for c in corpus["cases"] if not args.family or c["family"] == args.family]
     if args.case:
         selected = [c for c in selected if c["id"] == args.case]
     matrices = [(case, phase) for case in selected for phase in case["phases"]]
@@ -481,7 +485,7 @@ async def main_async(args):
             h = None
             gc.collect()  # CPython sqlite context managers commit, but close on GC.
     summary = {"evaluation_type": corpus["evaluation_type"], "external_model_requests": 0, "real_recruitment_actions": 0,
-        "base_cases": len(selected), "scenarios": len(results), "passed": sum(r["passed"] for r in results),
+        "base_cases": len(selected), "adapted_cases": sum(bool(c.get("source_case_id")) for c in selected), "scenarios": len(results), "passed": sum(r["passed"] for r in results),
         "failed": sum(not r["passed"] for r in results), "by_family": {},
         "failure_codes": dict(Counter((r["error"]["code"] or r["error"]["type"]) for r in results if r["error"])),
         "scope": "Production compile/revise/DAG/approval/persistence contracts with synthetic browser, recruitment and analysis adapters. Not real-model intent accuracy or browser submission E2E.",

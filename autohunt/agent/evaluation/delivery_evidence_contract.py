@@ -22,7 +22,7 @@ from app.browser.automation import BrowserAutomationService
 from app.core.agent_tools import AgentToolRegistry
 from app.core.job_filters import FILTER_POLICY_VERSION, evaluate_filter, filter_facts_digest, validate_filter
 from app.core.models import BrowserSearchRequest, BrowserTaskStatus, JobAnalysis, ResumeDocumentView
-from app.growth.requests import resume_stamp
+from app.memory.resume_identity import resume_stamp
 from app.jobs.store import JobStore
 from app.llm.base import LLMResult
 from app.runtime.context import RunContext, current_run

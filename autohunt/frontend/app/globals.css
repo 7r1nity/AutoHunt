@@ -135,7 +135,7 @@ nav { display: grid; gap: 5px; }
 }
 .proposal-diff > .diff-old, .proposal-diff > .diff-new { display: flex; gap: 8px; padding: 12px; border-radius: 8px; overflow-wrap: anywhere; }
 .proposal-entry-preview { min-width: 0; text-decoration: none; }
-.proposal-diff .proposal-entry-preview p, .learning-proposal .proposal-entry-preview p { background: transparent !important; color: inherit !important; padding: 0 !important; margin: 8px 0 !important; display: block; }
+.proposal-diff .proposal-entry-preview p { background: transparent !important; color: inherit !important; padding: 0 !important; margin: 8px 0 !important; display: block; }
 .proposal-entry-preview ul { margin: 6px 0 10px; padding-left: 20px; }
 .proposal-entry-preview li { margin: 6px 0; }
 .material-upload-feedback { margin-top: 12px; padding: 10px 12px; border: 1px solid rgba(126, 137, 179, .35); border-radius: 10px; background: rgba(126, 137, 179, .10); color: inherit; font-size: 12px; line-height: 1.5; }
@@ -639,48 +639,6 @@ nav { display: grid; gap: 5px; }
 .workflow-settings .workflow-toggle input { width: 17px; height: 17px; flex: 0 0 auto; margin: 0; accent-color: #7888d8; }
 .workflow-feedback { margin: 10px 0; color: #aebdfb; font-size: 13px; line-height: 1.55; }
 .workflow-error { color: #e6a7a7 !important; }
-.learning-page { gap: 18px; }
-.learning-page .plan-header { display: flex; gap: 26px; align-items: end; justify-content: space-between; flex-wrap: wrap; }
-.learning-page .plan-header > div:first-child { max-width: 780px; }
-.plan-generate { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
-.plan-generate input, .learning-complete input, .learning-complete select, .learning-complete textarea {
-  border: 1px solid rgba(190, 200, 220, .22); border-radius: 11px;
-  background: rgba(255, 255, 255, .04); color: var(--text); font: inherit;
-  padding: 11px 13px;
-}
-.plan-generate input { min-width: min(360px, 75vw); }
-.learning-plan { padding: 27px; }
-.learning-plan-head { display: flex; justify-content: space-between; gap: 18px; align-items: start; }
-.learning-plan-head h3 { font-size: 22px; margin: 8px 0; letter-spacing: -.025em; }
-.learning-plan-head p, .learning-gap p { line-height: 1.7; color: var(--muted); }
-.learning-plan-head > strong { white-space: nowrap; color: #a8b9fa; }
-.learning-gap-list { display: grid; gap: 16px; margin-top: 24px; }
-.learning-gap { padding: 22px; border: 1px solid rgba(195, 205, 230, .16); border-radius: 18px; background: rgba(255, 255, 255, .025); }
-.learning-gap-head { display: flex; justify-content: space-between; gap: 12px; align-items: start; }
-.learning-gap-head small { color: #a8b9fa; font-size: 11px; letter-spacing: .06em; }
-.learning-gap-head h4 { margin: 6px 0 0; font-size: 18px; }
-.learning-gap-head > span { color: var(--muted); font-size: 12px; white-space: nowrap; }
-.learning-assessment { padding: 9px 12px; border-left: 2px solid #798ee8; background: rgba(115, 139, 228, .08); }
-.learning-jd { padding: 14px; border-radius: 12px; background: rgba(0, 0, 0, .15); }
-.learning-jd strong, .learning-detail strong { color: var(--text); font-size: 12px; }
-.learning-jd p { margin: 7px 0 0; font-size: 12px; }
-.learning-gap details { margin-top: 16px; }
-.learning-gap summary { cursor: pointer; color: #b9c8ff; font-weight: 650; }
-.learning-detail { padding: 10px 0 0; }
-.learning-detail li { margin: 8px 0; line-height: 1.7; }
-.learning-complete { margin-top: 18px; border-top: 1px solid rgba(190, 200, 220, .12); padding-top: 16px; }
-.learning-complete label { display: grid; gap: 7px; color: var(--muted); font-size: 12px; }
-.learning-complete textarea { resize: vertical; min-height: 95px; width: 100%; line-height: 1.6; }
-.learning-complete-row { display: flex; gap: 10px; align-items: end; flex-wrap: wrap; margin-top: 12px; }
-.learning-complete-row label { min-width: 180px; }
-.learning-complete-row button { margin-left: auto; }
-.learning-done { margin-top: 16px; color: #b9c8ff; font-size: 12px; }
-.learning-proposal { margin-top: 16px; padding: 16px; border: 1px solid rgba(130, 152, 232, .38); border-radius: 13px; background: rgba(110, 132, 213, .07); }
-.learning-proposal > div:not(.learning-complete-row) { margin-top: 10px; padding: 10px; border-radius: 9px; background: rgba(0, 0, 0, .13); overflow-wrap: anywhere; }
-.learning-proposal b { font-size: 12px; }
-.learning-proposal p { font-size: 12px; white-space: pre-wrap; }
-@media (max-width: 650px) { .learning-plan { padding: 17px; } .learning-gap { padding: 15px; } .learning-complete-row button { margin-left: 0; } }
-
 .runtime-panel { padding: 12px 22px; border-bottom: 1px solid rgba(180, 190, 220, .12); background: rgba(95, 105, 150, .04); }
 .runtime-session { display: flex; align-items: center; gap: 10px; }
 .runtime-session select { min-width: 160px; max-width: 60%; padding: 8px 12px; border-radius: 10px; }

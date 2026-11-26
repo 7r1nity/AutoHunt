@@ -187,6 +187,7 @@ class Batch(unittest.IsolatedAsyncioTestCase):
         jobs = NS(mock_delivery_queue=lambda **kw: [r for r in queue if not kw.get("active_only", True) or r["status"] in {"queued", "dispatched"}],
             get_job=lambda i: {"id": i, "score": 90, "filter_status": "pass", "stage": "review", "source_url": "http://synthetic/job"},
             review_fingerprint=lambda _: "hash", latest_delivery_status_for_job=lambda i: runs.get(f"run-{i}", {}).get("status"),
+            assert_delivery_queue_facts=lambda item, job: None,
             create_delivery_preview=lambda i, **kw: NS(id=str(i)))
         def update(i, status, detail, run_id=None):
             queue[i].update(status=status)
@@ -214,11 +215,14 @@ class Batch(unittest.IsolatedAsyncioTestCase):
             checks.append(ident)
             delivery.worker = asyncio.create_task(asyncio.sleep(0))
             return NS(**runs[ident])
+        async def preview(ident, **kw):
+            return jobs.create_delivery_preview(ident, **kw)
+        delivery.create_preview = preview
         delivery.authorize_and_start, delivery.resume_authorized_run = start, check
         coordinator = MockWorkflowCoordinator(jobs, NS(worker=None), delivery, None, NS(read_document=lambda:None))
         clock = Clock()
         coordinator.engine = RuleEngine(build_rules(coordinator), clock=clock.now)
-        with patch("app.growth.requests.resume_stamp", return_value="stamp"):
+        with patch("app.memory.resume_identity.resume_stamp", return_value="stamp"):
             for _ in range(12):
                 await coordinator.engine.step(facts(queue_depth=sum(r["status"] == "queued" for r in queue),
                                                    reply_candidates=list(runs.values())))

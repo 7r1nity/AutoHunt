@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace as NS
 
-from app.core.agent_tools import MissingPlanScope
+from app.core.job_targets import TargetClarification
 from app.core.models import BrowserTaskView, BrowserTaskStatus
 from app.core.replies import tool_reply
 from app.runtime.context import effect_checkpoint
@@ -132,9 +132,9 @@ class WorkflowExecutionContracts(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.h.calls), 1)
 
     async def test_input_wait_preserves_independent_read_and_does_not_poll_replay(self):
-        self.h.install([step("growth", "learning_plan_generate"), step("stats", "job_stats_read")])
-        async def missing(args): raise MissingPlanScope("请补充分析范围")
-        self.h.behavior["learning_plan_generate"] = missing
+        self.h.install([step("selection", "job_target_resolve", {"selector": "合成岗位"}), step("stats", "job_stats_read")])
+        async def missing(args): raise TargetClarification("请明确选择岗位")
+        self.h.behavior["job_target_resolve"] = missing
         await self.h.tick()
         self.assertEqual([s["status"] for s in self.h.plan["steps"]], ["waiting_input", "completed"])
         await asyncio.wait_for(self.h.runtime.watch_plan(self.h.run["id"]), 2)
@@ -143,16 +143,16 @@ class WorkflowExecutionContracts(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(recover_plan(self.h.store.get(self.h.run["id"]), session_id="default", stamp=STAMP).action, "clarify")
 
     async def test_filling_input_wait_reschedules_parent_and_executes_once(self):
-        self.h.install([step("growth", "learning_plan_generate")])
+        self.h.install([step("selection", "job_target_resolve", {"selector": "合成岗位"})])
         async def missing(args):
-            if "max_score" not in args: raise MissingPlanScope("请补充分数范围")
-            return {"title": "合成计划", "jobs_analyzed": 1}
-        self.h.behavior["learning_plan_generate"] = missing
+            if args.get("selector") != "第1个": raise TargetClarification("请补充岗位序号")
+            return {"items": [{"id": 1}], "message": "合成岗位已选中"}
+        self.h.behavior["job_target_resolve"] = missing
         await self.h.tick()
         await self.h.runtime.watch_plan(self.h.run["id"])
         with self.h.context():
             await self.h.runtime.revise_plan(self.h.run["id"], {"plan_id": "synthetic-plan", "expected_revision": 0,
-                "updates": [{"step_id": "growth", "arguments": {"max_score": 84}}]}, "分析85以下")
+                "updates": [{"step_id": "selection", "arguments": {"selector": "第1个"}}]}, "选择第1个")
         await asyncio.wait_for(self.h.runtime.tasks[self.h.run["id"]], 4)
         saved = self.h.store.get(self.h.run["id"])
         self.assertEqual(saved["status"], "completed")
@@ -194,13 +194,13 @@ class WorkflowExecutionContracts(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(s["status"] == "completed" for s in self.h.plan["steps"]))
 
     async def test_cancel_descendants_is_successful_withdrawal_not_run_failure(self):
-        self.h.install([step("delivery", "mock_delivery_start"), step("growth", "learning_plan_generate"),
+        self.h.install([step("delivery", "mock_delivery_start"), step("selection", "job_target_resolve", {"selector": "合成岗位"}),
             step("report", "job_stats_read", deps=["delivery"])])
         self.h.edit({"remove_steps": ["delivery"]})
         await self.h.tick()
         await self.h.runtime.watch_plan(self.h.run["id"])
         self.assertEqual(self.h.store.get(self.h.run["id"])["status"], "completed")
-        self.assertEqual([c["tool"] for c in self.h.calls], ["learning_plan_generate"])
+        self.assertEqual([c["tool"] for c in self.h.calls], ["job_target_resolve"])
 
     async def test_unknown_effect_is_not_safe_merely_because_error_says_before_submit(self):
         self.h.install([step("delivery", "mock_delivery_start", {"min_score": 85})])

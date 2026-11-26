@@ -149,41 +149,6 @@ export type Insights = {
   score_fair: number;
 };
 
-export type LearningGap = {
-  id: string;
-  category: "technical_skill" | "internship_direction" | "domain_knowledge" | "professional_skill";
-  name: string;
-  priority: "high" | "medium" | "low";
-  assessment: "resume_not_shown" | "evidenced_but_needs_depth";
-  resume_quote: string;
-  jd_quotes: Array<{ job_id: number; quote: string }>;
-  frequency: number;
-  rationale: string;
-  objective: string;
-  estimated_hours: number;
-  prerequisites: string[];
-  steps: string[];
-  practice: string;
-  acceptance: string[];
-  resume_target: "skill" | "project" | "none";
-  status: "todo" | "completed_user_reported";
-  completion_evidence: string;
-  resume_proposal_id: string | null;
-};
-
-export type LearningPlan = {
-  id: string;
-  resume_id: string;
-  resume_version: number;
-  title: string;
-  summary: string;
-  jobs_analyzed: number;
-  job_sources: Array<{ id: number; title: string; source_url: string }>;
-  model: string;
-  created_at: string;
-  gaps: LearningGap[];
-};
-
 export type InterviewQuestion = {
   id: string;
   category: "requirements" | "project" | "depth" | "gap" | "collaboration";

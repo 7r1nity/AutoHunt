@@ -111,7 +111,7 @@ export function RuntimePanel({ runtime, notice, showSession = true, onInspect }:
       <button className="button secondary compact" disabled={Boolean(runtime.busyRun)} onClick={() => void runtime.resetSearchState().catch((error) => notice(error.message))}>重置本会话条件</button>
     </details>}
     {runtime.dialogue && <details className="runtime-history">
-      <summary>上下文状态 · {({ search: "职位搜索", applications: "申请审核", resume: "简历", learning: "学习计划", general: "未激活任务" } as Record<string, string>)[runtime.dialogue.active_intent] ?? runtime.dialogue.active_intent}</summary>
+      <summary>上下文状态 · {({ search: "职位搜索", applications: "申请审核", resume: "简历", general: "未激活任务" } as Record<string, string>)[runtime.dialogue.active_intent] ?? runtime.dialogue.active_intent}</summary>
       <small>v{runtime.dialogue.revision} · 上下文和搜索条件持续保留并按新指令更新；待确认动作独立过期。</small>
       {Object.entries(runtime.dialogue.frames).map(([topic, frame]) => <p key={topic}>{frame.last_question || "参数已记录"}{frame.missing_slots.length ? ` · 待补：${frame.missing_slots.join("、")}` : ""}</p>)}
       {runtime.dialogue.pending.map((item) => <p key={item.id}>待确认：{item.description}</p>)}
@@ -121,7 +121,7 @@ export function RuntimePanel({ runtime, notice, showSession = true, onInspect }:
     <details className="runtime-history" open={Boolean(runtime.busyRun)}>
       <summary>运行记录{runtime.runs.some((run) => !terminalRun(run.status)) ? " · 有任务进行中" : ""}</summary>
       {runtime.runs.slice(0, 8).map((run) => <article key={run.id} className="runtime-run">
-        <div><strong>{run.kind === "daily" ? "每日模拟站任务" : run.kind === "learning_plan" ? "学习计划" : run.kind === "delivery" ? "简历投递" : run.kind === "browser" ? "职位搜索" : run.kind === "job_analysis" ? "职位分析" : "Agent 任务"}</strong><span>{labels[run.status] ?? run.status}</span></div>
+        <div><strong>{run.kind === "daily" ? "每日模拟站任务" : run.kind === "delivery" ? "简历投递" : run.kind === "browser" ? "职位搜索" : run.kind === "job_analysis" ? "职位分析" : "Agent 任务"}</strong><span>{labels[run.status] ?? run.status}</span></div>
         <small>{new Date(run.created_at).toLocaleString("zh-CN")} · {run.id.slice(0, 8)}</small>
         <p role="status">{runtime.progress[run.id] ?? run.error ?? "步骤已保存"}</p>
         {!!run.plan_steps?.length && <ol>{run.plan_steps.map((step) => <li key={step.id}>

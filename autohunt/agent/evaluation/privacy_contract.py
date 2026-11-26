@@ -243,17 +243,17 @@ class ModelAndExecutionContracts(unittest.IsolatedAsyncioTestCase):
         TRACES.append({"test": self.id(), "projected_request": seen[0].user_message,
                        "projected_tool_messages": seen[1]["messages"], "source_unchanged": messages == original})
 
-    async def test_real_sqlite_claim_allows_delivery_and_growth_once(self):
+    async def test_real_sqlite_claim_allows_delivery_and_results_once(self):
         temp = tempfile.TemporaryDirectory()
         key = Fernet.generate_key().decode()
         store = RunStore(Path(temp.name) / "run.db", key)
-        run, _ = store.create("default", "workflow", "chat", {"message": "85以上投递，以下且25k成长"})
+        run, _ = store.create("default", "workflow", "chat", {"message": "85以上投递并查看搜索结果"})
         calls = []
         document = NS(id="synthetic-document", version=1)
         candidate_state = NS(read=lambda: NS(profile=NS(resume_id="synthetic-resume")))
         resumes = NS(read_document=lambda: document)
         registry = AgentToolRegistry(jobs=None, browser=None, candidate_state=candidate_state,
-                                     resume_workspace=resumes, memory=None, learning_plans=NS(), mock_workflow=NS())
+                                     resume_workspace=resumes, memory=None, mock_workflow=NS())
         context = RunContext(run["id"], asyncio.current_task(),
             lambda kind, data: store.event(run["id"], kind, data), lambda checkpoint: store.update(run["id"], checkpoint=checkpoint),
             session_id="default", dialogue=store.dialogue_state("default"),
@@ -261,14 +261,14 @@ class ModelAndExecutionContracts(unittest.IsolatedAsyncioTestCase):
             search_state={"queries": ["金融分析师"]})
         token = current_run.set(context)
         from app.runtime.manager import AgentRuntime
-        runtime = AgentRuntime(store, NS(tool_registry=registry, candidate_state=candidate_state), NS(), NS(), None, resumes)
+        runtime = AgentRuntime(store, NS(tool_registry=registry, candidate_state=candidate_state), NS(), NS(), resumes)
         original_emit = context.emit
         context.emit = lambda kind,data: (original_emit(kind,data), runtime.emit(run["id"], kind,data))
         context.authorize_action = lambda *args: runtime.authorize_action(run["id"], *args)
         plan = {}
         try:
             plan = validate_draft(RequestDraft.model_validate(candidate()), registry,
-                "找18份工作，85以上投递，以下且25k以上成长", dialogue=context.dialogue,
+                "找18份工作，85以上投递并查看搜索结果", dialogue=context.dialogue,
                 conditions=context.search_state, stamp="synthetic-resume:synthetic-document:1")
             context.dialogue = store.mutate_dialogue("default", {"op": "task", "kind": "plan_id", "id": plan["id"], "bind": True})
             for step in plan["steps"]:
@@ -287,11 +287,11 @@ class ModelAndExecutionContracts(unittest.IsolatedAsyncioTestCase):
             # Simulate reopening the actual durable state between foreground and watcher.
             context.dialogue = RunStore(store.path, key).dialogue_state("default")
             await advance(plan, registry)
-            self.assertEqual(set(calls), {"job_search_start", "mock_delivery_start", "learning_plan_generate", "job_results_read"})
+            self.assertEqual(set(calls), {"job_search_start", "mock_delivery_start", "job_results_read"})
             self.assertEqual(plan["status"], "finished")
             self.assertEqual(plan["steps"][1]["authority_binding"]["arguments_digest"], DIGESTS[0])
             await advance(plan, registry)
-            self.assertEqual(len(calls), 4)
+            self.assertEqual(len(calls), 3)
             self.assertFalse(any(event["kind"] == "tool_denied" for event in store.events(run["id"])))
             # Boundary views cannot mutate claim or authority state.
             store.public_events(run["id"])
