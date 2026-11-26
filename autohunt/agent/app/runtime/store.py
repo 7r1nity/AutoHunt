@@ -224,6 +224,8 @@ class RunStore:
             for row in reversed(rows):
                 payload, result = self._load(row["payload"]), self._load(row["result"] or "{}")
                 checkpoint = self._load(row["checkpoint"] or "{}")
+                if payload.get("control_kind") in {"stop", "progress"} or checkpoint.get("phase") == "control_result":
+                    continue  # A progress question is not a replacement task request.
                 started = bool(row["mutation_started"])
                 if started and is_continuation(payload.get("message", "")) and not any(checkpoint.get(k) for k in ("browser_id", "delivery_id", "plan")):
                     facts = [{"kind": event["kind"], **self._load(event["data"])} for event in db.execute(

@@ -85,7 +85,9 @@ def salary_overview(salaries: list[str]) -> dict:
 
 
 def render_search_report(browser, report: dict) -> str:
-    status = {"completed": "完成", "stopped": "已停止", "failed": "失败"}.get(str(browser.status), "结束")
+    ongoing = str(browser.status) in {"idle", "starting", "running", "paused", "waiting_for_user"}
+    status = {"idle": "尚未开始", "starting": "准备中", "running": "进行中", "paused": "已暂停",
+              "waiting_for_user": "等待接管", "completed": "完成", "stopped": "已停止", "failed": "失败"}.get(str(browser.status), "结束")
     conditions = report.get("constraints", {})
     roles = conditions.get("queries") or [browser.query]
     lines = [f"**搜索{status}：{' / '.join(roles)}**",
@@ -95,7 +97,8 @@ def render_search_report(browser, report: dict) -> str:
     if target:
         lines.append(f"目标 {target} 个，已核实符合条件 {qualified} 个（包含已有看板职位）。")
         if qualified < target:
-            lines.append(f"尚差 {target - qualified} 个：{'任务被中断' if str(browser.status) == 'stopped' else '本轮范围或候选预算不足'}；不补入不符合条件的岗位。")
+            reason = "任务尚未结束，以上为当前进度" if ongoing else "任务被中断" if str(browser.status) == "stopped" else "本轮范围或候选预算不足"
+            lines.append(f"尚差 {target - qualified} 个：{reason}；不补入不符合条件的岗位。")
     if conditions.get("salary_min") is not None and not conditions.get("filters"):
         lines.append(f"薪资筛选：月薪区间下限 ≥ {conditions['salary_min']:,} 元；面议、未知及日薪不算满足。")
     if conditions.get("locations"):

@@ -41,6 +41,7 @@ class RunContext:
     historical_memory: list | None = None
     recall_memory: Callable | None = None
     memory_source_read: Callable | None = None
+    task_results_read: Callable[[], dict] | None = None
 
 
 current_run: ContextVar[RunContext | None] = ContextVar("autohunt_run", default=None)

@@ -9,8 +9,9 @@ import { JobTargetChoices } from "@/components/job-target-choices";
 import { InterviewPreparation } from "@/components/interview-preparation";
 import { ApplicationExport } from "@/components/application-export";
 import { WorkspaceIcon } from "@/components/workspace-icon";
-import { interruptionCommand, terminalRun } from "@/lib/agent-runtime";
-import { createChatTurn, createMessageId } from "@/lib/chat-message";
+import { interruptionCommand, interruptionScope, progressCommand, terminalRun } from "@/lib/agent-runtime";
+import type { TaskResults } from "@/lib/agent-runtime";
+import { createChatTurn, createMessageId, mergeTaskResults } from "@/lib/chat-message";
 import { chatDisplay } from "@/lib/chat-display";
 import { inventoryRequest, inventoryError } from "@/lib/inventory-request";
 import { shortJobDate } from "@/lib/job-display";
@@ -506,10 +507,12 @@ export default function Home() {
     void fetch(`/api/agent/chat?conversation_id=${runtime.sessionId}`, { cache: "no-store", signal: controller.signal })
       .then(async (response) => {
         if (!response.ok) return;
-        const history = await response.json() as { messages?: Array<{ role: "user" | "assistant"; content: string; created_at: string; response?: { resume_proposal?: ResumeProposal } }> };
+        const history = await response.json() as { messages?: Array<{ id?: string | number; run_id?: string; role: "user" | "assistant"; content: string; created_at: string; response?: { resume_proposal?: ResumeProposal; message_id?: string; snapshot_id?: string } }> };
         if (controller.signal.aborted) return;
         setMessages((history.messages ?? []).map((item, index) => ({
-          id: `history:${runtime.sessionId}:${index}`, author: item.role === "assistant" ? "agent" : "user", text: item.content,
+          id: item.role === "assistant" && item.response?.message_id ? `result:${item.response.message_id}` : `history:${runtime.sessionId}:${item.id ?? index}`,
+          author: item.role === "assistant" ? "agent" : "user", text: item.content,
+          snapshotId: item.response?.snapshot_id, sourceRunId: item.run_id,
           time: new Date(item.created_at).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }),
           ...(item.response?.resume_proposal ? { action: "resume_proposal" as const, resumeProposal: item.response.resume_proposal,
             proposalState: item.response.resume_proposal.status === "pending" ? "pending" as const : item.response.resume_proposal.status === "rejected" ? "rejected" as const : "approved" as const,
@@ -546,8 +549,13 @@ export default function Home() {
         }
         void fetchInsights();
       }
-      const text = event.kind === "browser_summary" || event.kind === "workflow_summary" ? event.data.message : (event.data.result as { message?: string })?.message;
+      const result = event.data.result as TaskResults | undefined;
+      const text = event.kind === "browser_summary" || event.kind === "workflow_summary" ? event.data.message : result?.result_message ?? result?.message;
       if (typeof text !== "string") return;
+      if (result?.message_id || result?.snapshot_id) {
+        setMessages((current) => mergeTaskResults(current, result, `event:${runId}:${event.seq}`, now()));
+        return;
+      }
       const proposal = event.kind === "response" ? (event.data.result as { resume_proposal?: ResumeProposal })?.resume_proposal : undefined;
       setMessages((current) => current.some((message) => message.author === "agent" && message.text === text) ? current : [...current, {
         id: `event:${runId}:${event.seq}`, author: "agent", text, time: now(),
@@ -672,6 +680,12 @@ export default function Home() {
   const activeResume = resumes.find((resume) => resume.id === candidateState?.profile.resume_id) ?? resumes[0] ?? null;
 
   const statusText = agentStatus === "running" ? "搜索运行中" : agentStatus === "paused" ? "任务已暂停" : agentStatus === "waiting" ? "等待登录确认" : "空闲 · 在对话中发送搜索指令";
+  const chatIsControl = interruptionCommand(chatText);
+  const chatIsQuery = progressCommand(chatText);
+  const chatSendDisabled = !chatText.trim() || (runtime.querying && chatIsQuery)
+    || (runtime.stopping && !chatIsQuery)
+    || (conversationLoading && !chatIsControl)
+    || (Boolean(runtime.busyRun) && !chatIsControl && !chatIsQuery);
 
   async function refreshAutomation(): Promise<BrowserTask["status"] | null> {
     const sessionAtPoll = runtime.currentSession.current;
@@ -1386,6 +1400,10 @@ export default function Home() {
       await interruptTask(value);
       return;
     }
+    if (progressCommand(value)) {
+      await readCurrentResults(value);
+      return;
+    }
     if (runtime.busyRun || conversationLoading) return;
     const sessionAtStart = runtime.sessionId;
     const turn = createChatTurn(value, now());
@@ -1484,14 +1502,54 @@ export default function Home() {
     }
   }
 
-  async function interruptTask(command?: string) {
+  async function readCurrentResults(value: string) {
+    if (runtime.querying || conversationLoading) return;
+    const session = runtime.sessionId;
+    const turn = createChatTurn(value, now());
+    const placeholder = turn[1].id;
+    turn[1].text = "正在读取当前结果…";
+    setMessages((current) => [...current, ...turn]);
+    setChatText((current) => current.trim() === value ? "" : current);
     try {
-      await runtime.interrupt(command && /(?:所有|全部)/.test(command) ? "all" : "session");
-      if (command) setChatText((current) => current.trim() === command ? "" : current);
-      setNotice("已核验任务与投递队列停止；已发送内容和历史保留。");
+      const result = await runtime.queryProgress(value);
+      if (runtime.currentSession.current !== session) return;
+      setMessages((current) => mergeTaskResults(current, result, placeholder, now()));
+    } catch (error) {
+      if (runtime.currentSession.current !== session) return;
+      const text = error instanceof Error ? error.message : "当前结果暂时无法读取；原任务继续执行。";
+      setMessages((current) => current.map((item) => item.id === placeholder ? { ...item, text } : item));
+      setNotice(text);
+    }
+  }
+
+  async function interruptTask(command?: string) {
+    if (runtime.stopping) return;
+    const session = runtime.sessionId;
+    const value = command ?? "停止当前会话任务";
+    const turn = createChatTurn(value, now());
+    let placeholder = turn[1].id;
+    let latest: TaskResults | null = null;
+    turn[1].text = "正在停止任务并读取当前结果…";
+    setMessages((current) => [...current, ...turn]);
+    if (command) setChatText((current) => current.trim() === command ? "" : current);
+    const showResult = (result: TaskResults) => {
+      if (runtime.currentSession.current !== session) return;
+      latest = result;
+      const previous = placeholder;
+      setMessages((current) => mergeTaskResults(current, result, previous, now()));
+      if (result.message_id) placeholder = `result:${result.message_id}`;
+    };
+    try {
+      const result = await runtime.interrupt(interruptionScope(value) ?? "session", value, showResult);
+      if (runtime.currentSession.current !== session) return;
+      showResult(result);
+      setNotice(result.message);
       await refreshAutomation();
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : "停止尚未确认，请重试");
+      if (runtime.currentSession.current !== session) return;
+      const text = error instanceof Error ? error.message : "停止尚未确认，请核对当前结果与运行记录";
+      if (!latest) setMessages((current) => current.map((item) => item.id === placeholder ? { ...item, text } : item));
+      setNotice(text);
     }
   }
 
@@ -1886,11 +1944,11 @@ export default function Home() {
                     <textarea rows={2} aria-label="给 Agent 的消息" value={chatText} onChange={(event) => setChatText(event.target.value)} placeholder="说说你想找的工作，或继续之前的任务…" onKeyDown={(event) => {
                       if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
                         event.preventDefault();
-                        if (chatText.trim() && !runtime.stopping && ((!runtime.busyRun && !conversationLoading) || interruptionCommand(chatText))) event.currentTarget.form?.requestSubmit();
+                        if (!chatSendDisabled) event.currentTarget.form?.requestSubmit();
                       }
                     }} />
                     {runtime.canInterrupt && <button type="button" className="stop-task" aria-label="停止当前会话任务" title="停止当前会话任务，保留已完成的步骤" disabled={runtime.stopping} onClick={() => void interruptTask()}>{runtime.stopping ? "停止中…" : "■ 停止"}</button>}
-                    <button type="submit" className="send" aria-label="发送" disabled={!chatText.trim() || runtime.stopping || ((Boolean(runtime.busyRun) || conversationLoading) && !interruptionCommand(chatText))}><WorkspaceIcon name="send" /></button>
+                    <button type="submit" className="send" aria-label="发送" disabled={chatSendDisabled}><WorkspaceIcon name="send" /></button>
                   </form>
                   <small className="chat-disclaimer">Enter 发送，Shift + Enter 换行。投递前请核对职位与申请内容。</small>
                 </div>

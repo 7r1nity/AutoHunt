@@ -385,15 +385,38 @@ async def cancel_all_runs() -> dict:
 
 
 class StopTasksRequest(BaseModel):
-    conversation_id: str = "default"
+    conversation_id: str = Field(default="default", pattern=r"^[a-zA-Z0-9_-]{1,80}$")
     scope: Literal["session", "all"] = "session"
+    message: str | None = Field(default=None, max_length=4000)
+    request_id: str | None = Field(default=None, pattern=r"^[a-zA-Z0-9_:-]{1,100}$")
+
+
+class TaskResultsRequest(BaseModel):
+    conversation_id: str = Field(default="default", pattern=r"^[a-zA-Z0-9_-]{1,80}$")
+    message: str = Field(default="当前结果", min_length=1, max_length=4000)
+    request_id: str | None = Field(default=None, pattern=r"^[a-zA-Z0-9_:-]{1,80}$")
+
+
+@app.post("/api/v1/runs/control/results")
+def task_results(payload: TaskResultsRequest) -> dict:
+    """Read saved task results without waiting for model or execution admission."""
+    try:
+        return agent_runtime.progress_result(payload.conversation_id, payload.message,
+                                             request_id=payload.request_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="会话不存在") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @app.post("/api/v1/runs/control/stop")
 async def stop_tasks(payload: StopTasksRequest) -> dict:
-    if payload.scope == "session" and not any(s["id"] == payload.conversation_id for s in run_store.sessions()):
+    if not any(s["id"] == payload.conversation_id for s in run_store.sessions()):
         raise HTTPException(status_code=404, detail="会话不存在")
-    return await agent_runtime.stop_tasks(None if payload.scope == "all" else payload.conversation_id)
+    return await agent_runtime.stop_tasks(None if payload.scope == "all" else payload.conversation_id,
+        conversation_id=payload.conversation_id,
+        message=payload.message or ("停止全部任务" if payload.scope == "all" else "停止当前会话任务"),
+        request_id=payload.request_id)
 
 
 @app.get("/api/v1/runs/control/stop")

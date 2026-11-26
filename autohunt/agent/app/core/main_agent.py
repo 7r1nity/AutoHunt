@@ -903,6 +903,11 @@ class AutoHuntAgent:
         return self._confirm_search_response(queries, locations)
 
     def _direct_task_status(self) -> ChatResponse:
+        context = active_run()
+        if context and context.task_results_read:
+            from ..runtime.task_results import render_task_snapshot
+            return ChatResponse(message=render_task_snapshot(context.task_results_read()), lane=AgentLane.APPLICATION,
+                tool_events=[ToolEvent(tool="browser_task_read", status="ok", detail="scoped_task_results")])
         browser = self.tool_registry.browser if self.tool_registry is not None else None
         if browser is None:
             raise _DirectHandlerUnavailable("task_status")
@@ -977,7 +982,15 @@ class AutoHuntAgent:
         except (KeyError, ValueError):
             return ChatResponse(message="本会话的搜索记录已不可用，请查看运行记录；没有启动或重放搜索。", lane=AgentLane.MARKET)
         if browser.status not in {BrowserTaskStatus.COMPLETED, BrowserTaskStatus.STOPPED, BrowserTaskStatus.FAILED}:
-            return ChatResponse(message=f"搜索尚未结束，已核对 {report['covered_jobs']} 个职位；完成后会生成整体薪资、JD 总结和逐岗位简表。没有重新启动搜索。", lane=AgentLane.MARKET)
+            from ..runtime.task_results import render_task_snapshot
+            if context and context.task_results_read:
+                text = render_task_snapshot(context.task_results_read())
+            else:
+                # Direct callers without a runtime still receive saved partial
+                # rows rather than being told to wait for search completion.
+                from ..jobs.search_reporting import render_search_report
+                text = render_search_report(browser, report)
+            return ChatResponse(message="搜索仍在执行；以下是当前已保存结果。\n\n" + text, lane=AgentLane.MARKET)
         from ..jobs.search_reporting import render_search_report
         if report.get("jobs"):
             dialogue_change("snapshot", topic="applications", kind="job", version=task_id, displayed=True,

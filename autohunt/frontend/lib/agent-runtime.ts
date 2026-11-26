@@ -13,15 +13,33 @@ export type TargetChoice = { id: string; step_id: string; expected_revision: num
 
 export type RunEvent = { seq: number; kind: string; data: Record<string, unknown> };
 
+export type TaskResults = {
+  message: string; result_message?: string; status?: string; conversation_id?: string;
+  snapshot_id?: string; snapshot?: Record<string, unknown> | null;
+  message_id?: string | null; run_id?: string; user_message_id?: string | null;
+};
+
 export const terminalRun = (status: string) => ["completed", "failed", "cancelled", "timed_out", "interrupted", "outcome_indeterminate"].includes(status);
 
 // Fully consumed control commands only: questions, negation, quotes and mixed
 // requests must not cancel a task just because they mention stopping.
 export const interruptionScope = (text: string): "session" | "all" | null => {
-  const match = /^(?:请|帮我|先|请先|先帮我)?(?:中断|停止|取消|终止|结束)(所有|全部)?(?:当前|本次|这个|正在执行的|正在运行的)?(?:任务|执行|请求|搜索|投递|自动投递|沟通|浏览器任务)?[。！!]*$/.exec(text.replace(/\s+/g, ""));
-  return match ? match[1] ? "all" : "session" : null;
+  const normalized = text.trim().replace(/\s+/g, " ").replace(/[.!！。]+$/, "");
+  const match = /^(?:请|帮我|先|请先|先帮我)?(?:停止|中断|取消|终止|结束)(所有|全部)?(?:当前|本次|这个|正在执行的|正在运行的)?(?:(?:每日|每天|定时)?任务|执行|请求|搜索|投递|自动投递|沟通|浏览器任务)?(?:(?:并且|并|然后|，|,)(?:把|将)?(?:当前|目前|已有|已找到的|本轮)?(?:结果|进度|岗位|职位)(?:返回|发给我|给我|显示出来)|(?:并且|并|然后|，|,)(?:返回|显示|汇总|给我|发给我)(?:当前|目前|已有|本轮)?(?:结果|进度|岗位|职位))?$/.exec(normalized.replace(/\s+/g, ""));
+  if (match) return match[1] ? "all" : "session";
+  const english = /^(?:please )?(?:stop|cancel|interrupt|halt|abort|terminate)(?: (all|everything)(?: (?:tasks?|jobs?|applications?|work|searches?))?| (?:(?:the|my) )?(?:current )?(?:task|job|search|applications?|work|execution))?(?: (?:for now|now|please))?(?:[,;]?(?: and)? (?:show|return|give me)(?: the)? (?:current |partial )?(?:results|progress))?$/i.exec(normalized);
+  return english ? english[1] ? "all" : "session" : null;
 };
 export const interruptionCommand = (text: string) => interruptionScope(text) !== null;
+
+// Only complete read requests bypass foreground work. Mentioning progress in a
+// new search, a condition amendment or a quoted example does not authorize it.
+export const progressCommand = (text: string): boolean => {
+  const chinese = text.replace(/\s+/g, "").replace(/[。！!？?．.]+$/, "");
+  const english = text.replace(/\s+/g, " ").trim().replace(/[.?!！。？]+$/, "");
+  return /^(?:(?:请|帮我|先|麻烦)?(?:查看|看看|查询|汇报|报告|给我|告诉我|展示|显示)?(?:一下)?(?:当前|目前|现在|本轮|这轮|本次|这次)?(?:的)?(?:任务|搜索|申请|投递|沟通|求职)?(?:的)?(?:进度|状态|结果|统计|汇总|总结|阶段性结果|已找到的岗位|已找到的职位)(?:如何|怎么样|怎样|到哪了|是什么|有哪些|呢)?|现在在干什么|进行到哪了|进展如何|进度如何|进度怎么样了|搜索进度到哪了|(?:已经|已|目前|现在|本轮|这轮|这次|一共|今天)?(?:已经|已)?(?:找到|搜到|找|搜索到|保存|核对|投递|投|沟通|申请)(?:了)?(?:多少|几个)(?:个|份)?(?:岗位|职位|工作|简历)?(?:了|呢)?)$/.test(chinese)
+    || /^(?:please )?(?:(?:(?:show|tell) me )?(?:(?:the|my) )?(?:(?:current|latest|task|search|application) )?(?:status|progress|results?|summary|statistics)|partial results|(?:show|give me|return)(?: the| my)?(?: current| partial)? (?:results|progress|status)|how(?:['’]s| is) it going|what(?:['’]s| is) (?:the )?(?:(?:current|task|search|application) )?(?:status|progress)|how many (?:jobs|applications)(?: (?:(?:have you )?(?:found|saved|contacted|applied to)|so far|today))?|how many jobs (?:have you (?:found|applied to)|did you (?:find|apply to))(?:(?: so far| today))?)$/i.test(english);
+};
 
 export async function createRun(conversation_id: string, kind: AgentRun["kind"], payload: Record<string, string>) {
   const response = await fetch("/api/agent/runs", { method: "POST", headers: { "Content-Type": "application/json" },

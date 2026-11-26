@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { AgentRun, RunEvent, TargetChoice, createRun, followRun, terminalRun } from "./agent-runtime";
+import { AgentRun, RunEvent, TargetChoice, TaskResults, createRun, followRun, terminalRun } from "./agent-runtime";
 
 export type SessionSearchState = { queries: string[]; locations: string[]; result_limit: number | null;
   salary_min: number | null; query_source: string; revision: number;
@@ -20,6 +20,7 @@ export function useAgentRuntime() {
   const [progress, setProgress] = useState<Record<string, string>>({});
   const [busyRun, setBusyRun] = useState<string | null>(null);
   const [stopping, setStopping] = useState(false);
+  const [querying, setQuerying] = useState(false);
   const [notifications, setNotifications] = useState<Array<{ sessionId: string; runId: string; event: RunEvent }>>([]);
   const currentSession = useRef(sessionId);
   const connections = useRef(new Map<string, AbortController>());
@@ -28,7 +29,15 @@ export function useAgentRuntime() {
   const pendingStart = useRef<{ session: string; cancel: boolean; ready: Promise<AgentRun> } | null>(null);
   const controls = useRef(new Map<string, Promise<AgentRun>>());
   const settlements = useRef(new Map<string, (run: AgentRun) => void>());
-  const stopRequest = useRef<{ session: string; promise: Promise<void> } | null>(null);
+  const stopRequest = useRef<{ session: string; promise: Promise<TaskResults> } | null>(null);
+  const resultRequests = useRef(new Map<string, Promise<TaskResults>>());
+
+  function publishControlResult(session: string, result: TaskResults) {
+    if (!result.message_id) return;
+    setNotifications((current) => [...current.slice(-99), { sessionId: result.conversation_id ?? session,
+      runId: result.run_id ?? `control:${result.message_id}`,
+      event: { seq: 0, kind: "response", data: { result } } }]);
+  }
 
   const refresh = useCallback(async (session: string) => {
     const [response, conditions, context] = await Promise.all([
@@ -102,6 +111,7 @@ export function useAgentRuntime() {
     localStorage.setItem("autohunt-conversation", sessionId);
     setBusyRun(null);
     setStopping(false);
+    setQuerying(resultRequests.current.has(sessionId));
     setRuns([]);
     setSearchState(null);
     setDialogue(null);
@@ -229,7 +239,34 @@ export function useAgentRuntime() {
     finally { if (controls.current.get(key) === pending) controls.current.delete(key); }
   }
 
-  async function interrupt(scope: "session" | "all" = "session") {
+  async function queryProgress(message: string): Promise<TaskResults> {
+    const session = sessionId;
+    const existing = resultRequests.current.get(session);
+    if (existing) return existing;
+    setQuerying(true);
+    const request = (async () => {
+      const response = await fetch("/api/agent/runs/control/results", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        signal: AbortSignal.timeout(20_000),
+        body: JSON.stringify({ conversation_id: session, message, request_id: crypto.randomUUID() }),
+      });
+      const result = await response.json() as TaskResults & { detail?: string };
+      if (!response.ok) throw new Error(result.detail ?? result.message ?? "无法读取当前结果，请稍后重试");
+      publishControlResult(session, result);
+      // Read-only requests never replace or settle the executing chat promise.
+      void refresh(session).catch(() => undefined);
+      return result;
+    })();
+    resultRequests.current.set(session, request);
+    try { return await request; }
+    finally {
+      if (resultRequests.current.get(session) === request) resultRequests.current.delete(session);
+      if (currentSession.current === session) setQuerying(false);
+    }
+  }
+
+  async function interrupt(scope: "session" | "all" = "session", message?: string,
+      onProgress?: (result: TaskResults) => void): Promise<TaskResults> {
     const session = sessionId;
     const stopKey = scope === "all" ? "*" : session;
     if (stopRequest.current?.session === stopKey) return stopRequest.current.promise;
@@ -243,22 +280,27 @@ export function useAgentRuntime() {
       }
       const endpoint = `/api/agent/runs/control/stop?conversation_id=${encodeURIComponent(session)}&scope=${scope}`;
       let response = await fetch(endpoint, { method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ conversation_id: session, scope }) });
-      let result = await response.json() as { status: string; message: string };
+        body: JSON.stringify({ conversation_id: session, scope, message: message ?? (scope === "all" ? "停止全部任务" : "停止当前会话任务"), request_id: crypto.randomUUID() }) });
+      let result = await response.json() as TaskResults;
       if (!response.ok) throw new Error(result.message ?? "停止请求未被接受");
+      onProgress?.(result);
+      publishControlResult(session, result);
       const deadline = Date.now() + 30_000;
       while (result.status === "stopping" && Date.now() < deadline) {
         await new Promise((resolve) => setTimeout(resolve, 500));
         response = await fetch(endpoint, { cache: "no-store" });
         result = await response.json();
         if (!response.ok) throw new Error("无法核对停止状态；后台清理仍会继续");
+        onProgress?.(result);
+        publishControlResult(session, result);
       }
       await refresh(session);
       if (result.status !== "stopped") throw new Error(result.message || "停止尚未确认，请核对运行记录；后台清理不会因页面断开而取消");
       if (currentSession.current === session) setBusyRun(null);
+      return result;
     })();
     stopRequest.current = { session: stopKey, promise };
-    try { await promise; }
+    try { return await promise; }
     finally {
       if (stopRequest.current?.promise === promise) stopRequest.current = null;
       if (currentSession.current === session) setStopping(false);
@@ -296,5 +338,5 @@ export function useAgentRuntime() {
   const canInterrupt = stopping || Boolean(busyRun) || runs.some(
     (run) => run.session_id === sessionId && !terminalRun(run.status),
   );
-  return { sessionId, setSessionId, sessions, searchState, resetSearchState, updateSearchSource, dialogue, resetContext, runs, progress, busyRun, stopping, canInterrupt, interrupt, notifications, currentSession, newSession, execute, control, chooseTarget, observe };
+  return { sessionId, setSessionId, sessions, searchState, resetSearchState, updateSearchSource, dialogue, resetContext, runs, progress, busyRun, stopping, querying, queryProgress, canInterrupt, interrupt, notifications, currentSession, newSession, execute, control, chooseTarget, observe };
 }

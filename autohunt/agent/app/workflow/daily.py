@@ -82,7 +82,7 @@ class DailyWorkflow:
             await self.tick()
         return self.runs.get(run_id)
 
-    async def cancel(self, run_id):
+    async def cancel(self, run_id, *, publish_result=True):
         run = self.runs.get(run_id)
         if run["kind"] != "daily" or run["status"] in TERMINAL:
             return run
@@ -95,7 +95,8 @@ class DailyWorkflow:
             await self.browser.stop()
         uncertain = any(j.get("phase") in {"contact_started", "submit_started", "uncertain"}
                         for j in (run["checkpoint"] or {}).get("jobs", {}).values())
-        self.finish(run_id, "outcome_indeterminate" if uncertain else "cancelled", "用户停止每日任务；已发送内容保留")
+        self.finish(run_id, "outcome_indeterminate" if uncertain else "cancelled", "用户停止每日任务；已发送内容保留",
+                    result_snapshot=publish_result, publish=publish_result)
         return self.runs.get(run_id)
 
     def enqueue(self, request_id: str):
@@ -215,14 +216,25 @@ class DailyWorkflow:
         self.runs.event(run_id, "workflow_summary", {"message": message, "daily_stage": "waiting_reply"})
         self.runs.event(run_id, "daily_waiting_summary", {})
 
-    def finish(self, run_id, status, detail):
+    def finish(self, run_id, status, detail, *, result_snapshot=False, publish=True):
         run = self.runs.get(run_id)
         if run["status"] in TERMINAL:
             return
         result = {"message": detail, "jobs": {k: v.get("phase") for k, v in (run["checkpoint"] or {}).get("jobs", {}).items()}}
+        message_id = "daily:" + run_id
+        if result_snapshot:
+            from ..runtime.task_results import read_task_snapshot, render_task_snapshot
+            snapshot = read_task_snapshot(self.runs, self.jobs, run["session_id"],
+                                          run_ids=[run_id], run_states={run_id: status})
+            detail += "\n\n" + render_task_snapshot(snapshot, heading="停止后的当前结果")
+            message_id = "daily-stop:" + run_id
+            result.update(message=detail, snapshot=snapshot, snapshot_id=snapshot["snapshot_id"],
+                          message_id=message_id, run_id=run_id, conversation_id=run["session_id"])
         # Idempotent conversation key covers a crash between summary and finish.
-        self.jobs.add_conversation_message("assistant", detail, conversation_id="default", run_id="daily:" + run_id)
-        self.runs.event(run_id, "workflow_summary", {"message": detail})
+        if publish:
+            self.jobs.add_conversation_message("assistant", detail, response=result,
+                conversation_id=run["session_id"], run_id=message_id)
+            self.runs.event(run_id, "workflow_summary", result)
         self.runs.update(run_id, status=status, result=result, error=detail if status not in {"completed", "cancelled"} else None)
         self.runs.event(run_id, "status", {"status": status, "detail": detail})
 

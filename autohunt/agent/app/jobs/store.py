@@ -494,7 +494,7 @@ class JobStore:
             raise ValueError("Unsupported conversation role")
         # Full search reports can contain up to 200 numbered jobs. Keep their
         # persisted display intact; model-context budgets are applied separately.
-        display_limit = 120_000 if run_id and run_id.startswith(("summary:", "report-update:", "daily-search:")) else 12_000
+        display_limit = 120_000 if run_id and run_id.startswith(("summary:", "report-update:", "daily-search:", "task-stop:", "task-progress:", "daily-stop:")) else 12_000
         safe_content = redact_text(content)[:display_limit]
         safe_response = json.dumps(redact(response), ensure_ascii=False, default=str) if response is not None else None
         with self.lock, self._connect() as db:

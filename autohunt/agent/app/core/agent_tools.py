@@ -932,7 +932,11 @@ class AgentToolRegistry:
         }
 
     async def _browser_read(self, _args: dict[str, Any]) -> Any:
-        return browser_availability(self.browser)
+        view = browser_availability(self.browser)
+        context = active_run()
+        if context and context.task_results_read:
+            return {**view, "task_results": context.task_results_read()}
+        return view
 
     async def _browser_resume(self, _args: dict[str, Any]) -> Any:
         scoped_browser(self.browser)

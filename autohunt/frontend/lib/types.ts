@@ -388,6 +388,8 @@ export type Message = {
   author: "agent" | "user";
   text: string;
   time: string;
+  snapshotId?: string;
+  sourceRunId?: string;
   action?: "confirm_login" | "open_board" | "resume_proposal" | "clarify";
   actionQuery?: string;
   actionQueries?: string[];

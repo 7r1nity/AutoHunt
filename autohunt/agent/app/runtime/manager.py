@@ -10,7 +10,7 @@ from typing import AsyncIterator
 from .context import RunContext, current_run
 from .search_state import prepare_search_state
 from .store import RunStore, TERMINAL
-from .control import stop_scope
+from .control import progress_requested, stop_scope
 from ..core.models import BrowserSearchRequest
 from ..security.risk import broad_delivery_scope
 from .resilience import WatchLimits, wait_expired
@@ -91,6 +91,7 @@ class AgentRuntime:
         self.delivery = None
         self.daily = None
         self.stop_jobs: dict[str, asyncio.Task] = {}
+        self.stop_contexts: dict[str, dict] = {}
         self.stop_lock = asyncio.Lock()
         self.watch_limits = WatchLimits.configured()
 
@@ -98,8 +99,24 @@ class AgentRuntime:
         self.sessions.clear()
         self.slots = asyncio.Semaphore(2)
         self.recover_search_summaries()
+        # A persisted control request must never restart as a normal model task.
+        # Settle pending stops before admitting other recovered foreground work.
+        for control in self.store.list(active=True, limit=None):
+            if ((control.get("payload") or {}).get("control_kind") == "stop"
+                    or control["kind"] == "chat" and stop_scope((control.get("payload") or {}).get("message", ""))):
+                self.store.update(control["id"], checkpoint={"phase": "control_result", "control_kind": "stop"})
+                await self._stop_command(control, stop_scope(control["payload"].get("message", "")) or "session")
         # Re-enqueue only requests which never began. Side effects are not replayed.
         for run in reversed(self.store.list(active=True, limit=None)):
+            if ((run.get("payload") or {}).get("control_kind") == "progress"
+                    or run["kind"] == "chat" and progress_requested((run.get("payload") or {}).get("message", ""))):
+                try:
+                    self._progress_answer(run)
+                except Exception:
+                    # Reporting is read-only. A failed recovery query must not
+                    # prevent unrelated work or the application from starting.
+                    pass
+                continue
             if run["kind"] == "learning_plan":
                 self.finish(run["id"], "cancelled", "该功能已移除；历史记录保留，不再执行")
                 continue
@@ -147,17 +164,23 @@ class AgentRuntime:
 
     def submit(self, session_id: str, request_key: str, kind: str, payload: dict, parent_id=None) -> dict:
         scope = stop_scope(payload.get("message", "")) if kind == "chat" else None
-        if not scope and any(not task.done() for key, task in self.stop_jobs.items()
+        progress = not scope and kind == "chat" and progress_requested(payload.get("message", ""))
+        if not scope and not progress and any(not task.done() for key, task in self.stop_jobs.items()
                              if key in {"*", session_id}):
             raise ValueError("当前正在停止任务，请等待停止结果后再发起新任务")
         if kind not in {"chat", "job_analysis"}:
             raise ValueError("不支持的任务类型")
-        run, created = self.store.create(session_id, request_key, kind, payload, parent_id, control=bool(scope))
+        if scope or progress:
+            payload = {**payload, "control_kind": "stop" if scope else "progress"}
+        run, created = self.store.create(session_id, request_key, kind, payload, parent_id, control=bool(scope or progress))
         if created:
             if scope:
+                self.store.update(run["id"], checkpoint={"phase": "control_result", "control_kind": "stop"})
                 task = asyncio.create_task(self._stop_command(run, scope), name=f"stop-command-{run['id']}")
                 self.tasks[run["id"]] = task
                 task.add_done_callback(lambda done: self.tasks.pop(run["id"], None))
+            elif progress:
+                self._progress_answer(run)
             else:
                 self.schedule(run["id"])
         return run
@@ -169,15 +192,51 @@ class AgentRuntime:
             conversation_id=run["session_id"], run_id=run["id"])
         try:
             key = "*" if scope == "all" else run["session_id"]
-            await self.stop_tasks(None if scope == "all" else run["session_id"], exclude_run=run["id"])
+            await self.stop_tasks(None if scope == "all" else run["session_id"], exclude_run=run["id"],
+                                  conversation_id=run["session_id"])
             result = await asyncio.shield(self.stop_jobs[key])
-            self.store.update(run["id"], result={"message": result["message"], "lane": "application"})
-            self.jobs.add_conversation_message("assistant", result["message"],
-                conversation_id=run["session_id"], run_id=run["id"])
-            self.store.event(run["id"], "response", {"result": {"message": result["message"], "lane": "application"}})
+            response = {**result, "message": result.get("result_message", result["message"]), "lane": "application"}
+            self.store.update(run["id"], result=response)
+            self.store.event(run["id"], "response", {"result": response})
             self.finish(run["id"], "completed" if result["status"] == "stopped" else "failed", result["message"])
         except Exception as exc:
             self.finish(run["id"], "failed", f"停止未能确认：{type(exc).__name__}；请核对任务状态")
+
+    def task_snapshot(self, session_id: str | None, *, run_ids: list[str] | None = None) -> dict:
+        from .task_results import read_task_snapshot
+        return read_task_snapshot(self.store, self.jobs, session_id, run_ids=run_ids)
+
+    def _progress_answer(self, run: dict) -> dict:
+        """Read-only control lane; never takes the planning/session execution lock."""
+        from .task_results import render_task_snapshot
+        self.store.update(run["id"], status="running", checkpoint={"phase": "control_result", "control_kind": "progress"})
+        self.jobs.add_conversation_message("user", run["payload"]["message"],
+            conversation_id=run["session_id"], run_id=run["id"])
+        try:
+            snapshot = self.task_snapshot(run["session_id"])
+            message_id = "task-progress:" + run["id"]
+            response = {"message": render_task_snapshot(snapshot), "snapshot": snapshot,
+                        "snapshot_id": snapshot["snapshot_id"], "message_id": message_id,
+                        "run_id": run["id"], "conversation_id": run["session_id"], "lane": "application"}
+            self.jobs.add_conversation_message("assistant", response["message"], response=response,
+                conversation_id=run["session_id"], run_id=message_id)
+            self.store.event(run["id"], "execution_path", {"mode": "local_rule", "reason": "task_results_control"})
+            self.store.event(run["id"], "response", {"result": response})
+            self.finish(run["id"], "completed", response["message"], result=response)
+            return response
+        except Exception as exc:
+            self.finish(run["id"], "failed", f"当前结果读取失败：{type(exc).__name__}；原任务继续执行，可重试只读查询")
+            raise
+
+    def progress_result(self, session_id: str, message: str = "当前结果", *, request_id: str | None = None) -> dict:
+        import uuid
+        run, created = self.store.create(session_id, "progress:" + (request_id or uuid.uuid4().hex), "chat",
+            {"message": message, "control_kind": "progress"}, control=True)
+        if not created:
+            if run.get("result"):
+                return run["result"]
+            raise ValueError("同一结果查询尚在处理，请稍后重试")
+        return self._progress_answer(run)
 
     def track_delivery(self, task_id: str, session_id: str = "default") -> dict:
         run, created = self.store.create(session_id, f"delivery:{task_id}", "delivery", {})
@@ -538,6 +597,7 @@ class AgentRuntime:
                                          cancellation_requested=lambda: bool(self.store.get(run_id)["cancel_requested"]),
                                          authorize_action=lambda *args: self.authorize_action(run_id, *args),
                                          resolve_approval=lambda message: self.resolve_approval(run["session_id"], message),
+                                         task_results_read=lambda: self.task_snapshot(run["session_id"]),
                                          diagnose=lambda kind, data: self.store.event(run_id, kind, data),
                                          enforce_task_scope=True)
                     token = current_run.set(context)
@@ -853,6 +913,7 @@ class AgentRuntime:
                             enforce_task_scope=True, user_message=plan["original"],
                             cancellation_requested=lambda: bool(self.store.get(run_id)["cancel_requested"]))
                         context.authorize_action = lambda *args: self.authorize_action(run_id, *args)
+                        context.task_results_read = lambda: self.task_snapshot(run["session_id"])
                         token = current_run.set(context)
                         try:
                             self.store.update(run_id, status="running")
@@ -1124,31 +1185,103 @@ class AgentRuntime:
         return await asyncio.shield(self.stop_jobs["*"])
 
     def stop_status(self, session_id: str | None) -> dict:
-        task = self.stop_jobs.get(session_id if session_id is not None else "*")
+        key = session_id if session_id is not None else "*"
+        task = self.stop_jobs.get(key)
         if task is None:
             return {"status": "idle", "message": "尚无停止请求"}
         if not task.done():
-            return {"status": "stopping", "message": "正在停止执行器并核验队列"}
+            result = {"status": "stopping", "message": "正在停止执行器并核验队列"}
+            context = self.stop_contexts.get(key, {})
+            return self._with_stop_results(result, session_id, context, publish=False)
         if task.cancelled() or task.exception():
-            return {"status": "failed", "message": "停止清理未确认，请核对运行记录"}
+            return self._with_stop_results({"status": "failed", "message": "停止清理未确认，请核对运行记录"},
+                                           session_id, self.stop_contexts.get(key, {}), publish=False)
         return task.result()
 
-    async def stop_tasks(self, session_id: str | None, *, exclude_run: str | None = None) -> dict:
+    async def stop_tasks(self, session_id: str | None, *, exclude_run: str | None = None,
+                         conversation_id: str | None = None, message: str | None = None,
+                         request_id: str | None = None) -> dict:
         key = session_id if session_id is not None else "*"
+        owner = conversation_id or session_id or "default"
+        # Validate even an empty session: no accidental fallback to another chat.
+        self.store.dialogue_state(owner)
+        if message:
+            import uuid
+            self.jobs.add_conversation_message("user", message, conversation_id=owner,
+                run_id="task-stop-request:" + (request_id or uuid.uuid4().hex))
         task = self.stop_jobs.get(key)
+        active = [run for run in self.store.list(session_id, active=True, limit=None)
+                  if run["id"] != exclude_run and not (run.get("payload") or {}).get("control_kind")
+                  and not (run["kind"] == "chat" and stop_scope((run.get("payload") or {}).get("message", "")))]
+        queue = self.jobs.mock_delivery_queue(session_id=session_id) if hasattr(self.jobs, "mock_delivery_queue") else []
+        if task is not None and task.done() and not task.cancelled() and not task.exception():
+            previous = task.result()
+            context = self.stop_contexts.get(key, {})
+            if (previous.get("status") == "stopped" and not active and not queue
+                    and context.get("conversation_id") == owner
+                    and context.get("work_version") == self._stop_work_version(session_id)):
+                # No new work does not imply no new evidence (e.g. a late
+                # receipt). Re-read the same scope before reusing the response.
+                try:
+                    fresh = self.task_snapshot(session_id, run_ids=context.get("run_ids") or None)
+                    if fresh["snapshot_id"] == previous.get("snapshot_id"):
+                        return previous
+                except Exception:
+                    pass
         if task is None or task.done():
+            self.stop_contexts[key] = {"conversation_id": owner, "run_ids": [run["id"] for run in active]}
             task = asyncio.create_task(self._stop_scope(session_id, exclude_run), name=f"stop-scope-{key}")
             self.stop_jobs[key] = task
         # Disconnects do not cancel cleanup. Clients poll until it is verified.
         await asyncio.wait({task}, timeout=1)
         return self.stop_status(session_id)
 
+    def _stop_work_version(self, session_id: str | None) -> str:
+        records = [(run["id"], run["status"], run.get("updated_at"))
+                   for run in self.store.list(session_id, limit=None)
+                   if not (run.get("payload") or {}).get("control_kind")
+                   and (run.get("checkpoint") or {}).get("phase") != "control_result"
+                   and not (run["kind"] == "chat" and stop_scope((run.get("payload") or {}).get("message", "")))]
+        return hashlib.sha256(json.dumps(records, sort_keys=True).encode()).hexdigest()
+
+    def _with_stop_results(self, result: dict, session_id: str | None, context: dict, *, publish: bool) -> dict:
+        """Stopping and stopped views use the same saved evidence, never browser writes."""
+        from .task_results import render_task_snapshot
+        owner = context.get("conversation_id") or session_id or "default"
+        try:
+            snapshot = self.task_snapshot(session_id, run_ids=context.get("run_ids") or None)
+            heading = "停止后的当前结果" if result["status"] == "stopped" else "停止尚未确认，以下为已保存结果"
+            text = result["message"] + "\n\n" + render_task_snapshot(snapshot, heading=heading)
+            identity = {"scope": session_id, "conversation_id": owner, "run_ids": snapshot["run_ids"], "counts": snapshot["counts"],
+                        "jobs": snapshot["jobs"], "status": result["status"]}
+            digest = hashlib.sha256(json.dumps(identity, ensure_ascii=False, sort_keys=True).encode()).hexdigest()[:32]
+            message_id = "task-stop:" + digest if publish else None
+            response = {**result, "result_message": text, "snapshot": snapshot,
+                        "snapshot_id": snapshot["snapshot_id"], "message_id": message_id,
+                        "conversation_id": owner}
+        except Exception as exc:
+            # A reporting error must not undo confirmed cancellation, or fabricate zero successes.
+            response = {**result, "result_message": result["message"] +
+                        f"\n当前结果暂不可读取（{type(exc).__name__}）；记录保留，可重试只读查询。",
+                        "snapshot": None, "snapshot_id": None, "message_id": None, "conversation_id": owner}
+        if publish:
+            key = response.get("message_id") or "task-stop-unavailable:" + hashlib.sha256(
+                json.dumps({"scope": session_id, "conversation_id": owner, "runs": context.get("run_ids", [])}, sort_keys=True).encode()).hexdigest()[:32]
+            response["message_id"] = key
+            self.jobs.add_conversation_message("assistant", response["result_message"],
+                response={**response, "message": response["result_message"]}, conversation_id=owner, run_id=key)
+        return response
+
     async def _stop_scope(self, session_id: str | None, exclude_run: str | None) -> dict:
         async with self.stop_lock:
             failures, stopped, uncertain = [], [], []
             coordinator = getattr(self.agent.tool_registry, "mock_workflow", None)
             runs = [run for run in self.store.list(session_id, active=True) if run["id"] != exclude_run
+                    and not (run.get("payload") or {}).get("control_kind")
                     and not (run["kind"] == "chat" and stop_scope(run["payload"].get("message", "")))]
+            key = session_id if session_id is not None else "*"
+            context = self.stop_contexts.setdefault(key, {"conversation_id": session_id or "default"})
+            context["run_ids"] = [run["id"] for run in runs]
             # Persist cancellation before yielding; no dependent plan step may proceed.
             for run in runs:
                 self.store.update(run["id"], cancel_requested=1, status="cancelling")
@@ -1156,6 +1289,16 @@ class AgentRuntime:
                 if run["id"] in self.tasks:
                     self.tasks[run["id"]].cancel()
             if coordinator:
+                # Daily cancellation normally publishes its own result. Scope stop
+                # publishes one aggregate message instead of one reply per child.
+                if self.daily:
+                    for run in runs:
+                        if run["kind"] == "daily":
+                            try:
+                                async with asyncio.timeout(10):
+                                    await self.daily.cancel(run["id"], publish_result=False)
+                            except Exception as exc:
+                                failures.append(f"daily:{run['id']}:{type(exc).__name__}")
                 if session_id in {None, "default"}:
                     try:
                         settings = coordinator.settings()
@@ -1175,7 +1318,7 @@ class AgentRuntime:
             for run in runs:
                 try:
                     async with asyncio.timeout(10):
-                        await self._stop_bound_tasks(run["id"])
+                        await self._stop_bound_tasks(run["id"], publish_results=False)
                     stopped.append(run["id"])
                 except Exception as exc:
                     failures.append(f"run:{run['id']}:{type(exc).__name__}")
@@ -1209,13 +1352,15 @@ class AgentRuntime:
                        "已停止" + ("全部会话" if session_id is None else "当前会话") + "的搜索、沟通、投递及待执行队列；已发送内容和历史保留。")
             if uncertain:
                 message += "发送结果不确定的记录仍需人工核验，未自动重投。"
-            return {"status": status, "message": message, "stopped_runs": len(stopped),
-                    "cancelled_queue": queue.get("cancelled_queue", 0), "failed_runs": failures,
-                    "uncertain_outcomes": uncertain}
+            result = {"status": status, "message": message, "stopped_runs": len(stopped),
+                      "cancelled_queue": queue.get("cancelled_queue", 0), "failed_runs": failures,
+                      "uncertain_outcomes": uncertain}
+            context["work_version"] = self._stop_work_version(session_id)
+            return self._with_stop_results(result, session_id, context, publish=True)
 
-    async def _stop_bound_tasks(self, run_id: str):
+    async def _stop_bound_tasks(self, run_id: str, *, publish_results: bool = True):
         if self.daily and self.store.get(run_id)["kind"] == "daily":
-            await self.daily.cancel(run_id)
+            await self.daily.cancel(run_id, publish_result=publish_results)
             return
         self.store.invalidate_approvals(run_id)
         task = self.tasks.get(run_id)
@@ -1229,7 +1374,8 @@ class AgentRuntime:
             browser_id = binding_id
         if browser_id and self.browser.current().id == browser_id:
             view = await self.browser.stop()
-            self.browser_summary(run_id, view)
+            if publish_results:
+                self.browser_summary(run_id, view)
         delivery_id = (current["checkpoint"] or {}).get("delivery_id")
         if delivery_id and self.delivery and self.delivery.current().id == delivery_id:
             view = await self.delivery.stop()

@@ -3,11 +3,11 @@
 > 由 `scripts/technical-reference.py` 静态解析受 Git 跟踪的源码生成；不导入应用，不读取环境变量值、数据库、简历或日志。
 > 与 [技术报告](technical-report-2026-10-23.md) 配套。行号为生成时位置；仅列定义不能证明生产路径已验收。
 
-后端生产 Python 文件：**119**；物理行数（含注释、空行）：**28,646**。代码量不是质量或测试覆盖率指标。
+后端生产 Python 文件：**120**；物理行数（含注释、空行）：**29,280**。代码量不是质量或测试覆盖率指标。
 
 ## 1. 后端 HTTP 路由
 
-静态装饰器定义共 84 项。变量路径保留表达式，权限和限流以中间件及处理函数为准；不假设每个接口都适合 MCP 调用。
+静态装饰器定义共 85 项。变量路径保留表达式，权限和限流以中间件及处理函数为准；不假设每个接口都适合 MCP 调用。
 
 | 方法 | 路径/表达式 | 处理函数 | 源码 |
 | --- | --- | --- | --- |
@@ -32,69 +32,70 @@
 | GET | '/api/v1/evaluation-reports/{report_id}' | read_evaluation_report | [agent/app/api/application.py:356](../agent/app/api/application.py#L356) |
 | POST | '/api/v1/runs/{run_id}/target-choice' | choose_job_target | [agent/app/api/application.py:368](../agent/app/api/application.py#L368) |
 | POST | '/api/v1/runs/cancel-all' | cancel_all_runs | [agent/app/api/application.py:378](../agent/app/api/application.py#L378) |
-| POST | '/api/v1/runs/control/stop' | stop_tasks | [agent/app/api/application.py:393](../agent/app/api/application.py#L393) |
-| GET | '/api/v1/runs/control/stop' | stop_tasks_status | [agent/app/api/application.py:400](../agent/app/api/application.py#L400) |
-| POST | '/api/v1/runs/{run_id}/cancel' | cancel_run | [agent/app/api/application.py:405](../agent/app/api/application.py#L405) |
-| POST | '/api/v1/runs/{run_id}/resume' | resume_run | [agent/app/api/application.py:413](../agent/app/api/application.py#L413) |
-| POST | '/api/v1/runs/{run_id}/approval' | decide_action_approval | [agent/app/api/application.py:423](../agent/app/api/application.py#L423) |
-| GET | '/api/v1/llm/config' | read_llm_config | [agent/app/api/application.py:447](../agent/app/api/application.py#L447) |
-| PUT | '/api/v1/llm/config' | update_llm_config | [agent/app/api/application.py:455](../agent/app/api/application.py#L455) |
-| POST | '/api/v1/llm/test' | test_llm_connection | [agent/app/api/application.py:475](../agent/app/api/application.py#L475) |
-| POST | '/api/v1/browser/search' | start_browser_search | [agent/app/api/application.py:492](../agent/app/api/application.py#L492) |
-| POST | '/api/v1/resumes' | upload_resume | [agent/app/api/application.py:504](../agent/app/api/application.py#L504) |
-| GET | '/api/v1/resumes' | list_resumes | [agent/app/api/application.py:543](../agent/app/api/application.py#L543) |
-| GET | '/api/v1/resumes/{resume_id}/original' | read_original_resume | [agent/app/api/application.py:551](../agent/app/api/application.py#L551) |
-| DELETE | '/api/v1/resumes/{resume_id}' | delete_resume | [agent/app/api/application.py:567](../agent/app/api/application.py#L567) |
-| POST | '/api/v1/resumes/{resume_id}/activate' | activate_resume | [agent/app/api/application.py:589](../agent/app/api/application.py#L589) |
-| POST | '/api/v1/materials' | upload_candidate_material | [agent/app/api/application.py:616](../agent/app/api/application.py#L616) |
-| POST | '/api/v1/documents/ingest' | ingest_candidate_document | [agent/app/api/application.py:659](../agent/app/api/application.py#L659) |
-| GET | '/api/v1/materials' | list_candidate_materials | [agent/app/api/application.py:723](../agent/app/api/application.py#L723) |
-| POST | '/api/v1/materials/{material_id}/reparse' | reparse_candidate_material | [agent/app/api/application.py:736](../agent/app/api/application.py#L736) |
-| GET | '/api/v1/candidate-state' | read_candidate_state | [agent/app/api/application.py:767](../agent/app/api/application.py#L767) |
-| GET | '/api/v1/resume-documents/master' | read_master_resume | [agent/app/api/application.py:774](../agent/app/api/application.py#L774) |
-| POST | '/api/v1/resume-documents/master/layout' | organize_master_resume | [agent/app/api/application.py:779](../agent/app/api/application.py#L779) |
-| GET | '/api/v1/resume-proposals' | list_resume_proposals | [agent/app/api/application.py:798](../agent/app/api/application.py#L798) |
-| POST | '/api/v1/resume-proposals/{proposal_id}/approve' | approve_resume_proposal | [agent/app/api/application.py:805](../agent/app/api/application.py#L805) |
-| POST | '/api/v1/resume-proposals/{proposal_id}/reject' | reject_resume_proposal | [agent/app/api/application.py:822](../agent/app/api/application.py#L822) |
-| PUT | '/api/v1/candidate-state/resume-draft' | update_resume_draft | [agent/app/api/application.py:833](../agent/app/api/application.py#L833) |
-| PUT | '/api/v1/preferences' | update_job_preferences | [agent/app/api/application.py:844](../agent/app/api/application.py#L844) |
-| GET | '/api/v1/browser/tasks/current' | current_browser_task | [agent/app/api/application.py:852](../agent/app/api/application.py#L852) |
-| GET | '/api/v1/browser/tasks/{task_id}' | browser_task_by_id | [agent/app/api/application.py:857](../agent/app/api/application.py#L857) |
-| GET | '/api/v1/browser/tasks/{task_id}/report' | browser_task_report | [agent/app/api/application.py:865](../agent/app/api/application.py#L865) |
-| POST | '/api/v1/browser/tasks/current/pause' | pause_browser_task | [agent/app/api/application.py:873](../agent/app/api/application.py#L873) |
-| POST | '/api/v1/browser/tasks/current/resume' | resume_browser_task | [agent/app/api/application.py:878](../agent/app/api/application.py#L878) |
-| POST | '/api/v1/browser/tasks/current/stop' | stop_browser_task | [agent/app/api/application.py:886](../agent/app/api/application.py#L886) |
-| POST | '/api/v1/mock-site/jobs/{external_id}/import' | import_mock_site_job | [agent/app/api/application.py:896](../agent/app/api/application.py#L896) |
-| GET | '/api/v1/mock-workflow/settings' | read_mock_workflow_settings | [agent/app/api/application.py:930](../agent/app/api/application.py#L930) |
-| POST | '/api/v1/mock-workflow/test' | test_daily_workflow | [agent/app/api/application.py:935](../agent/app/api/application.py#L935) |
-| PUT | '/api/v1/mock-workflow/settings' | update_mock_workflow_settings | [agent/app/api/application.py:946](../agent/app/api/application.py#L946) |
-| POST | '/api/v1/mock-workflow/sync' | sync_mock_workflow | [agent/app/api/application.py:959](../agent/app/api/application.py#L959) |
-| GET | '/api/v1/jobs' | list_stored_jobs | [agent/app/api/application.py:967](../agent/app/api/application.py#L967) |
-| GET | '/api/v1/applications/export' | download_applications | [agent/app/api/application.py:974](../agent/app/api/application.py#L974) |
-| PUT | '/api/v1/jobs/{job_id}/stage' | update_job_stage | [agent/app/api/application.py:989](../agent/app/api/application.py#L989) |
-| POST | '/api/v1/jobs/{job_id}/deliver' | deliver_selected_job | [agent/app/api/application.py:1002](../agent/app/api/application.py#L1002) |
-| POST | '/api/v1/jobs/{job_id}/delivery-preview' | create_delivery_preview | [agent/app/api/application.py:1019](../agent/app/api/application.py#L1019) |
-| POST | '/api/v1/deliveries/{preview_id}/authorize' | authorize_delivery | [agent/app/api/application.py:1036](../agent/app/api/application.py#L1036) |
-| GET | '/api/v1/deliveries/current' | current_delivery | [agent/app/api/application.py:1067](../agent/app/api/application.py#L1067) |
-| POST | '/api/v1/deliveries/current/resume' | resume_delivery | [agent/app/api/application.py:1072](../agent/app/api/application.py#L1072) |
-| GET | '/api/v1/deliveries/{run_id}' | delivery_by_run_id | [agent/app/api/application.py:1080](../agent/app/api/application.py#L1080) |
-| GET | '/api/v1/automation/stats' | automation_stats | [agent/app/api/application.py:1088](../agent/app/api/application.py#L1088) |
-| GET | '/api/v1/insights' | insights | [agent/app/api/application.py:1093](../agent/app/api/application.py#L1093) |
-| GET | '/api/v1/interview-preparations' | list_interview_preparations | [agent/app/api/application.py:1111](../agent/app/api/application.py#L1111) |
-| GET | '/api/v1/interview-preparations/{report_id}' | get_interview_preparation | [agent/app/api/application.py:1116](../agent/app/api/application.py#L1116) |
-| POST | '/api/v1/interview-preparations' | generate_interview_preparation | [agent/app/api/application.py:1124](../agent/app/api/application.py#L1124) |
-| GET | '/api/v1/memory' | read_memory | [agent/app/api/application.py:1138](../agent/app/api/application.py#L1138) |
-| PUT | '/api/v1/memory/facts' | update_memory | [agent/app/api/application.py:1143](../agent/app/api/application.py#L1143) |
-| GET | '/api/v1/skills' | list_skills | [agent/app/api/application.py:1148](../agent/app/api/application.py#L1148) |
-| GET | '/api/v1/skills/{name}' | read_skill | [agent/app/api/application.py:1153](../agent/app/api/application.py#L1153) |
-| POST | '/api/v1/skill-proposals/{name}' | propose_skill_update | [agent/app/api/application.py:1163](../agent/app/api/application.py#L1163) |
-| GET | '/api/v1/skill-proposals' | list_skill_proposals | [agent/app/api/application.py:1171](../agent/app/api/application.py#L1171) |
-| POST | '/api/v1/skill-proposals/{proposal_id}/approve' | approve_skill_proposal | [agent/app/api/application.py:1176](../agent/app/api/application.py#L1176) |
-| POST | '/api/v1/jobs/analyze' | job_analysis | [agent/app/api/application.py:1186](../agent/app/api/application.py#L1186) |
-| POST | '/api/v1/tasks/job-analysis' | queue_job_analysis | [agent/app/api/application.py:1191](../agent/app/api/application.py#L1191) |
-| GET | '/api/v1/tasks/{task_id}' | get_task | [agent/app/api/application.py:1202](../agent/app/api/application.py#L1202) |
-| PUT | '/api/v1/private-profile' | save_private_profile | [agent/app/api/application.py:1213](../agent/app/api/application.py#L1213) |
-| GET | '/api/v1/private-profile' | read_private_profile | [agent/app/api/application.py:1221](../agent/app/api/application.py#L1221) |
+| POST | '/api/v1/runs/control/results' | task_results | [agent/app/api/application.py:401](../agent/app/api/application.py#L401) |
+| POST | '/api/v1/runs/control/stop' | stop_tasks | [agent/app/api/application.py:413](../agent/app/api/application.py#L413) |
+| GET | '/api/v1/runs/control/stop' | stop_tasks_status | [agent/app/api/application.py:423](../agent/app/api/application.py#L423) |
+| POST | '/api/v1/runs/{run_id}/cancel' | cancel_run | [agent/app/api/application.py:428](../agent/app/api/application.py#L428) |
+| POST | '/api/v1/runs/{run_id}/resume' | resume_run | [agent/app/api/application.py:436](../agent/app/api/application.py#L436) |
+| POST | '/api/v1/runs/{run_id}/approval' | decide_action_approval | [agent/app/api/application.py:446](../agent/app/api/application.py#L446) |
+| GET | '/api/v1/llm/config' | read_llm_config | [agent/app/api/application.py:470](../agent/app/api/application.py#L470) |
+| PUT | '/api/v1/llm/config' | update_llm_config | [agent/app/api/application.py:478](../agent/app/api/application.py#L478) |
+| POST | '/api/v1/llm/test' | test_llm_connection | [agent/app/api/application.py:498](../agent/app/api/application.py#L498) |
+| POST | '/api/v1/browser/search' | start_browser_search | [agent/app/api/application.py:515](../agent/app/api/application.py#L515) |
+| POST | '/api/v1/resumes' | upload_resume | [agent/app/api/application.py:527](../agent/app/api/application.py#L527) |
+| GET | '/api/v1/resumes' | list_resumes | [agent/app/api/application.py:566](../agent/app/api/application.py#L566) |
+| GET | '/api/v1/resumes/{resume_id}/original' | read_original_resume | [agent/app/api/application.py:574](../agent/app/api/application.py#L574) |
+| DELETE | '/api/v1/resumes/{resume_id}' | delete_resume | [agent/app/api/application.py:590](../agent/app/api/application.py#L590) |
+| POST | '/api/v1/resumes/{resume_id}/activate' | activate_resume | [agent/app/api/application.py:612](../agent/app/api/application.py#L612) |
+| POST | '/api/v1/materials' | upload_candidate_material | [agent/app/api/application.py:639](../agent/app/api/application.py#L639) |
+| POST | '/api/v1/documents/ingest' | ingest_candidate_document | [agent/app/api/application.py:682](../agent/app/api/application.py#L682) |
+| GET | '/api/v1/materials' | list_candidate_materials | [agent/app/api/application.py:746](../agent/app/api/application.py#L746) |
+| POST | '/api/v1/materials/{material_id}/reparse' | reparse_candidate_material | [agent/app/api/application.py:759](../agent/app/api/application.py#L759) |
+| GET | '/api/v1/candidate-state' | read_candidate_state | [agent/app/api/application.py:790](../agent/app/api/application.py#L790) |
+| GET | '/api/v1/resume-documents/master' | read_master_resume | [agent/app/api/application.py:797](../agent/app/api/application.py#L797) |
+| POST | '/api/v1/resume-documents/master/layout' | organize_master_resume | [agent/app/api/application.py:802](../agent/app/api/application.py#L802) |
+| GET | '/api/v1/resume-proposals' | list_resume_proposals | [agent/app/api/application.py:821](../agent/app/api/application.py#L821) |
+| POST | '/api/v1/resume-proposals/{proposal_id}/approve' | approve_resume_proposal | [agent/app/api/application.py:828](../agent/app/api/application.py#L828) |
+| POST | '/api/v1/resume-proposals/{proposal_id}/reject' | reject_resume_proposal | [agent/app/api/application.py:845](../agent/app/api/application.py#L845) |
+| PUT | '/api/v1/candidate-state/resume-draft' | update_resume_draft | [agent/app/api/application.py:856](../agent/app/api/application.py#L856) |
+| PUT | '/api/v1/preferences' | update_job_preferences | [agent/app/api/application.py:867](../agent/app/api/application.py#L867) |
+| GET | '/api/v1/browser/tasks/current' | current_browser_task | [agent/app/api/application.py:875](../agent/app/api/application.py#L875) |
+| GET | '/api/v1/browser/tasks/{task_id}' | browser_task_by_id | [agent/app/api/application.py:880](../agent/app/api/application.py#L880) |
+| GET | '/api/v1/browser/tasks/{task_id}/report' | browser_task_report | [agent/app/api/application.py:888](../agent/app/api/application.py#L888) |
+| POST | '/api/v1/browser/tasks/current/pause' | pause_browser_task | [agent/app/api/application.py:896](../agent/app/api/application.py#L896) |
+| POST | '/api/v1/browser/tasks/current/resume' | resume_browser_task | [agent/app/api/application.py:901](../agent/app/api/application.py#L901) |
+| POST | '/api/v1/browser/tasks/current/stop' | stop_browser_task | [agent/app/api/application.py:909](../agent/app/api/application.py#L909) |
+| POST | '/api/v1/mock-site/jobs/{external_id}/import' | import_mock_site_job | [agent/app/api/application.py:919](../agent/app/api/application.py#L919) |
+| GET | '/api/v1/mock-workflow/settings' | read_mock_workflow_settings | [agent/app/api/application.py:953](../agent/app/api/application.py#L953) |
+| POST | '/api/v1/mock-workflow/test' | test_daily_workflow | [agent/app/api/application.py:958](../agent/app/api/application.py#L958) |
+| PUT | '/api/v1/mock-workflow/settings' | update_mock_workflow_settings | [agent/app/api/application.py:969](../agent/app/api/application.py#L969) |
+| POST | '/api/v1/mock-workflow/sync' | sync_mock_workflow | [agent/app/api/application.py:982](../agent/app/api/application.py#L982) |
+| GET | '/api/v1/jobs' | list_stored_jobs | [agent/app/api/application.py:990](../agent/app/api/application.py#L990) |
+| GET | '/api/v1/applications/export' | download_applications | [agent/app/api/application.py:997](../agent/app/api/application.py#L997) |
+| PUT | '/api/v1/jobs/{job_id}/stage' | update_job_stage | [agent/app/api/application.py:1012](../agent/app/api/application.py#L1012) |
+| POST | '/api/v1/jobs/{job_id}/deliver' | deliver_selected_job | [agent/app/api/application.py:1025](../agent/app/api/application.py#L1025) |
+| POST | '/api/v1/jobs/{job_id}/delivery-preview' | create_delivery_preview | [agent/app/api/application.py:1042](../agent/app/api/application.py#L1042) |
+| POST | '/api/v1/deliveries/{preview_id}/authorize' | authorize_delivery | [agent/app/api/application.py:1059](../agent/app/api/application.py#L1059) |
+| GET | '/api/v1/deliveries/current' | current_delivery | [agent/app/api/application.py:1090](../agent/app/api/application.py#L1090) |
+| POST | '/api/v1/deliveries/current/resume' | resume_delivery | [agent/app/api/application.py:1095](../agent/app/api/application.py#L1095) |
+| GET | '/api/v1/deliveries/{run_id}' | delivery_by_run_id | [agent/app/api/application.py:1103](../agent/app/api/application.py#L1103) |
+| GET | '/api/v1/automation/stats' | automation_stats | [agent/app/api/application.py:1111](../agent/app/api/application.py#L1111) |
+| GET | '/api/v1/insights' | insights | [agent/app/api/application.py:1116](../agent/app/api/application.py#L1116) |
+| GET | '/api/v1/interview-preparations' | list_interview_preparations | [agent/app/api/application.py:1134](../agent/app/api/application.py#L1134) |
+| GET | '/api/v1/interview-preparations/{report_id}' | get_interview_preparation | [agent/app/api/application.py:1139](../agent/app/api/application.py#L1139) |
+| POST | '/api/v1/interview-preparations' | generate_interview_preparation | [agent/app/api/application.py:1147](../agent/app/api/application.py#L1147) |
+| GET | '/api/v1/memory' | read_memory | [agent/app/api/application.py:1161](../agent/app/api/application.py#L1161) |
+| PUT | '/api/v1/memory/facts' | update_memory | [agent/app/api/application.py:1166](../agent/app/api/application.py#L1166) |
+| GET | '/api/v1/skills' | list_skills | [agent/app/api/application.py:1171](../agent/app/api/application.py#L1171) |
+| GET | '/api/v1/skills/{name}' | read_skill | [agent/app/api/application.py:1176](../agent/app/api/application.py#L1176) |
+| POST | '/api/v1/skill-proposals/{name}' | propose_skill_update | [agent/app/api/application.py:1186](../agent/app/api/application.py#L1186) |
+| GET | '/api/v1/skill-proposals' | list_skill_proposals | [agent/app/api/application.py:1194](../agent/app/api/application.py#L1194) |
+| POST | '/api/v1/skill-proposals/{proposal_id}/approve' | approve_skill_proposal | [agent/app/api/application.py:1199](../agent/app/api/application.py#L1199) |
+| POST | '/api/v1/jobs/analyze' | job_analysis | [agent/app/api/application.py:1209](../agent/app/api/application.py#L1209) |
+| POST | '/api/v1/tasks/job-analysis' | queue_job_analysis | [agent/app/api/application.py:1214](../agent/app/api/application.py#L1214) |
+| GET | '/api/v1/tasks/{task_id}' | get_task | [agent/app/api/application.py:1225](../agent/app/api/application.py#L1225) |
+| PUT | '/api/v1/private-profile' | save_private_profile | [agent/app/api/application.py:1236](../agent/app/api/application.py#L1236) |
+| GET | '/api/v1/private-profile' | read_private_profile | [agent/app/api/application.py:1244](../agent/app/api/application.py#L1244) |
 
 ## 2. Agent 工具注册表
 
@@ -249,7 +250,7 @@
 | [frontend/app/api/agent/stats/route.ts:1](../frontend/app/api/agent/stats/route.ts#L1) | 16 |
 | [frontend/app/globals.css:1](../frontend/app/globals.css#L1) | 798 |
 | [frontend/app/layout.tsx:1](../frontend/app/layout.tsx#L1) | 17 |
-| [frontend/app/page.tsx:1](../frontend/app/page.tsx#L1) | 2188 |
+| [frontend/app/page.tsx:1](../frontend/app/page.tsx#L1) | 2246 |
 | [frontend/app/workspace.css:1](../frontend/app/workspace.css#L1) | 427 |
 | [frontend/components/application-export.module.css:1](../frontend/components/application-export.module.css#L1) | 7 |
 | [frontend/components/application-export.tsx:1](../frontend/components/application-export.tsx#L1) | 69 |
@@ -262,16 +263,16 @@
 | [frontend/components/metrics-dashboard.tsx:1](../frontend/components/metrics-dashboard.tsx#L1) | 231 |
 | [frontend/components/runtime-panel.tsx:1](../frontend/components/runtime-panel.tsx#L1) | 153 |
 | [frontend/components/workspace-icon.tsx:1](../frontend/components/workspace-icon.tsx#L1) | 27 |
-| [frontend/lib/agent-runtime.ts:1](../frontend/lib/agent-runtime.ts#L1) | 84 |
+| [frontend/lib/agent-runtime.ts:1](../frontend/lib/agent-runtime.ts#L1) | 102 |
 | [frontend/lib/application-export.ts:1](../frontend/lib/application-export.ts#L1) | 19 |
 | [frontend/lib/chat-display.ts:1](../frontend/lib/chat-display.ts#L1) | 18 |
-| [frontend/lib/chat-message.ts:1](../frontend/lib/chat-message.ts#L1) | 14 |
+| [frontend/lib/chat-message.ts:1](../frontend/lib/chat-message.ts#L1) | 34 |
 | [frontend/lib/execution-metrics.ts:1](../frontend/lib/execution-metrics.ts#L1) | 53 |
 | [frontend/lib/inventory-request.ts:1](../frontend/lib/inventory-request.ts#L1) | 26 |
 | [frontend/lib/job-display.ts:1](../frontend/lib/job-display.ts#L1) | 8 |
 | [frontend/lib/search-condition-display.ts:1](../frontend/lib/search-condition-display.ts#L1) | 38 |
-| [frontend/lib/types.ts:1](../frontend/lib/types.ts#L1) | 403 |
-| [frontend/lib/use-agent-runtime.ts:1](../frontend/lib/use-agent-runtime.ts#L1) | 300 |
+| [frontend/lib/types.ts:1](../frontend/lib/types.ts#L1) | 405 |
+| [frontend/lib/use-agent-runtime.ts:1](../frontend/lib/use-agent-runtime.ts#L1) | 342 |
 | [frontend/next-env.d.ts:1](../frontend/next-env.d.ts#L1) | 6 |
 | [frontend/next.config.ts:1](../frontend/next.config.ts#L1) | 11 |
 
@@ -319,74 +320,76 @@
 - `choose_job_target:368`
 - `cancel_all_runs:378`
 - `StopTasksRequest:387`
-- `stop_tasks:393`
-- `stop_tasks_status:400`
-- `cancel_run:405`
-- `resume_run:413`
-- `decide_action_approval:423`
-- `current_llm_config:432`
-- `read_llm_config:447`
-- `update_llm_config:455`
-- `test_llm_connection:475`
-- `start_browser_search:492`
-- `upload_resume:504`
-- `list_resumes:543`
-- `read_original_resume:551`
-- `delete_resume:567`
-- `activate_resume:589`
-- `upload_candidate_material:616`
-- `ingest_candidate_document:659`
-- `list_candidate_materials:723`
-- `MaterialReparseRequest:730`
-- `reparse_candidate_material:736`
-- `read_candidate_state:767`
-- `read_master_resume:774`
-- `organize_master_resume:779`
-- `list_resume_proposals:798`
-- `approve_resume_proposal:805`
-- `reject_resume_proposal:822`
-- `update_resume_draft:833`
-- `update_job_preferences:844`
-- `current_browser_task:852`
-- `browser_task_by_id:857`
-- `browser_task_report:865`
-- `pause_browser_task:873`
-- `resume_browser_task:878`
-- `stop_browser_task:886`
-- `import_mock_site_job:896`
-- `read_mock_workflow_settings:930`
-- `test_daily_workflow:935`
-- `update_mock_workflow_settings:946`
-- `sync_mock_workflow:959`
-- `list_stored_jobs:967`
-- `download_applications:974`
-- `update_job_stage:989`
-- `JobDeliveryRequest:996`
-- `deliver_selected_job:1002`
-- `create_delivery_preview:1019`
-- `authorize_delivery:1036`
-- `current_delivery:1067`
-- `resume_delivery:1072`
-- `delivery_by_run_id:1080`
-- `automation_stats:1088`
-- `insights:1093`
-- `InterviewPreparationRequest:1104`
-- `list_interview_preparations:1111`
-- `get_interview_preparation:1116`
-- `generate_interview_preparation:1124`
-- `read_memory:1138`
-- `update_memory:1143`
-- `list_skills:1148`
-- `read_skill:1153`
-- `propose_skill_update:1163`
-- `list_skill_proposals:1171`
-- `approve_skill_proposal:1176`
-- `job_analysis:1186`
-- `queue_job_analysis:1191`
-- `task_record:1195`
-- `get_task:1202`
-- `save_private_profile:1213`
-- `read_private_profile:1221`
+- `TaskResultsRequest:394`
+- `task_results:401`
+- `stop_tasks:413`
+- `stop_tasks_status:423`
+- `cancel_run:428`
+- `resume_run:436`
+- `decide_action_approval:446`
+- `current_llm_config:455`
+- `read_llm_config:470`
+- `update_llm_config:478`
+- `test_llm_connection:498`
+- `start_browser_search:515`
+- `upload_resume:527`
+- `list_resumes:566`
+- `read_original_resume:574`
+- `delete_resume:590`
+- `activate_resume:612`
+- `upload_candidate_material:639`
+- `ingest_candidate_document:682`
+- `list_candidate_materials:746`
+- `MaterialReparseRequest:753`
+- `reparse_candidate_material:759`
+- `read_candidate_state:790`
+- `read_master_resume:797`
+- `organize_master_resume:802`
+- `list_resume_proposals:821`
+- `approve_resume_proposal:828`
+- `reject_resume_proposal:845`
+- `update_resume_draft:856`
+- `update_job_preferences:867`
+- `current_browser_task:875`
+- `browser_task_by_id:880`
+- `browser_task_report:888`
+- `pause_browser_task:896`
+- `resume_browser_task:901`
+- `stop_browser_task:909`
+- `import_mock_site_job:919`
+- `read_mock_workflow_settings:953`
+- `test_daily_workflow:958`
+- `update_mock_workflow_settings:969`
+- `sync_mock_workflow:982`
+- `list_stored_jobs:990`
+- `download_applications:997`
+- `update_job_stage:1012`
+- `JobDeliveryRequest:1019`
+- `deliver_selected_job:1025`
+- `create_delivery_preview:1042`
+- `authorize_delivery:1059`
+- `current_delivery:1090`
+- `resume_delivery:1095`
+- `delivery_by_run_id:1103`
+- `automation_stats:1111`
+- `insights:1116`
+- `InterviewPreparationRequest:1127`
+- `list_interview_preparations:1134`
+- `get_interview_preparation:1139`
+- `generate_interview_preparation:1147`
+- `read_memory:1161`
+- `update_memory:1166`
+- `list_skills:1171`
+- `read_skill:1176`
+- `propose_skill_update:1186`
+- `list_skill_proposals:1194`
+- `approve_skill_proposal:1199`
+- `job_analysis:1209`
+- `queue_job_analysis:1214`
+- `task_record:1218`
+- `get_task:1225`
+- `save_private_profile:1236`
+- `read_private_profile:1244`
 
 ### browser/__init__.py
 
@@ -478,7 +481,7 @@
 - `ToolLoopState:74`
 - `AgentToolOutcome:84 → observation:95`
 - `ToolCallGuard:104 → check:107`
-- `AgentToolRegistry:122 → authorize:158, schemas:375, execute:378, validate_arguments:953`
+- `AgentToolRegistry:122 → authorize:158, schemas:375, execute:378, validate_arguments:957`
 
 ### core/config.py
 
@@ -839,7 +842,7 @@
 - `aggregate_jd:66`
 - `salary_overview:79`
 - `render_search_report:87`
-- `render_job_detail:136`
+- `render_job_detail:139`
 
 ### jobs/store.py
 
@@ -1012,17 +1015,17 @@
 [agent/app/runtime/context.py:1](../agent/app/runtime/context.py#L1)
 
 - `RunContext:10`
-- `diagnostic_metadata:51`
-- `emit_diagnostic:62`
-- `active_run:72`
-- `emit:78`
-- `checkpoint:84`
-- `effect_checkpoint:90`
-- `save_search_state:111`
-- `dialogue_change:131`
-- `scoped_browser:143`
-- `browser_search_available:154`
-- `browser_availability:162`
+- `diagnostic_metadata:52`
+- `emit_diagnostic:63`
+- `active_run:73`
+- `emit:79`
+- `checkpoint:85`
+- `effect_checkpoint:91`
+- `save_search_state:112`
+- `dialogue_change:132`
+- `scoped_browser:144`
+- `browser_search_available:155`
+- `browser_availability:163`
 
 ### runtime/context_builder.py
 
@@ -1040,7 +1043,8 @@
 
 [agent/app/runtime/control.py:1](../agent/app/runtime/control.py#L1)
 
-- `stop_scope:5`
+- `stop_scope:10`
+- `progress_requested:31`
 
 ### runtime/dialogue.py
 
@@ -1105,7 +1109,7 @@
 
 [agent/app/runtime/manager.py:1](../agent/app/runtime/manager.py#L1)
 
-- `AgentRuntime:80 → start:97, shutdown:127, schedule:140, submit:148, track_delivery:182, track_browser:190, delivery_owner:198, finish:205, emit:222, save:266, action_snapshot:278, authorize_action:305, decide_approval:361, choose_job_target:366, resolve_approval:456, wait_response:480, search_state:493, execute:500, watch:659, watch_plan:707, publish_plan_answer:892, complete_workflow:934, watch_delivery:1003, observe_browser:1024, observe_delivery:1035, recover_search_summaries:1060, browser_summary:1075, cancel:1098, stop_all:1122, stop_status:1126, stop_tasks:1136, active_plan:1261, revise_plan:1272, plan_for_revision:1351, continue_task:1360, resume:1469, stream:1499`
+- `AgentRuntime:80 → start:98, shutdown:144, schedule:157, submit:165, task_snapshot:205, progress_result:231, track_delivery:241, track_browser:249, delivery_owner:257, finish:264, emit:281, save:325, action_snapshot:337, authorize_action:364, decide_approval:420, choose_job_target:425, resolve_approval:515, wait_response:539, search_state:552, execute:559, watch:719, watch_plan:767, publish_plan_answer:953, complete_workflow:995, watch_delivery:1064, observe_browser:1085, observe_delivery:1096, recover_search_summaries:1121, browser_summary:1136, cancel:1159, stop_all:1183, stop_status:1187, stop_tasks:1201, active_plan:1407, revise_plan:1418, plan_for_revision:1497, continue_task:1506, resume:1615, stream:1645`
 
 ### runtime/memory_context.py
 
@@ -1168,7 +1172,14 @@
 
 - `now:20`
 - `safe_json:24`
-- `RunStore:33 → connect:98, has_event:103, sessions:107, ensure_default_session:111, create_session:115, search_state:121, save_search_state:128, dialogue_state:141, mutate_dialogue:149, create:163, decode:193, get:201, list:208, request_records:217, memory_source_batch:238, save_memory:254, memories:272, memory_source:284, update:291, save_plan:314, event:331, all_events:339, execution_ledger:346, events:366, public_events:371, approval:380, approvals:387, ensure_approval:394, settle_approval:424, invalidate_approvals:443`
+- `RunStore:33 → connect:98, has_event:103, sessions:107, ensure_default_session:111, create_session:115, search_state:121, save_search_state:128, dialogue_state:141, mutate_dialogue:149, create:163, decode:193, get:201, list:208, request_records:217, memory_source_batch:240, save_memory:256, memories:274, memory_source:286, update:293, save_plan:316, event:333, all_events:341, execution_ledger:348, events:368, public_events:373, approval:382, approvals:389, ensure_approval:396, settle_approval:426, invalidate_approvals:445`
+
+### runtime/task_results.py
+
+[agent/app/runtime/task_results.py:1](../agent/app/runtime/task_results.py#L1)
+
+- `read_task_snapshot:179`
+- `render_task_snapshot:370`
 
 ### runtime/understanding.py
 
@@ -1249,7 +1260,7 @@
 
 [agent/app/workflow/daily.py:1](../agent/app/workflow/daily.py#L1)
 
-- `DailyWorkflow:23 → records:33, info:36, owns_job:44, recover:49, shutdown:66, resume:72, cancel:85, enqueue:101, materialize_due:108, tick:140, save:159, link_search:162, publish_search_summary:175, publish_waiting_summary:207, finish:218, snapshot:229, execute:245, observe:317, search:337`
+- `DailyWorkflow:23 → records:33, info:36, owns_job:44, recover:49, shutdown:66, resume:72, cancel:85, enqueue:102, materialize_due:109, tick:141, save:160, link_search:163, publish_search_summary:176, publish_waiting_summary:208, finish:219, snapshot:241, execute:257, observe:329, search:349`
 
 ### workflow/daily_delivery.py
 
