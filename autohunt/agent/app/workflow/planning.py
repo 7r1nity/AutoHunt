@@ -148,6 +148,12 @@ async def plan_request(llm, registry, message: str, *, dialogue: dict, condition
                        stamp: str, previous: dict | None = None) -> dict:
     """One model owns semantic extraction; validators own shape and effects."""
     schemas = [item for item in registry.schemas() if item["function"]["name"] not in INTERNAL_TOOLS]
+    from ..llm.schema_catalog import compact_tool_catalog
+    from ..runtime.context_builder import estimate_tokens
+    catalog = compact_tool_catalog(schemas)
+    emit("planning_catalog", policy="lossless_shared_definitions", tool_count=len(schemas),
+         shared_definitions=len(catalog["$defs"]), estimator="ascii/3+cjk*2",
+         estimated_tokens_before=estimate_tokens(schemas), estimated_tokens_after=estimate_tokens(catalog))
     context = active_run()
     live_plan = context.plan_reader() if context and context.plan_reader else None
     if live_plan and live_plan.get("status") in {"finished", "completed", "cancelled", "outcome_indeterminate"}:
@@ -173,6 +179,9 @@ async def plan_request(llm, registry, message: str, *, dialogue: dict, condition
     request = LLMRequest(
         instructions=(
             "你是AutoHunt任务解释器，只输出符合schema的JSON，不调用工具。"
+            "capabilities是独立工具目录文档：tools列出全部可用工具，参数中的#/$defs引用指向该目录的$defs公共定义。"
+            "例外：self_contained_parameters所列工具保留原有独立参数文档，其引用按该参数文档根及$id解析。"
+            "引用仅复用相同参数结构，不改变任何约束；按定义填写参数，不把$ref或$defs输出为工具参数。"
             "active_plan是正在执行的原计划。用户追加后续动作或修改条件时operation=revise，revision按revision_schema输出。"
             "plan_id与expected_revision由应用按本次读取的计划快照绑定，你不要填写或推测；dialogue.revision是对话版本，不是计划版本。只描述需要修改的步骤与参数。"
             "已有步骤改参数用updates，更新未执行步骤的前置关系用updates.depends_on，追加动作用add_steps；原任务只有搜索也可追加投递或分析，并依赖原搜索完成。不要重复原已执行步骤。"
@@ -247,12 +256,12 @@ async def plan_request(llm, registry, message: str, *, dialogue: dict, condition
             "必要用户信息缺失填对应步骤的missing_slots和questions；独立且参数完整的分支可以执行，不用全局questions阻断它们。工具JSON问题由系统修复，不要求用户说固定短语。"
             "不要无谓生成authorization缺失槽位；只读与本地可逆动作不必再确认。"
             "先列出完整goals，再给steps；真实depends_on确保顺序。计划最多32步，执行器按最多8步一批推进；不要为了8步限制遗漏目标。答案可steps=[]。"
-            "输出schema：" + json.dumps(RequestDraft.model_json_schema(), ensure_ascii=False)
+            "输出schema：" + json.dumps(RequestDraft.model_json_schema(), ensure_ascii=False, separators=(",", ":"))
         ),
         user_message=json.dumps({"message": message, "pending_request": previous,
             "active_plan": live_plan, "result_sources": sources, "revision_schema": revision_schema,
-            "conditions": conditions, "dialogue": dialogue, "capabilities": schemas},
-            ensure_ascii=False),
+            "conditions": conditions, "dialogue": dialogue, "capabilities": catalog},
+            ensure_ascii=False, separators=(",", ":")),
         context="解释归模型；校验检查结构；审批绑定实际动作范围。", fast=True,
         json_output=True, max_output_tokens=4096)
     review_deadline=time.monotonic()+PLANNING_TIMEOUT
