@@ -15,6 +15,7 @@ SLOT_LABELS = {"queries": "岗位方向", "query": "岗位方向", "locations": 
                "min_score": "最低匹配分", "max_score": "最高匹配分", "score_scope": "匹配分范围",
                "authorization": "操作授权", "target": "目标对象", "selector": "条目序号或名称",
                "instruction": "修改要求", "focus": "关注方向", "snapshot_id": "所指结果列表"}
+SLOT_LABELS.update(filters="筛选条件", result_groups="岗位数量分组")
 
 
 @dataclass(frozen=True)

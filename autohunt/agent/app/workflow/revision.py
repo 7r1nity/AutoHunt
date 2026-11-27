@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ..security.action_grants import action_binding
 from .contracts import PlannedStep, Goal, EVIDENCE_TOOLS, MAX_PLAN_STEPS
-from .validation import normalize_encoding, preflight, dependency_ancestors, resolved_slots, PlanValidationError
+from .validation import normalize_encoding, preflight, dependency_ancestors, resolved_slots, PlanValidationError, SLOT_LABELS
 from .graph import bind_evidence, wait_for_scope
 
 
@@ -34,6 +34,22 @@ class RevisionDraft(BaseModel):
     # Observation only, never execution authority. The planner overwrites this
     # after independently reviewing changed conditions.
     scope_review: dict | None = None
+
+
+def _repairable_predicate_fields(step: dict) -> set[str]:
+    """Only an explicitly corrected, never-executed technical defect is editable.
+
+    Merely continuing a task does not call this revision path or provide the
+    replacement fields. Contradictory/absent effect evidence remains blocked.
+    """
+    failure = step.get("failure") or {}
+    if (step.get("status") != "blocked" or failure.get("code") != "predicate_repair_exhausted"
+            or failure.get("effect_started") is not False or failure.get("uncertain") is not False
+            or step.get("withdrawn") or step.get("execution_phase") in {"started", "committed"}):
+        return set()
+    fields = set(step.get("unresolved_arguments") or {}) | {
+        issue.get("field") for issue in step.get("technical_issues", [])}
+    return fields if fields and fields <= {"filters", "result_groups"} else set()
 
 
 def edited_plan(plan: dict, edit: RevisionDraft, registry, *, stamp: str, session_id: str, message: str) -> dict:
@@ -111,7 +127,15 @@ def edited_plan(plan: dict, edit: RevisionDraft, registry, *, stamp: str, sessio
         seen.add(update.step_id)
         step = steps[update.step_id]
         active_search = step["tool"] == "job_search_start" and step["status"] == "waiting_external" and not step["arguments"].get("dry_run")
+        predicate_fields = _repairable_predicate_fields(step)
+        if predicate_fields:
+            if not predicate_fields <= update.arguments.keys():
+                raise PlanValidationError("predicate_correction_missing", "请明确修正原失败步骤的全部条件字段；其他参数修改不会恢复该步骤", category="clarify")
+            if any(update.arguments[field] is None or field == "result_groups" and update.arguments[field] == []
+                   for field in predicate_fields):
+                raise PlanValidationError("predicate_correction_removed", "移除原失败条件不能作为结构修复；请按新的完整范围另行确认执行", category="clarify")
         if (step["status"] not in {"pending", "waiting_approval", "waiting_input"} and not active_search
+                and not predicate_fields
                 or step["tool"] in result.get("revoked_tools", [])):
             raise ValueError("只能修改尚未执行的步骤；已执行、已撤回和结果不确定的步骤不会重放")
         spec = registry._tools[step["tool"]]
@@ -127,6 +151,14 @@ def edited_plan(plan: dict, edit: RevisionDraft, registry, *, stamp: str, sessio
         if arguments.get("filters") is not None:
             from ..core.job_filters import validate_filter
             arguments["filters"] = validate_filter(arguments["filters"]).model_dump(mode="json")
+        if predicate_fields and arguments.get("result_groups") is not None:
+            from ..core.result_groups import normalize_groups
+            arguments["result_groups"] = normalize_groups(arguments["result_groups"])
+        if predicate_fields:
+            step.setdefault("attempt_history", []).append({"status": step["status"],
+                "arguments": copy.deepcopy(step["arguments"]), "failure": copy.deepcopy(step["failure"]),
+                "unresolved_arguments": copy.deepcopy(step.get("unresolved_arguments", {})),
+                "reason": "predicate_corrected"})
         if active_search:
             if update.depends_on is not None:
                 raise ValueError("正在执行的搜索不能改写已生效依赖；请追加后续步骤")
@@ -141,18 +173,24 @@ def edited_plan(plan: dict, edit: RevisionDraft, registry, *, stamp: str, sessio
             step["user_requested"] = update.user_requested
         if step["tool"] == "mock_delivery_start" and "scope_mode" in update.arguments:
             step.pop("selection_inherits_scope", None)
-        if step["status"] in {"waiting_approval", "waiting_input"}:
+        if step["status"] in {"waiting_approval", "waiting_input"} or predicate_fields:
             step.update(status="pending")
             step.pop("approval_id", None)
             step.pop("wait_reason", None)
             step.pop("detail", None)
             step.pop("failure", None)
+            if predicate_fields:
+                obsolete = set(step.pop("technical_questions", [])) | {
+                    "请补充" + SLOT_LABELS.get(field, field) + "。" for field in predicate_fields}
+                step["questions"] = [question for question in step.get("questions", []) if question not in obsolete]
+                step["technical_issues"] = [issue for issue in step.get("technical_issues", [])
+                                            if issue.get("field") not in predicate_fields]
             unresolved = step.get("unresolved_arguments", {})
             for key in update.arguments:
                 unresolved.pop(key, None)
             filled = resolved_slots(step, {}) - set(unresolved)
             step["missing_slots"] = [slot for slot in step.get("missing_slots", []) if slot not in filled]
-            if not step["missing_slots"] and not unresolved:
+            if not predicate_fields and not step["missing_slots"] and not unresolved:
                 step["questions"] = []
         step["authority_binding"] = action_binding(step["tool"], arguments, session_id=session_id,
             requested=step.get("user_requested", (step.get("authority_binding") or {}).get("user_requested", False)))

@@ -265,7 +265,7 @@ async def plan_request(llm, registry, message: str, *, dialogue: dict, condition
         context="解释归模型；校验检查结构；审批绑定实际动作范围。", fast=True,
         json_output=True, max_output_tokens=4096)
     review_deadline=time.monotonic()+PLANNING_TIMEOUT
-    async def validate_and_review(draft):
+    async def validate_and_review(draft, *, review_valid_branches=False):
         if (draft.operation=="revise" or draft.revision) and live_plan:
             current=context.plan_reader() if context and context.plan_reader else None
             if current and (current["id"],current.get("revision",0))!=(live_plan["id"],live_plan["revision"]):
@@ -274,14 +274,24 @@ async def plan_request(llm, registry, message: str, *, dialogue: dict, condition
             draft.revision={**(draft.revision or {}),"plan_id":live_plan["id"],"expected_revision":live_plan["revision"]}
             emit("plan_revision_bound",plan_id=live_plan["id"],expected_revision=live_plan["revision"],source="application_snapshot")
         validated=validate_draft(draft,registry,message,dialogue=dialogue,conditions=conditions,stamp=stamp,previous=previous)
-        if any(s.get("unresolved_arguments") for s in validated.get("steps",[])):
+        unresolved_ids = {step["id"] for step in validated.get("steps", []) if step.get("unresolved_arguments")}
+        if unresolved_ids and not review_valid_branches:
             return validated  # Repair structure before asking a semantic reviewer.
         from .scope_review import review, apply_review
-        reviewed,metadata,_=await review(llm,draft,message=message,live_plan=live_plan,
+        review_input = draft.model_copy(deep=True)
+        if unresolved_ids:
+            review_input.steps = [step for step in review_input.steps if step.id not in unresolved_ids]
+        reviewed,metadata,_=await review(llm,review_input,message=message,live_plan=live_plan,
                                          conditions=conditions,previous_request=previous,
                                          delivery_scope=dialogue.get("delivery_scope"),
                                          timeout_seconds=min(18,max(.001,review_deadline-time.monotonic()-2)))
         if metadata:
+            if unresolved_ids:
+                # A failed sibling must neither bypass scope review for valid
+                # branches nor disappear from the durable full plan.
+                corrected = {step.id: step for step in reviewed.steps}
+                reviewed = draft.model_copy(deep=True)
+                reviewed.steps = [corrected.get(step.id, step) for step in reviewed.steps]
             # All corrected values re-enter the same compiler and action binding.
             validated=validate_draft(reviewed,registry,message,dialogue=dialogue,conditions=conditions,stamp=stamp,previous=previous)
             if validated.get("operation")=="revise":
@@ -289,7 +299,8 @@ async def plan_request(llm, registry, message: str, *, dialogue: dict, condition
             else:
                 apply_review(validated,metadata)
         return validated
-    return await _draft_with_repair(llm, request, validator=validate_and_review)
+    return await _draft_with_repair(llm, request, validator=validate_and_review,
+        exhausted_validator=lambda draft: validate_and_review(draft, review_valid_branches=True))
 
 
 def contextual_draft(message: str, previous: dict | None, schemas: list[dict]) -> RequestDraft | None:
@@ -485,7 +496,13 @@ def _validate_draft(draft: RequestDraft, registry, message: str, *, dialogue: di
         if name in revoked_tools:
             raise PlanValidationError("revoked_authority", "此动作已撤回，不能自动恢复", category="clarify", tool=name)
         try:
-            registry.validate_arguments(encoding_schema(spec.parameters), args)
+            shape = encoding_schema(spec.parameters)
+            # Predicate models provide precise recursive diagnostics below;
+            # the generic transport validator must not intercept those first.
+            for field in ("filters", "result_groups"):
+                if field in shape.get("properties", {}):
+                    shape["properties"][field] = {}
+            registry.validate_arguments(shape, args)
         except ValueError as exc:
             raise PlanValidationError("invalid_argument_schema", str(exc), tool=name) from exc
         if args.get("filters") is not None and "filters" in spec.parameters.get("properties", {}):
@@ -494,17 +511,20 @@ def _validate_draft(draft: RequestDraft, registry, message: str, *, dialogue: di
             except ValueError as exc:
                 # Quarantine, don't execute an unconstrained replacement. Keep the
                 # original predicate in the durable node for subsequent revision.
-                wait_for_scope(step, "本步骤筛选条件无法无损解释，请确认条件组合；条件未被删除，相关分支尚未执行。",
-                               field="filters", value=copy.deepcopy(args["filters"]))
-                emit("plan_normalized", repair="invalid_filter_waiting_input", tool=name)
+                from .predicate_errors import quarantine_predicate
+                quarantine_predicate(step, "filters", args["filters"], exc)
+                emit("plan_normalized", repair="invalid_filter_waiting_input", tool=name,
+                     technical_issues=step["technical_issues"])
                 args["filters"] = None
-        if args.get("result_groups"):
+        if "result_groups" in args and args["result_groups"] is not None:
             from ..core.result_groups import normalize_groups
             try:
+                if not isinstance(args["result_groups"], list):
+                    raise ValueError("岗位数量分组必须是列表")
                 args["result_groups"] = normalize_groups(args["result_groups"])
-            except ValueError:
-                wait_for_scope(step, "请明确数量分组的类别条件，允许或优先不能直接作为分组硬条件。",
-                               field="result_groups", value=copy.deepcopy(args["result_groups"]))
+            except ValueError as exc:
+                from .predicate_errors import quarantine_predicate
+                quarantine_predicate(step, "result_groups", args["result_groups"], exc)
                 args["result_groups"] = None
         if name in {"job_search_start", "search_state_update"}:
             if args.get("query") and not args.get("queries"):
@@ -672,7 +692,7 @@ def _validate_draft(draft: RequestDraft, registry, message: str, *, dialogue: di
         "paused": paused, "status": "paused" if paused else "clarifying" if questions else "ready"}
 
 
-async def _draft_with_repair(llm, request: LLMRequest, *, validator=None):
+async def _draft_with_repair(llm, request: LLMRequest, *, validator=None, exhausted_validator=None):
     """One format repair and one semantic repair BEFORE any execution.
 
     Transport retries and repair share one bounded planning deadline.
@@ -729,19 +749,33 @@ async def _draft_with_repair(llm, request: LLMRequest, *, validator=None):
                  steps=[{"id": step.id, "tool": step.tool, "depends_on": step.depends_on} for step in candidate.steps])
             if validator is None:
                 return candidate
+            validated = {}
             try:
-                validated = validator(candidate)
-                if inspect.isawaitable(validated):
-                    validated = await validated
+                result = validator(candidate)
+                if inspect.isawaitable(result):
+                    result = await result
+                validated = result
                 semantic_waits=(validated.get("scope_review") or {}).get("waits",{})
                 unresolved = [step for step in validated.get("steps", [])
-                              if step.get("unresolved_arguments") and step["id"] not in semantic_waits]
+                              if step.get("unresolved_arguments") and
+                              (step.get("technical_issues") or step["id"] not in semantic_waits)]
                 if unresolved and semantic_repair_count < MAX_SEMANTIC_REPAIRS:
                     # Technical predicate defects are the planner's responsibility.
                     # Try the existing bounded repair before asking the user. If
                     # still unresolved, return the scoped wait, not a whole-plan deny.
                     raise PlanValidationError("unresolved_predicate", "请无损修复条件表达式或分组模式，禁止删除条件、改变强度或扩大范围",
                                               tool=unresolved[0]["tool"])
+                if any(step.get("technical_issues") for step in unresolved):
+                    if exhausted_validator:
+                        result = exhausted_validator(candidate)
+                        if inspect.isawaitable(result):
+                            result = await result
+                        validated = result
+                    from .predicate_errors import finalize_predicate_failures
+                    validated = finalize_predicate_failures(validated)
+                    emit("plan_validation", decision="predicate_repair_exhausted",
+                         step_ids=[step["id"] for step in unresolved if step.get("technical_issues")],
+                         attempts=semantic_repair_count)
                 return validated
             except PlanValidationError as exc:
                 emit("plan_validation_result", attempt=attempt, decision=exc.issue.category,
@@ -762,6 +796,9 @@ async def _draft_with_repair(llm, request: LLMRequest, *, validator=None):
                 payload["validation_feedback"] = {
                     "attempt": semantic_repair_count,
                     "issues": [issue.public() for issue in exc.issues],
+                    "technical_issues": [{"step_id": step["id"], "tool": step["tool"], **issue}
+                        for step in validated.get("steps", [])
+                        for issue in step.get("technical_issues", [])],
                     "candidate": candidate.model_dump(),
                 }
                 request = LLMRequest(instructions=request.instructions +
@@ -770,7 +807,7 @@ async def _draft_with_repair(llm, request: LLMRequest, *, validator=None):
                     "请重新读取message与有效pending_request，输出完整修正计划。补齐遗漏目标与依赖；"
                     "核实原文参数后删除过时missing_slots及questions；保留真正缺信息的追问。"
                     "不要要求用户修正工具名/ID/JSON，不得新增用户没要求的动作、放宽条件或改变授权。",
-                    user_message=json.dumps(payload, ensure_ascii=False), context=request.context, fast=True,
+                    user_message=json.dumps(payload, ensure_ascii=False, separators=(",", ":")), context=request.context, fast=True,
                     json_output=True, max_output_tokens=4096)
         raise PlanValidationError("repair_exhausted", "规划修复次数已达上限", category="block")
 

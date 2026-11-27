@@ -169,7 +169,7 @@ class PlanningContracts(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(plan["questions"])
         self.assertEqual(plan["steps"][0]["arguments"]["filters"]["text"], "不要外包")
 
-    async def test_exhausted_predicate_repair_returns_scoped_wait_not_denial(self):
+    async def test_exhausted_predicate_repair_is_scoped_system_failure_not_user_input(self):
         payload = draft([step("search", "job_search_start", {"filters": {"op": "all", "children": []}}),
                          step("read", "context_state_read")], ["search", "read"])
         calls = []
@@ -184,7 +184,11 @@ class PlanningContracts(unittest.IsolatedAsyncioTestCase):
                 dialogue={}, conditions=self.context.search_state, stamp=STAMP))
         input_waits(plan)
         self.assertEqual(len(calls), 4)
-        self.assertEqual(plan["steps"][0]["status"], "waiting_input")
+        self.assertEqual(plan["steps"][0]["status"], "blocked")
+        self.assertEqual(plan["steps"][0]["failure"]["code"], "predicate_repair_exhausted")
+        self.assertEqual(plan["questions"], [])
+        self.assertTrue(plan["steps"][0]["technical_issues"])
+        self.assertEqual(plan["steps"][0]["unresolved_arguments"]["filters"], {"op": "all", "children": []})
         self.assertEqual(plan["steps"][1]["status"], "pending")
 
     async def test_ambiguous_producer_does_not_select_first(self):

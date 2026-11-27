@@ -107,7 +107,8 @@ def recover_plan(run: dict, *, session_id: str, stamp: str,
         if not safe:
             verify.append(step["id"])
             continue
-        if failure.get("code") in {"invalid_arguments", "unknown_tool", "authority_revoked", "arguments_changed"}:
+        if failure.get("code") in {"invalid_arguments", "unknown_tool", "authority_revoked", "arguments_changed",
+                                   "predicate_repair_exhausted"}:
             verify.append(step["id"])
             continue
         step.setdefault("attempt_history", []).append({"status": status,

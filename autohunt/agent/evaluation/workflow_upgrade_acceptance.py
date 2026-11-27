@@ -27,6 +27,7 @@ MODULES = (
     "condition_refresh_contract",
     "application_export_contract", "application_export_api_contract", "removed_growth_contract", "retired_feature_migration_contract",
     "task_results_contract", "task_control_contract", "planning_budget_contract",
+    "typed_filter_contract", "predicate_repair_contract", "predicate_revision_contract",
 )
 
 

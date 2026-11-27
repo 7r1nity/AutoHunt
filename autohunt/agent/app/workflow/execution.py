@@ -34,7 +34,7 @@ def persist(plan: dict, *, activate: bool = False) -> None:
         ("id", "original", "answers", "questions", "resume_stamp", "turn", "expires_at", "status", "goals")},
         "understanding": plan.get("understanding"),
         "revision": plan.get("revision", 0), "paused": plan.get("paused", False),
-        "steps": [{key: step.get(key) for key in ("id", "tool", "arguments", "unresolved_arguments", "staged_arguments", "depends_on", "missing_slots", "questions", "status", "authority_binding")}
+        "steps": [{key: step.get(key) for key in ("id", "tool", "arguments", "unresolved_arguments", "technical_issues", "failure", "detail", "staged_arguments", "depends_on", "missing_slots", "questions", "status", "authority_binding")}
                   for step in plan["steps"]]})
 
 
@@ -112,7 +112,8 @@ async def advance(plan: dict, registry) -> list[dict]:
         return []
     input_waits(plan)
     persist(plan)  # Make the exact action snapshot authoritative before decisions.
-    observed = []
+    observed = [step for step in plan["steps"] if step["status"] == "blocked"
+                and (step.get("failure") or {}).get("code") == "predicate_repair_exhausted"]
     steps = {step["id"]: step for step in plan["steps"]}
     for step in plan["steps"]:
         if step["status"] == "claimed":

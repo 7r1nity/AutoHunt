@@ -17,7 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_serializer, model_valid
 
 from ..llm.base import LLMRequest
 from .task_semantics import condition_mode
-from .salary_conditions import SalaryPredicate, judge_salary
+from .salary_conditions import SalaryPredicate, judge_salary, salary_summary
 
 # Model-facing trees reserve two levels for application composition (common
 # scope AND grouped alternatives). All evaluators/persistence use one budget.
@@ -37,8 +37,10 @@ def node_branches():
     for op,(minimum,maximum) in NODE_CHILDREN.items():
         branch={"properties":{"op":{"const":op},"children":{"minItems":minimum,"maxItems":maximum}},"required":["op"]}
         if op=="condition":
-            branch["required"].append("text")
-            branch["properties"]["text"]={"pattern":r"\S"}
+            branch["anyOf"] = [
+                {"required": ["text"], "properties": {"text": {"pattern": r"\S"}}},
+                {"required": ["salary"], "properties": {"salary": {"type": "object"}}},
+            ]
         else:
             branch["required"].append("children")
             branch["properties"].update(salary={"type":"null"},mode={"const":"require"})
@@ -76,7 +78,9 @@ class FilterExpression(BaseModel):
             raise ValueError(f"{self.op}节点需要{minimum}至{maximum}个子节点")
         if self.op == "condition":
             if not self.text.strip():
-                raise ValueError("筛选叶节点需要用户条件原文，不能包含子节点")
+                if self.salary is None:
+                    raise ValueError("筛选叶节点需要非空语义条件或完整结构化薪资条件，不能包含子节点")
+                self.text = salary_summary(self.salary)
         elif self.salary is not None or self.mode != "require":
             raise ValueError("组合节点仅包含子节点")
         elif self.text:
@@ -133,7 +137,7 @@ def _filter_schema(depth):
     runtime = FilterExpression.model_json_schema()["$defs"]["FilterExpression"]
     properties = {key: copy.deepcopy(value) for key, value in runtime["properties"].items()
                   if key not in {"children", "salary"}}
-    properties["text"]["description"] = "condition的事实条件；旧组合text只作为说明，不承载约束。组合说明请用label，真正条件必须放children。"
+    properties["text"]["description"] = "语义condition需非空text；完整salary叶可省略说明，由程序生成。组合说明用label，真正条件放children。"
     properties["label"]["description"] = "可选组合说明，不参与条件真假判断，不得只在label中添加要求"
     properties["salary"] = {"anyOf": [SalaryPredicate.model_json_schema(), {"type": "null"}]}
     properties["children"] = {"type": "array", "maxItems": MAX_FILTER_CHILDREN if depth > 1 else 0,
@@ -218,18 +222,7 @@ def filter_summary(value):
         if node.op == "condition":
             text = node.text
             if node.salary:
-                salary = node.salary
-                if salary.unit == "negotiable":
-                    text = "薪资面议"
-                else:
-                    bounds = "、".join(part for part in (
-                        f"下限≥{salary.minimum:,}元" if salary.minimum is not None else "",
-                        f"上限≤{salary.maximum:,}元" if salary.maximum is not None else "") if part)
-                    text = ("日薪" if salary.unit == "daily" else "月薪") + "区间" + bounds
-                    if salary.range_mode == "overlap":
-                        text = ("日薪" if salary.unit == "daily" else "月薪") + "区间与要求有交集（" + bounds + "）"
-                    if salary.applies_to == "internship":
-                        text = "仅限制实习岗位：" + text
+                text = salary_summary(node.salary)
             return {"require": "", "prefer": "优先（不排除其他）：", "allow": "允许包含："}[node.mode] + text
         parts = [render(child) for child in node.children]
         return "非（" + parts[0] + "）" if node.op == "not" else "（" + (" 且 " if node.op == "all" else " 或 ").join(parts) + "）"

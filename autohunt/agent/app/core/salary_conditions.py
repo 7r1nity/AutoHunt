@@ -38,6 +38,28 @@ class SalaryPredicate(BaseModel):
         return self
 
 
+def salary_summary(predicate: SalaryPredicate | dict) -> str:
+    """Describe an already typed predicate; never infer a constraint from text.
+
+    The evaluator and persisted predicate remain authoritative. This label is
+    suitable for display or filling a missing redundant filter description.
+    """
+    predicate = SalaryPredicate.model_validate(predicate)
+    if predicate.unit == "negotiable":
+        text = "薪资面议"
+    else:
+        bounds = "、".join(part for part in (
+            f"下限≥{predicate.minimum:,}元" if predicate.minimum is not None else "",
+            f"上限≤{predicate.maximum:,}元" if predicate.maximum is not None else "") if part)
+        unit = "日薪" if predicate.unit == "daily" else "月薪"
+        text = unit + "区间" + bounds
+        if predicate.range_mode == "overlap":
+            text = unit + "区间与要求有交集（" + bounds + "）"
+    if predicate.applies_to == "internship":
+        text = "仅限制实习岗位：" + text
+    return text
+
+
 def salary_facts(value: str) -> dict:
     text = re.sub(r"\s+", "", str(value or "")).lower()
     text = re.sub(r"(?<=\d)[,，](?=\d{3}(?:\D|$))", "", text)
