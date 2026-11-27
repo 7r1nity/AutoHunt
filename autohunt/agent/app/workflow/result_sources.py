@@ -28,7 +28,7 @@ def result_references(dialogue, plan=None):
     return rows
 
 
-def resolve_search_source(store, context, *, resume_id, explicit=None):
+def resolve_search_source(store, context, *, resume_id, explicit=None, strict_explicit=False):
     authority = context.action_authority or {}
     plan = context.plan_reader() if context.plan_reader else None
     bound = authority.get("evidence_task_id")
@@ -60,6 +60,10 @@ def resolve_search_source(store, context, *, resume_id, explicit=None):
         return source["task_id"]
 
     selected, prescribed = read(explicit), read(bound)
+    if strict_explicit and explicit and not selected:
+        # A frozen action is a reference, not a model guess. Its receipt may
+        # disappear, but that cannot transfer the grant to another search.
+        raise ResultSourceClarification("本次绑定的搜索回执不可用，请核对该轮执行记录；没有改用其他轮次。")
     if prescribed:
         ident = validate(prescribed)
         if selected and validate(selected) != ident:

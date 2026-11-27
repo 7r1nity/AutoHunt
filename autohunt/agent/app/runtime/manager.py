@@ -46,9 +46,9 @@ def _approval_detail(tool: str, arguments: dict) -> str:
                     "请确认此范围。\n\n确认后加入自动队列：先沟通，招聘方回复后发送已授权简历；"
                     "可随时停止，在任务记录中查看进度。")
         parts = []
-        count = arguments.get("expected_count")
+        count = arguments.get("limit", arguments.get("expected_count"))
         if isinstance(count, int) and count > 0:
-            parts.append(f"计划投递 {count} 个职位")
+            parts.append(f"最多投递 {count} 个符合条件职位")
         else:
             parts.append("投递职位")
         min_score = arguments.get("min_score")
@@ -375,10 +375,37 @@ class AgentRuntime:
                         and {k: v for k, v in recorded.items() if k != "scope_reset"} == snapshot):
                     scope_reset = recorded["scope_reset"]
                     break
-            scope_reset = scope_reset or delivery_scope_change(arguments,
-                self.store.dialogue_state(run["session_id"]).get("delivery_scope"),
-                session_id=run["session_id"], stamp=snapshot["resume_stamp"], task_id=snapshot["evidence_task_id"],
-                selection_inherits_scope=bool(snapshot.get("selection_inherits_scope")))
+            dialogue = self.store.dialogue_state(run["session_id"])
+            previous_scope = dialogue.get("delivery_scope")
+            source_id = arguments.get("source_task_id") or snapshot["evidence_task_id"]
+            # A fresh bounded request for this plan/current round is a new grant,
+            # not an expansion of an unrelated historical batch. Prove identity
+            # from server receipts, never from scope_mode or model flags alone.
+            current_round = False
+            source_reader = getattr(self.jobs, "search_source", None)
+            if (requested and callable(source_reader) and type(arguments.get("limit")) is int
+                    and 1 <= arguments["limit"] <= 200 and source_id
+                    and previous_scope and previous_scope.get("task_id")
+                    and previous_scope["task_id"] != source_id
+                    and (not snapshot["evidence_task_id"] or snapshot["evidence_task_id"] == source_id)):
+                from ..memory.resume_identity import resume_stamp
+                from ..workflow.validation import dependency_ancestors
+                current_stamp = resume_stamp(self.resume_workspace.read_document(), self.agent.candidate_state)
+                source = source_reader(source_id)
+                plan = (run["checkpoint"] or {}).get("plan") or {}
+                ancestors = dependency_ancestors(step_id, plan.get("steps", []))
+                produced_here = any(item["id"] in ancestors and item.get("task_id") == source_id
+                    and item.get("tool") in {"job_search_start", "job_results_refilter"}
+                    and item.get("status") == "completed" for item in plan.get("steps", []))
+                current_round = bool(source and source.get("status") == "completed"
+                    and source.get("session_id") == run["session_id"]
+                    and source.get("resume_id") == self.agent.candidate_state.read().profile.resume_id
+                    and snapshot["resume_stamp"] == current_stamp
+                    and (produced_here or dialogue.get("tasks", {}).get("browser_id") == source_id))
+            if not current_round:
+                scope_reset = scope_reset or delivery_scope_change(arguments, previous_scope,
+                    session_id=run["session_id"], stamp=snapshot["resume_stamp"], task_id=snapshot["evidence_task_id"],
+                    selection_inherits_scope=bool(snapshot.get("selection_inherits_scope")))
             if arguments.get("allow_outside_search") and not scope_reset:
                 scope_reset = {"previous_scope_id": None, "previous_filters": None, "previous_min_score": 0,
                     "previous_task_id": snapshot["evidence_task_id"], "exception_requested": True,
@@ -825,6 +852,13 @@ class AgentRuntime:
                         status = "waiting_user" if browser.status in {"waiting_for_user", "paused"} else "running"
                         self.store.update(run_id, status=status)
                         self.store.event(run_id, "browser", {"task": browser.model_dump(mode="json"), "status": status})
+                    if browser.status in {"waiting_for_user", "paused"}:
+                        detail = "职位搜索等待人工处理：" + browser.detail
+                        if step.get("detail") != detail or step.get("external_wait_status") != str(browser.status):
+                            step.update(detail=detail, external_wait_status=str(browser.status))
+                            changed = True
+                    elif step.pop("external_wait_status", None):
+                        changed = True
                     if browser.status in {"completed", "failed", "stopped"}:
                         step.update(status="completed" if browser.status == "completed" else "failed", detail=browser.detail)
                         self.browser_summary(run_id, browser)
@@ -921,11 +955,32 @@ class AgentRuntime:
                             await advance(plan, self.agent.tool_registry)
                         finally:
                             current_run.reset(token)
+            # A result report closes only the search step. Publish newly
+            # observed waits/failures even while another branch is unfinished,
+            # rather than leaving their reason only in the task inspector.
+            if not self.store.get(run_id)["cancel_requested"]:
+                if any(step["status"] in {"waiting_approval", "waiting_confirmation"} for step in plan["steps"]):
+                    self.store.update(run_id, status="waiting_confirmation")
+                elif any(step["status"] == "waiting_external" and step.get("external_wait_status") for step in plan["steps"]):
+                    self.store.update(run_id, status="waiting_user")
+                lock = self.sessions.setdefault(run["session_id"], asyncio.Lock())
+                async with lock:
+                    latest = (self.store.get(run_id)["checkpoint"] or {}).get("plan") or {}
+                    if latest.get("revision", 0) > plan.get("revision", 0):
+                        plan = copy.deepcopy(latest)
+                        continue
+                    if plan.get("questions") or not all(step["status"] in DONE for step in plan["steps"]):
+                        selected = [step for step in completion_steps(plan, self.store.all_events(run_id))
+                            if step["status"] in {"waiting_input", "waiting_approval", "waiting_confirmation",
+                                "waiting_binding", "failed", "blocked", "outcome_indeterminate", "skipped"}
+                            or step["status"] == "waiting_external" and step.get("external_wait_status")]
+                        if selected:
+                            await self.publish_plan_answer(run_id, plan, selected, intermediate=True)
             if all(step["status"] in DONE for step in plan["steps"]):
                 if plan.get("questions"):
                     self.store.update(run_id, status="waiting_user")
                     return
-                if not self.store.has_event(run_id, "workflow_summary"):
+                if not self._has_final_plan_answer(run_id):
                     lock = self.sessions.setdefault(run["session_id"], asyncio.Lock())
                     async with lock:
                         latest = (self.store.get(run_id)["checkpoint"] or {}).get("plan") or {}
@@ -950,33 +1005,48 @@ class AgentRuntime:
                 return  # Input waits do not occupy a polling worker or LLM slot.
             await asyncio.sleep(1)
 
-    async def publish_plan_answer(self, run_id: str, plan: dict, steps: list[dict]):
+    def _has_final_plan_answer(self, run_id: str) -> bool:
+        return any(event["kind"] == "workflow_summary" and not event["data"].get("intermediate")
+                   for event in self.store.all_events(run_id))
+
+    async def publish_plan_answer(self, run_id: str, plan: dict, steps: list[dict], *, intermediate=False):
         """Persist presentation before publishing; recovery never reruns tools."""
         from ..workflow.presentation import compose
         from ..workflow.execution import step_receipt
         run = self.store.get(run_id)
-        fingerprint = hashlib.sha256(json.dumps({"id": plan["id"], "revision": plan.get("revision", 0),
-            "original": plan.get("original"), "answers": plan.get("answers"), "goals": plan.get("goals"),
-            "steps": steps}, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+        receipts = [step_receipt(step) for step in steps]
+        identity = {"id": plan["id"], "receipts": receipts, "intermediate": True} if intermediate else {
+            "id": plan["id"], "revision": plan.get("revision", 0), "original": plan.get("original"),
+            "answers": plan.get("answers"), "goals": plan.get("goals"), "steps": steps}
+        fingerprint = hashlib.sha256(json.dumps(identity, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+        message_id = f"plan-progress:{run_id}:{fingerprint}" if intermediate else f"plan:{run_id}"
+        events = self.store.all_events(run_id)
+        if any(event["kind"] == "workflow_summary" and event["data"].get("message_id") == message_id for event in events):
+            return
         prepared = next((event["data"] for event in reversed(self.store.all_events(run_id))
             if event["kind"] == "plan_answer_prepared" and event["data"].get("fingerprint") == fingerprint), None)
         if prepared is None:
             started = time.monotonic()
             self.store.event(run_id, "response_synthesis", {"status": "started", "plan_id": plan["id"]})
-            async with self.slots:
-                # Background presentation runs outside the action executor.
-                # Give diagnostics an identity, not execution authority.
-                from .context import diagnostic_scope
-                diagnostic = RunContext(run_id, asyncio.current_task(), lambda *_: None, lambda *_: None,
-                    session_id=run["session_id"], diagnose=lambda kind, data: self.store.event(run_id, kind, data))
-                run_token = current_run.set(diagnostic)
-                scope_token = diagnostic_scope.set({"plan_id": plan["id"], "revision": plan.get("revision"),
-                    "step_id": None, "execution_id": None})
-                try:
-                    answer = await compose(plan, steps, getattr(self.agent.tool_registry, "response_llm", None))
-                finally:
-                    diagnostic_scope.reset(scope_token)
-                    current_run.reset(run_token)
+            if intermediate:
+                # Waiting/failure receipts need no semantic synthesis and must
+                # not queue behind a model slot just to tell the user why.
+                answer = await compose(plan, steps, None)
+            else:
+                async with self.slots:
+                    # Background presentation runs outside the action executor.
+                    # Give diagnostics an identity, not execution authority.
+                    from .context import diagnostic_scope
+                    diagnostic = RunContext(run_id, asyncio.current_task(), lambda *_: None, lambda *_: None,
+                        session_id=run["session_id"], diagnose=lambda kind, data: self.store.event(run_id, kind, data))
+                    run_token = current_run.set(diagnostic)
+                    scope_token = diagnostic_scope.set({"plan_id": plan["id"], "revision": plan.get("revision"),
+                        "step_id": None, "execution_id": None})
+                    try:
+                        answer = await compose(plan, steps, getattr(self.agent.tool_registry, "response_llm", None))
+                    finally:
+                        diagnostic_scope.reset(scope_token)
+                        current_run.reset(run_token)
             prepared = {"fingerprint": fingerprint, "message": answer.text, "snapshot_ids": answer.snapshot_ids,
                 "mode": answer.mode, "reason": answer.reason, "elapsed_ms": round((time.monotonic()-started)*1000)}
             self.store.event(run_id, "plan_answer_prepared", prepared)
@@ -984,11 +1054,19 @@ class AgentRuntime:
                 **{key: prepared[key] for key in ("mode", "reason", "elapsed_ms")}})
         if self.store.get(run_id)["cancel_requested"]:
             return
+        latest = (self.store.get(run_id)["checkpoint"] or {}).get("plan") or {}
+        if latest and (latest.get("id") != plan["id"] or latest.get("revision", 0) != plan.get("revision", 0)
+                or any(step_receipt(next((current for current in latest.get("steps", []) if current["id"] == step["id"]), {})) != receipt
+                       for step, receipt in zip(steps, receipts))):
+            return  # A correction/stop during synthesis cannot publish an old wait.
         message = prepared["message"]
-        if message and not self.store.has_event(run_id, "workflow_summary"):
-            self.jobs.add_conversation_message("assistant", message, conversation_id=run["session_id"], run_id=f"plan:{run_id}")
+        if message and (intermediate or not self._has_final_plan_answer(run_id)):
+            result = {"message_id": message_id, "message": message}
+            self.jobs.add_conversation_message("assistant", message, response=result,
+                conversation_id=run["session_id"], run_id=message_id)
             self.store.event(run_id, "workflow_summary", {"message": message, "statistics_changed": True, "plans_changed": True,
-                "plan_id": plan["id"], "presented_step_receipts": [step_receipt(step) for step in steps]})
+                "plan_id": plan["id"], "message_id": message_id, "result": result, "intermediate": intermediate,
+                "presented_step_receipts": receipts})
             for snapshot_id in prepared["snapshot_ids"]:
                 self.store.mutate_dialogue(run["session_id"], {"op": "display", "snapshot_id": snapshot_id})
 

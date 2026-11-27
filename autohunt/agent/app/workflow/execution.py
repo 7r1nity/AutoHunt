@@ -159,6 +159,32 @@ async def advance(plan: dict, registry) -> list[dict]:
                 observed.append(step); changed = True
                 continue
             task_id = steps.get(step.get("evidence_step"), {}).get("task_id")
+            prefix = (registry._delivery_prefix(step["arguments"].get("selector"))
+                      if step["tool"] == "mock_delivery_start" and hasattr(registry, "_delivery_prefix") else None)
+            if step["tool"] == "mock_delivery_start" and (step["arguments"].get("limit") is not None or prefix is not None):
+                # Freeze the producer receipt and target list BEFORE approval;
+                # resolving the latest list during execution would rebind intent.
+                prepared = copy.deepcopy(step["arguments"])
+                if task_id and not prepared.get("source_task_id"):
+                    prepared["source_task_id"] = task_id
+                try:
+                    if hasattr(registry, "_delivery_arguments"):
+                        prepared = registry._delivery_arguments(prepared)
+                except ValueError as exc:
+                    step.update(status="waiting_input", wait_reason="result_source", detail=str(exc),
+                        questions=[str(exc)], failure={"code": "delivery_source_unresolved", "effect_started": False,
+                                                     "uncertain": False})
+                    plan["questions"] = list(dict.fromkeys([*plan.get("questions", []), str(exc)]))
+                    observed.append(step); changed = True
+                    persist(plan)
+                    continue
+                if prepared != step["arguments"]:
+                    from ..security.action_grants import action_binding
+                    step["arguments"] = prepared
+                    step["authority_binding"] = action_binding(step["tool"], prepared,
+                        session_id=context.session_id,
+                        requested=step.get("user_requested", (step.get("authority_binding") or {}).get("user_requested", False)))
+                    persist(plan)
             authority = {"tool": step["tool"], "arguments": copy.deepcopy(step["arguments"]),
                 "revision": plan.get("revision"),
                 "command": step["command_quote"], "sources": [plan["original"], *plan["answers"]],

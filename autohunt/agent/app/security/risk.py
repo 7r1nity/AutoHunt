@@ -117,7 +117,9 @@ def broad_delivery_scope(tool: str, arguments: dict[str, Any] | None = None) -> 
     if tool != "mock_delivery_start":
         return False
     arguments = arguments or {}
-    return not any(arguments.get(key) for key in ("selector", "target_step_id", "filters", "min_score"))
+    bounded_round = (type(arguments.get("limit")) is int and 1 <= arguments["limit"] <= 200
+                     and bool(arguments.get("source_task_id")))
+    return not bounded_round and not any(arguments.get(key) for key in ("selector", "target_step_id", "filters", "min_score"))
 
 
 # --------------------------------------------------------------------------- policy

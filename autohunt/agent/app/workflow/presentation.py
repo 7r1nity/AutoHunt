@@ -68,13 +68,21 @@ def _result(step):
 
 
 def _render(step):
+    if step.get("status") == "waiting_external" and step.get("external_wait_status"):
+        return public_reply(step.get("detail") or "职位搜索等待人工登录或验证，尚未完成。")
     if step.get("status") == "waiting_input" and step.get("target_choice", {}).get("status") == "pending":
         return "存在多个可能岗位，请点击下方候选选择；也可以按候选序号文字回答。目标确认前，关联的移除与投递不会执行。"
     if step["tool"] == "job_search_start" and step["status"] == "completed":
         return "职位搜索已完成；岗位明细与统计以本轮搜索报告为准。"
     value = step.get("result") if step["status"] in {
         "completed", "waiting_external", "waiting_confirmation"} else step.get("detail")
-    return public_reply(tool_reply(step["tool"], step["status"], value))
+    rendered = public_reply(tool_reply(step["tool"], step["status"], value))
+    detail = step.get("detail")
+    if step["status"] in {"waiting_approval", "waiting_binding", "waiting_confirmation"} and isinstance(detail, str) and detail.strip():
+        explanation = public_reply(detail.strip())
+        if explanation not in rendered:
+            rendered += "\n" + explanation
+    return rendered
 
 
 

@@ -213,8 +213,13 @@ class MockWorkflowCoordinator:
 
     async def queue_deliveries(self, *, min_score: int = 0, session_id: str, task_id: str | None = None,
                                filters: dict | None = None, job_ids: list[int] | None = None,
-                               selection_evidence: dict | None = None) -> dict:
+                               selection_evidence: dict | None = None, limit: int | None = None) -> dict:
         """One explicit bounded batch, not a persistent rule for unseen future jobs."""
+        bounded = limit is not None
+        if bounded and (type(limit) is not int or not 1 <= limit <= 200):
+            raise PreflightRefused("投递数量必须为1至200之间的整数")
+        if bounded and not task_id:
+            raise PreflightRefused("数量投递需要绑定本轮搜索结果；未读取其他轮次")
         if session_id in self.stopping_sessions or "*" in self.stopping_sessions:
             raise PreflightRefused("当前正在停止任务，未加入投递队列")
         stop_epoch = (self.stop_epochs.get(session_id, 0), self.stop_epochs.get("*", 0))
@@ -224,33 +229,64 @@ class MockWorkflowCoordinator:
         profile = self.candidate.read().profile
         if not profile.resume_id:
             raise PreflightRefused("请先上传并启用主简历；没有简历不能投递")
-        binding_status = await self._ensure_applicant_bound(session_id)
-        if binding_status != "bound":
+        if bounded and hasattr(self.jobs, "search_source"):
+            source = self.jobs.search_source(task_id)
+            if not source or source.get("session_id") != session_id or source.get("resume_id") != profile.resume_id:
+                raise PreflightRefused("本轮搜索不属于当前会话或简历；未加入其他来源的岗位")
+            if source.get("status") != "completed":
+                raise PreflightRefused("本轮搜索尚未成功完成，未使用不完整结果或启动其他搜索")
+        async def binding_wait():
+            binding_status = await self._ensure_applicant_bound(session_id)
+            if binding_status == "bound":
+                return None
             return {"queued": 0, "binding": "searching" if binding_status == "searching" else "waiting_resource",
                     "binding_task_id": self.browser.current().id if binding_status == "searching" else None,
                     "message": "尚未绑定求职者账号，已为你启动一次搜索以完成登录与绑定："
                                "请在浏览器中完成登录（如需要），登录成功后账号会自动绑定，"
                                "本批次将等待绑定后继续入队，不需要重复发起投递。" if binding_status == "searching" else
                                "正在等待共享浏览器空闲；未接管另一会话的任务，资源释放后继续账号绑定。"}
+        if not bounded:
+            waiting = await binding_wait()
+            if waiting:
+                return waiting
         document = self.resume.read_document()
         document_digest = resume_document_digest(document)
         explicit = job_ids is not None and selection_evidence is not None
-        outside_search_exception = explicit and bool((selection_evidence or {}).get("allow_outside_search"))
+        outside_search_exception = explicit and not bounded and bool((selection_evidence or {}).get("allow_outside_search"))
         gaps: dict[str, int] = {}
-        if explicit:
+        if bounded:
+            evidence, gaps = self.jobs.resume_analysis_evidence(
+                # For a frozen explicit list, retain known below-threshold rows
+                # until the ordinary score gate below. Removing them here would
+                # misclassify those known failures as missing/unknown evidence.
+                profile.resume_id, limit=200, min_score=None if explicit else min_score,
+                task_id=task_id, resume_digest=document_digest)
+            if explicit:
+                # Frozen round receipts, not today's global matching cache, own
+                # batch eligibility even when the caller supplied selected IDs.
+                by_id = {job["id"]: job for job in evidence}
+                requested = list(dict.fromkeys(job_ids))
+                evidence = [by_id[ident] for ident in requested if ident in by_id]
+                gaps = {"unknown_filter": sum(ident not in by_id for ident in requested),
+                        "no_search_evidence": gaps.get("no_search_evidence", 0)}
+            else:
+                evidence = sorted(evidence, key=lambda job: (-int(job.get("score") or 0), int(job["id"])))
+        elif explicit:
             evidence = [self.jobs.get_job(job_id) for job_id in dict.fromkeys(job_ids)]
         else:
             evidence, gaps = self.jobs.resume_analysis_evidence(
                 profile.resume_id, limit=200, min_score=min_score, task_id=task_id, resume_digest=document_digest)
         target_hashes = (selection_evidence or {}).get("target_fingerprints", {})
-        if explicit and any(target_hashes.get(str(job["id"])) and target_hashes[str(job["id"])] != self.jobs.review_fingerprint(job) for job in evidence):
+        if explicit and any(target_hashes.get(str(job["id"])) and target_hashes[str(job["id"])] != self.jobs.review_fingerprint(
+                self.jobs.get_job(job["id"]) if bounded else job) for job in evidence):
             raise PreflightRefused("定位后岗位内容变化，未加入投递队列，请重新查看")
         eligible, already_delivered, not_applicable = [], 0, 0
+        already_queued = {row["job_id"] for row in self.jobs.mock_delivery_queue(active_only=False)} if bounded else set()
         outside_targets = []
         qualification_unknown=qualification_failed=0
         for item in evidence:
             job = self.jobs.get_job(item["id"])
-            if not explicit:
+            if not explicit or bounded:
                 # The checked receipt is tied to this search and resume. Another
                 # search may update global semantic caches on the same raw JD.
                 # Keep that live JD but retain the source round's eligibility.
@@ -273,19 +309,19 @@ class MockWorkflowCoordinator:
                 if explicit:
                     outside_targets.append({"job_id": job["id"], "title": job["title"], "reason": "qualification_not_met"})
                 continue
-            if qualification=="unknown" and not explicit:
+            if qualification in ({"unknown", "legacy"} if bounded else {"unknown"}) and (not explicit or bounded):
                 qualification_unknown+=1
                 continue
-            if item.get("filter_status", "pass") != "pass" and not outside_search_exception and not (explicit and item.get("filter_status") == "unknown"):
+            if item.get("filter_status", "pass") != "pass" and not outside_search_exception and not (explicit and not bounded and item.get("filter_status") == "unknown"):
                 not_applicable += 1
                 if explicit and item.get("filter_status") == "fail":
                     outside_targets.append({"job_id": job["id"], "title": job["title"], "reason": "search_filter_not_met"})
                 continue
-            if self.jobs.latest_delivery_status_for_job(item["id"]) is not None:
+            if item["id"] in already_queued or self.jobs.latest_delivery_status_for_job(item["id"]) is not None:
                 already_delivered += 1
                 continue
             eligible.append(job)
-        if outside_targets:
+        if outside_targets and not bounded:
             return {"queued": 0, "reason": "outside_scope_confirmation_required", "outside_targets": outside_targets,
                 "message": f"选中的岗位有 {len(outside_targets)} 个未满足原搜索或资历条件。若仍要申请，请明确允许这次指定岗位例外；搜索条件和其他岗位投递范围保持不变。尚未加入队列。"}
         scope_evidence, excluded, unknown = {}, qualification_failed, qualification_unknown
@@ -308,15 +344,30 @@ class MockWorkflowCoordinator:
             excluded += sum(item["status"] == "fail" for item in scope_evidence.values())
             unknown += sum(item["status"] == "unknown" for item in scope_evidence.values())
             eligible = [job for job in eligible if scope_evidence[job["id"]]["status"] == "pass"]
+        eligible_count = len(eligible)
+        if bounded:
+            eligible = eligible[:limit]
+        selected_job_ids = [job["id"] for job in eligible]
+        def assert_scope_current():
+            if (session_id in self.stopping_sessions or "*" in self.stopping_sessions
+                    or stop_epoch != (self.stop_epochs.get(session_id, 0), self.stop_epochs.get("*", 0))):
+                raise PreflightRefused("筛选期间用户已停止投递，未加入队列")
+            if (resume_document_digest(self.resume.read_document()) != document_digest
+                    or self.candidate.read().profile.resume_id != profile.resume_id):
+                raise PreflightRefused("筛选期间简历已变化，请核对要投递的简历")
+        if bounded and eligible:
+            # Do not start a binding search to fill a shortage or an empty round.
+            assert_scope_current()
+            waiting = await binding_wait()
+            assert_scope_current()
+            if waiting:
+                return {**waiting, "requested_limit": limit, "eligible_count": eligible_count,
+                        "selected_job_ids": selected_job_ids, "shortfall": None, "quantity_pending": True}
         for job in eligible:
             scope_evidence.setdefault(job["id"], {}).update(delivery_flow="gated")
             if explicit:
                 scope_evidence[job["id"]].update(selection_evidence)
-        if stop_epoch != (self.stop_epochs.get(session_id, 0), self.stop_epochs.get("*", 0)):
-            raise PreflightRefused("筛选期间用户已停止投递，未加入队列")
-        if (resume_document_digest(self.resume.read_document()) != document_digest
-                or self.candidate.read().profile.resume_id != profile.resume_id):
-            raise PreflightRefused("筛选期间简历已变化，请核对要投递的简历")
+        assert_scope_current()
         binding = {"resume_document_id": document.id, "resume_version": document.version,
                    "resume_digest": document_digest}
         # Stage (c): measure what the authorization layer would decide and change nothing.
@@ -334,11 +385,17 @@ class MockWorkflowCoordinator:
                         "binding": binding, "min_score": min_score}
         if filters is not None or scope_evidence:
             queue_kwargs.update(scope={"filters": filters, "min_score": min_score}, scope_evidence=scope_evidence)
+        if bounded:
+            queue_kwargs.setdefault("scope", {"filters": filters, "min_score": min_score}).update(
+                limit=limit, source_task_id=task_id, selected_job_ids=selected_job_ids)
         from ..runtime.context import effect_checkpoint
-        effect_checkpoint("started")
-        ids = self.jobs.enqueue_mock_deliveries(eligible, **queue_kwargs)
-        effect_checkpoint("committed")
-        self.wakeup.set()
+        if eligible or not bounded:
+            effect_checkpoint("started")
+            ids = self.jobs.enqueue_mock_deliveries(eligible, **queue_kwargs)
+            effect_checkpoint("committed")
+            self.wakeup.set()
+        else:
+            ids = []
         from ..core.job_filters import filter_summary
         insufficient = (gaps.get("unknown_filter", 0) + gaps.get("stale_filter", 0)
                         + gaps.get("missing_job", 0) + gaps.get("missing_score", 0)
@@ -373,7 +430,7 @@ class MockWorkflowCoordinator:
         elif reason == "no_candidates":
             message = "这轮搜索没有可投递的岗位记录；未入队。"
         elif already_delivered and not no_match:
-            message = f"这些岗位已有投递记录（{already_delivered} 个），未重复入队。"
+            message = f"这些岗位已有{'投递或队列' if bounded else '投递'}记录（{already_delivered} 个），未重复入队。"
         else:
             message = ("没有符合条件的岗位；未入队。"
                        + (f"不符合{excluded}个，信息不足{unknown}个。" if filters else "")
@@ -385,7 +442,16 @@ class MockWorkflowCoordinator:
         if pending_checks:
             message += "\n待核实：" + "；".join(f"岗位 #{item['job_id']}：{'、'.join(item['reasons'])}"
                 for item in pending_checks[:3]) + (f"；其余 {len(pending_checks)-3} 个见运行记录。" if len(pending_checks) > 3 else "。")
+        if bounded:
+            shortfall = max(0, limit - queued)
+            message += (f"\n本次最多投递{limit}个，本轮核实可投{eligible_count}个，实际入队{queued}个；"
+                        + (f"尚差{shortfall}个。" if shortfall else "数量已达到本次上限。")
+                        + "仅处理本轮已核实岗位，不补入其他轮次或证据不足的岗位。")
         return {"queued": queued, "job_ids": ids, "min_score": min_score, "filters": filters,
+                **({"requested_limit": limit, "eligible_count": eligible_count,
+                    "selected_job_ids": selected_job_ids, "shortfall": max(0, limit - queued),
+                    "remaining_eligible": max(0, eligible_count - len(selected_job_ids)),
+                    "source_task_id": task_id} if bounded else {}),
                 "excluded": excluded, "unknown": unknown, "insufficient": insufficient,
                 "scope_checks": [{"job_id": ident, **verdict} for ident, verdict in scope_evidence.items()],
                 "pending_verification": pending_checks,
@@ -658,7 +724,8 @@ class MockWorkflowCoordinator:
                         self._finish_queue_item(item, "blocked", "人工接管等待过期，请重新核对")
                         continue
                     return  # Dedicated UI takeover, never bypass verification.
-                self._finish_queue_item(item, "blocked", f"任务状态 {run.status}，需人工核验，不会重试")
+                reason = str(run.detail or "未获得可靠执行结果").strip()
+                self._finish_queue_item(item, "blocked", f"任务状态 {run.status}：{reason}；需人工核验，不会重试")
 
     def _finish_queue_item(self, item: dict, status: str, detail: str) -> None:
         current = next((row for row in self.jobs.mock_delivery_queue(active_only=False)

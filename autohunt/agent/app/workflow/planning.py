@@ -213,6 +213,10 @@ async def plan_request(llm, registry, message: str, *, dialogue: dict, condition
             "明确自动投递且范围完整时user_requested=true，不再要求重复说确认；动作范围需要用户核对时false，由执行器保存范围确认；仅关键业务参数缺失或冲突才提出questions。"
             "修订已有待确认动作时，本轮明确要求执行则updates内user_requested=true；不确定的范围由执行器持久化确认，不能用questions阻断无关分支。"
             "投递仅mock本地模拟站；min_score仅用户要求分数门槛时填写，省略不加分数门槛。真实平台boss/zhaopin可搜索但不能投递。"
+            "投递20个/20份表示mock_delivery_start.limit=20，这是最终符合条件且未投岗位的入队上限，不是搜索数量或数据库序号。"
+            "同一投递总量只生成一个投递步骤，备选范围用filters.any表达，不给每个范围重复一份数量。"
+            "投递前20个同时传selector=前20个、limit=20；前N表示本轮最多N个符合条件的岗位，少于N时处理现有符合者并报告缺额，不要求用户补足。第20个仍是严格单岗序号。"
+            "数量投递绑定本轮结果：已有列表提供snapshot_id及其source_task_id；本轮搜索尚未完成时追加投递并依赖该搜索，不改用上一轮结果或重新搜索。"
             "搜索薪资属于job_search_start；各投递/计划分支的薪资和分数条件独立，不能搬到另一个动作。"
             "85以上投递、以下的分析不足表示投递min_score=85，计划max_score=84；85以下且25k以上生成计划还需salary_min=25000。"
             "mock_delivery_start.filters是投递分支自己的语义条件树，例如只投正式岗、只投有转正机会的实习岗；不能改变搜索范围或忽略该限制。"
@@ -266,6 +270,8 @@ async def plan_request(llm, registry, message: str, *, dialogue: dict, condition
         json_output=True, max_output_tokens=4096)
     review_deadline=time.monotonic()+PLANNING_TIMEOUT
     async def validate_and_review(draft, *, review_valid_branches=False):
+        from .delivery_quantity import normalize_delivery_quantities
+        draft = normalize_delivery_quantities(draft, message, live_plan=live_plan)
         if (draft.operation=="revise" or draft.revision) and live_plan:
             current=context.plan_reader() if context and context.plan_reader else None
             if current and (current["id"],current.get("revision",0))!=(live_plan["id"],live_plan["revision"]):
@@ -334,6 +340,10 @@ def _validate_draft(draft: RequestDraft, registry, message: str, *, dialogue: di
     from ..core.job_filters import validate_filter
     from .graph import bind_evidence, depend_on, deduplicate_mutations, wait_for_scope
     from .requests import is_continuation
+    from .delivery_quantity import normalize_delivery_quantities
+    context = active_run()
+    draft = normalize_delivery_quantities(draft, message,
+        live_plan=context.plan_reader() if context and context.plan_reader else None)
 
     # Explicit control language is a veto, never authority to execute. Share
     # modality/quote checks with tool authorization even if the model omits it.
@@ -572,6 +582,10 @@ def _validate_draft(draft: RequestDraft, registry, message: str, *, dialogue: di
             args["instruction"] = (step["command_quote"] or original)[:spec.parameters["properties"]["instruction"].get("maxLength", 2000)]
         if name == "mock_delivery_start":
             from .delivery_scope import materialize_delivery_scope, remember_selection_scope
+            if args.get("limit") and not args.get("source_task_id") and not evidence_producers:
+                current_source = (dialogue.get("tasks") or {}).get("browser_id")
+                if current_source:
+                    args["source_task_id"] = current_source
             from .result_sources import ResultSourceClarification
             remember_selection_scope(step, args)
             try:

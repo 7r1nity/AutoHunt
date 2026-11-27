@@ -347,6 +347,7 @@ class AgentToolRegistry:
             specs.extend([
                 AgentToolSpec("mock_delivery_start", "将用户要求范围内的已搜索模拟站职位加入有限投递队列。批量补投默认继承上一批完整条件，scope_mode=new用于用户明确另起或替换范围；指定岗位不继承旧批量条件。filters为投递独立条件，可复用搜索判断。内部生成逐职位预览与一次性授权，快速逐个沟通、并行等待HR回复、回复后发送简历；不支持真实网站。",
                     obj({"min_score": {"type": "integer", "minimum": 0, "maximum": 100},
+                         "limit": {"type": "integer", "minimum": 1, "maximum": 200, "description": "本次投递数量上限；先核对本轮条件与资格，再按固定结果顺序选择最多该数量。不足处理现有合规岗位并报告缺额，不扩大来源或纳入未来岗位。"},
                          "scope_mode": {"type": "string", "enum": ["inherit", "update", "new"], "description": "inherit为补投/漏投，旧条件取交集且不降分，即使有selector也继承；update修改上一批部分投递条件，未给字段继承、显式字段替换，可降低门槛但须重新核对扩大范围；new为独立新批次完整范围。单岗选择省略本字段时独立。均不修改搜索条件或代替授权。"},
                          "selector": selector_schema(),
                          "selection_mode": {"type": "string", "enum": ["single", "matching"]},
@@ -718,6 +719,31 @@ class AgentToolRegistry:
         from ..workflow.delivery_scope import materialize_delivery_scope
         from ..memory.resume_identity import resume_stamp
         context = active_run()
+        args = dict(args)
+        if args.get("limit") is not None and (type(args["limit"]) is not int or not 1 <= args["limit"] <= 200):
+            raise PreflightRefused("本次投递数量上限必须是1至200的整数，未加入队列。")
+        # Prefix references mean a bounded batch, whereas 第N remains an exact
+        # displayed identity. This does not change ordinal semantics for reads
+        # or removal, and never supplies new eligibility evidence.
+        prefix = self._delivery_prefix(args.get("selector"))
+        if prefix is not None:
+            args["limit"] = min(args.get("limit", prefix), prefix)
+        if context and args.get("limit"):
+            source = args.get("source_task_id") or (context.action_authority or {}).get("evidence_task_id")
+            snapshots = [item for item in (context.dialogue or {}).get("snapshots", [])
+                         if item.get("kind") == "job" and item.get("displayed")]
+            named = next((item for item in snapshots if item.get("id") == args.get("snapshot_id")), None)
+            source = source or (named or {}).get("version") or (context.dialogue or {}).get("tasks", {}).get("browser_id")
+            if source:
+                if (callable(getattr(self.jobs, "search_source", None)) and self.candidate_state is not None
+                        and self.candidate_state.read().profile.resume_id):
+                    source = resolve_search_source(self.jobs, context,
+                        resume_id=self.candidate_state.read().profile.resume_id, explicit=source,
+                        strict_explicit=True)
+                args["source_task_id"] = source
+                matching = [item for item in snapshots if item.get("version") == source]
+                if not args.get("snapshot_id") and matching:
+                    args["snapshot_id"] = matching[-1]["id"]
         previous = (context.dialogue or {}).get("delivery_scope") if context else None
         if context and context.action_authority and "scope_mode" not in args:
             return args  # A compiled action had no remembered scope; do not bind one later.
@@ -727,6 +753,19 @@ class AgentToolRegistry:
             stamp=resume_stamp(self.resume_workspace.read_document(), self.candidate_state),
             task_id=(context.action_authority or {}).get("evidence_task_id")
                     or (context.dialogue or {}).get("tasks", {}).get("browser_id"))
+
+    @staticmethod
+    def _delivery_prefix(selector) -> int | None:
+        if not isinstance(selector, str):
+            return None
+        from ..runtime.job_references import job_reference
+        reference = job_reference(selector)
+        if reference and not reference[1] and re.fullmatch(r"前\d+个", reference[0]):
+            number = int(reference[0][1:-1])
+            if not 1 <= number <= 200:
+                raise TargetClarification("本次数量上限应为1至200，未扩大投递范围。")
+            return number
+        return None
 
     async def _interview_preparation_generate(self, args: dict) -> dict:
         selected = await self._resolve_job_targets(args)
@@ -761,13 +800,15 @@ class AgentToolRegistry:
             if not profile or not profile.resume_id:
                 raise PreflightRefused("没有启用的主简历，不能指定搜索结果")
             task_id = resolve_search_source(self.jobs, context, resume_id=profile.resume_id,
-                                            explicit=args["source_task_id"])
+                                            explicit=args["source_task_id"], strict_explicit=bool(args.get("limit")))
         elif (task_id is None and (context.dialogue or {}).get("tasks", {}).get("browser_id")
                 and self.jobs is not None and hasattr(self.jobs, "search_source") and self.candidate_state is not None):
             profile = self.candidate_state.read().profile
             if profile.resume_id:
                 task_id = resolve_search_source(self.jobs, context, resume_id=profile.resume_id)
         kwargs = {"min_score": args.get("min_score", 0), "session_id": context.session_id, "task_id": task_id}
+        if args.get("limit") is not None:
+            kwargs["limit"] = args["limit"]
         selector = args.get("selector")
         explicit_ordinals = re.findall(r"(?:第|前)[一二三四五六七八九十百\d]+(?:个|条|份)", context.user_message)
         if not selector and not args.get("target_step_id") and len(explicit_ordinals) == 1 and re.fullmatch(
@@ -775,7 +816,34 @@ class AgentToolRegistry:
             selector = explicit_ordinals[0]  # Same stable reference contract as detail reads.
         elif not selector and not args.get("target_step_id") and explicit_ordinals:
             raise TargetClarification("这条多目标指令尚未明确投递对象；请说明要投递的岗位，没有退化为批量投递。")
-        if selector or args.get("target_step_id"):
+        prefix_count = self._delivery_prefix(selector)
+        bounded_batch = prefix_count is not None or bool(args.get("limit") and not selector and not args.get("target_step_id"))
+        if bounded_batch:
+            if prefix_count is not None:
+                kwargs["limit"] = min(kwargs.get("limit", prefix_count), prefix_count)
+            # The entire named round is the candidate universe. Eligibility is
+            # checked before applying the cap, so a short round is not an
+            # ordinal error and unknown rows never fill a quota.
+            profile = self.candidate_state.read().profile
+            task_id = resolve_search_source(self.jobs, context, resume_id=profile.resume_id,
+                                            explicit=task_id, strict_explicit=True)
+            kwargs["task_id"] = task_id
+            snapshots = [item for item in (context.dialogue or {}).get("snapshots", [])
+                         if item.get("kind") == "job" and item.get("displayed")
+                         and item.get("id") == args.get("snapshot_id")]
+            if args.get("snapshot_id") and not snapshots:
+                raise TargetClarification("本次绑定的岗位列表不可用，请重新查看该轮结果；没有改用其他列表。")
+            if snapshots:
+                snapshot = snapshots[-1]
+                if snapshot.get("version") != task_id:
+                    raise ResultSourceClarification("岗位列表与本次搜索来源不同，没有改用另一轮结果。")
+                kwargs["job_ids"] = [item["id"] for item in snapshot["items"]]
+                kwargs["selection_evidence"] = {"snapshot_id": snapshot["id"], "selector": selector,
+                    # Source receipts validate original JD facts and resume;
+                    # mutable review-cache hashes from another round do not
+                    # invalidate this round's frozen membership.
+                    "bounded_batch": True}
+        elif selector or args.get("target_step_id"):
             resolved = await self._resolve_job_targets({**args, "selector": selector or "已选岗位"})
             if args.get("allow_outside_search") and len(resolved["items"]) != 1:
                 raise MissingDeliveryEvidence("范围外例外仅针对一个明确岗位，请从候选中选定一个后确认；没有扩大整批范围。", missing_slots=["selector"])
@@ -789,15 +857,16 @@ class AgentToolRegistry:
         if args.get("filters") is not None:
             kwargs["filters"] = args["filters"]
         result = await self.mock_workflow.queue_deliveries(**kwargs)
-        if (not selector and not args.get("target_step_id") and self.candidate_state is not None
-                and self.resume_workspace is not None and not result.get("binding")):
+        if ((bounded_batch or not selector and not args.get("target_step_id")) and self.candidate_state is not None
+                and self.resume_workspace is not None and not result.get("binding")
+                and (kwargs.get("limit") is None or result.get("queued", 0) > 0)):
             from ..memory.resume_identity import resume_stamp
             dialogue_change("delivery_scope", scope={"id": uuid.uuid4().hex,
                 "session_id": context.session_id,
                 "resume_stamp": resume_stamp(self.resume_workspace.read_document(), self.candidate_state),
                 "task_id": task_id or (context.dialogue or {}).get("tasks", {}).get("browser_id"),
                 "filters": kwargs.get("filters"), "min_score": kwargs["min_score"]})
-        if result.get("reason") in {"insufficient_evidence", "no_search_evidence"}:
+        if result.get("reason") in {"insufficient_evidence", "no_search_evidence"} and kwargs.get("limit") is None:
             raise MissingDeliveryEvidence(result["message"], missing_slots=["min_score", "filters", "source_task_id"])
         if result.get("reason") == "outside_scope_confirmation_required":
             raise MissingDeliveryEvidence(result["message"], missing_slots=["allow_outside_search"])
