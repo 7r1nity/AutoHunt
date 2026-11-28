@@ -1,0 +1,407 @@
+{
+  "evaluated_on_beijing": "2026-11-29",
+  "application_baseline_commit": "29e3dfa0383b0aa356a653736779dc32513211ae",
+  "conclusion": {
+    "preloaded_120_delivery_execution_verified": true,
+    "single_search_120_and_complete_board_supported": false,
+    "production_slo_established": false
+  },
+  "component_contracts": {
+    "tests": 13,
+    "failures": 0,
+    "errors": 0,
+    "elapsed_seconds": 48.515,
+    "cases": [
+      {
+        "name": "__main__.ScaleQueue.test_120_current_round_receipts_enqueue_exactly_120",
+        "passed": true,
+        "duration_seconds": 2.594
+      },
+      {
+        "name": "__main__.ScaleQueue.test_200_delivery_boundary_accepts_200_and_201_has_no_effect",
+        "passed": true,
+        "duration_seconds": 3.61
+      },
+      {
+        "name": "__main__.ScaleQueue.test_120_shortfall_does_not_use_130_jobs_from_another_round",
+        "passed": true,
+        "duration_seconds": 3.656
+      },
+      {
+        "name": "__main__.ScaleQueue.test_existing_120_row_queue_is_not_inserted_again",
+        "passed": true,
+        "duration_seconds": 2.735
+      },
+      {
+        "name": "__main__.ScaleQueue.test_two_overlapping_task_contexts_have_120_unique_queue_rows",
+        "passed": true,
+        "duration_seconds": 3.063
+      },
+      {
+        "name": "__main__.ScaleQueue.test_120_frozen_queue_rows_survive_database_reopen",
+        "passed": true,
+        "duration_seconds": 2.922
+      },
+      {
+        "name": "__main__.ScaleQueue.test_cancel_120_queued_rows_preserves_other_session",
+        "passed": true,
+        "duration_seconds": 4.234
+      },
+      {
+        "name": "__main__.ScaleQueue.test_resume_change_during_120_batch_prevents_any_queue_write",
+        "passed": true,
+        "duration_seconds": 2.578
+      },
+      {
+        "name": "__main__.ScaleQueue.test_changed_resume_invalidates_all_120_before_browser_start",
+        "passed": true,
+        "duration_seconds": 6.407
+      },
+      {
+        "name": "__main__.ScaleQueue.test_120_waiting_hr_monitors_do_not_exhaust_foreground_admission",
+        "passed": true,
+        "duration_seconds": 8.828
+      },
+      {
+        "name": "__main__.ScaleUserChain.test_natural_quantities_and_tool_schema_accept_120_through_200",
+        "passed": true,
+        "duration_seconds": 0.563
+      },
+      {
+        "name": "__main__.ScaleUserChain.test_natural_prefix_120_reaches_production_plan_authorization_queue_and_chat",
+        "passed": true,
+        "duration_seconds": 4.453
+      },
+      {
+        "name": "__main__.ScaleUserChain.test_paused_120_plan_persists_without_enqueuing",
+        "passed": true,
+        "duration_seconds": 2.781
+      }
+    ]
+  },
+  "synthetic_browser_120": {
+    "count": 120,
+    "scope": "Production queue, gated browser HTML flow, read-only reply HTTP polling and local SQLite against intercepted synthetic APIs; not a natural-language planner/search or real recruiting-site benchmark.",
+    "fixture_seams": [
+      "synthetic resume export",
+      "fresh headless browser attachment",
+      "in-memory mock-site API",
+      "frozen resume-stamp fixture"
+    ],
+    "queued": 120,
+    "greetings_before_any_reply": 120,
+    "reply_poll_conversations": 120,
+    "replies_detected": 120,
+    "confirmed_remote_applications": 120,
+    "confirmed_local_applications": 120,
+    "duplicate_greetings": 0,
+    "duplicate_applications": 0,
+    "task_success_rate": 1.0,
+    "browser_phases_attempted": 240,
+    "browser_phases_succeeded": 240,
+    "browser_phase_success_rate": 1.0,
+    "elapsed_seconds": 279.375,
+    "greeting_elapsed_seconds": 127.312,
+    "submission_elapsed_seconds": 145.031,
+    "greeting_latency": {
+      "count": 120,
+      "mean_seconds": 1.0604,
+      "p50_seconds": 1.062,
+      "p95_seconds": 1.109,
+      "minimum_seconds": 1.016,
+      "maximum_seconds": 1.203
+    },
+    "submission_latency": {
+      "count": 120,
+      "mean_seconds": 1.2077,
+      "p50_seconds": 1.188,
+      "p95_seconds": 1.328,
+      "minimum_seconds": 1.125,
+      "maximum_seconds": 1.454
+    },
+    "synthetic_resume_uploads": 1,
+    "browser_http_requests": 3962,
+    "read_only_monitor_requests": 366,
+    "browser_write_counts": {
+      "/api/messages": 120,
+      "/api/resumes": 1,
+      "/api/applications": 120
+    },
+    "backend_assertions": {
+      "remote_unique_job_ids": 120,
+      "local_queue_completed": 120
+    }
+  },
+  "surface_capacity": {
+    "target": 120,
+    "search_boundaries": [
+      {
+        "name": "search_100",
+        "accepted": true,
+        "elapsed_ms": 3.794
+      },
+      {
+        "name": "search_120",
+        "accepted": false,
+        "errors": [
+          {
+            "type": "less_than_equal",
+            "loc": [
+              "result_limit"
+            ],
+            "msg": "Input should be less than or equal to 100",
+            "input": 120,
+            "ctx": {
+              "le": 100
+            }
+          }
+        ],
+        "elapsed_ms": 1.582
+      },
+      {
+        "name": "session_state_120",
+        "accepted": false,
+        "errors": [
+          {
+            "type": "less_than_equal",
+            "loc": [
+              "result_limit"
+            ],
+            "msg": "Input should be less than or equal to 100",
+            "input": 120,
+            "ctx": {
+              "le": 100
+            }
+          }
+        ],
+        "elapsed_ms": 1.414
+      },
+      {
+        "name": "search_patch_120",
+        "accepted": false,
+        "errors": [
+          {
+            "type": "less_than_equal",
+            "loc": [
+              "result_limit"
+            ],
+            "msg": "Input should be less than or equal to 100",
+            "input": 120,
+            "ctx": {
+              "le": 100
+            }
+          }
+        ],
+        "elapsed_ms": 0.025
+      },
+      {
+        "name": "candidate_budget_120_without_result_quota",
+        "accepted": true,
+        "elapsed_ms": 0.068
+      },
+      {
+        "name": "two_city_quotas_60_plus_60",
+        "accepted": false,
+        "errors": [
+          {
+            "message": "分组最多10组，总数最多100个"
+          }
+        ],
+        "elapsed_ms": 0.062
+      }
+    ],
+    "board_api": {
+      "seeded_jobs": 120,
+      "returned_jobs": 100,
+      "omitted_jobs": 20,
+      "elapsed_ms": 12.128,
+      "authentication_checked": true,
+      "full_asgi_dependency_assembly_tested": true,
+      "lifespan_workers_started": false,
+      "outbound_http_requests": 0
+    },
+    "board_ui": {
+      "rendered_cards": 100,
+      "elapsed_ms": 2181.048,
+      "full_target_visible": false,
+      "business_mutations": 0
+    },
+    "single_search_and_full_board_goal_met": false
+  },
+  "runtime_120": {
+    "count": 120,
+    "scope": "Real AgentRuntime watch_delivery coroutines, isolated real JobStore and encrypted RunStore. Synthetic pre-existing HR waits; no website, frontend, LLM or sending.",
+    "limitations": [
+      "Synthetic waiting rows are seeded before the observation window; greetings/submissions are not performed.",
+      "Foreground admission measures the real RunStore create gate, not LLM execution or HTTP latency.",
+      "Event-loop lag and read timings are measurements on this machine, not a production SLO or long-duration soak test.",
+      "No frontend, SSE transport connections or website HR polling is loaded by this runtime benchmark."
+    ],
+    "requested_observation_seconds": 3.2,
+    "observed_seconds": 6.962,
+    "live_waiter_tasks": 120,
+    "waiting_reply_ledger_rows": 120,
+    "observation_counts": {
+      "minimum": 4,
+      "maximum": 5,
+      "total": 574
+    },
+    "observation_read_latency": {
+      "samples": 574,
+      "p50_ms": 1.056,
+      "p95_ms": 1.624,
+      "max_ms": 11.226
+    },
+    "foreground_admission": {
+      "samples": 10,
+      "p50_ms": 21.214,
+      "p95_ms": 26.339,
+      "max_ms": 26.339
+    },
+    "foreground_admissions_accepted": 10,
+    "foreground_slot_acquire_ms": 0.008,
+    "progress_result_latency": {
+      "samples": 3,
+      "p50_ms": 547.748,
+      "p95_ms": 563.903,
+      "max_ms": 563.903
+    },
+    "event_loop_lag": {
+      "samples": 60,
+      "p50_ms": 11.0,
+      "p95_ms": 558.0,
+      "max_ms": 3090.0
+    },
+    "phase_seconds": {
+      "startup": 3.117,
+      "foreground_admission": 0.675,
+      "steady_wait": 1.126,
+      "progress_queries": 2.044
+    },
+    "phase_event_loop_lag": {
+      "foreground_admission": {
+        "samples": 16,
+        "p50_ms": 11.0,
+        "p95_ms": 43.0,
+        "max_ms": 43.0
+      },
+      "progress_queries": {
+        "samples": 5,
+        "p50_ms": 105.0,
+        "p95_ms": 589.0,
+        "max_ms": 589.0
+      },
+      "startup": {
+        "samples": 1,
+        "p50_ms": 3090.0,
+        "p95_ms": 3090.0,
+        "max_ms": 3090.0
+      },
+      "steady_wait": {
+        "samples": 34,
+        "p50_ms": 11.0,
+        "p95_ms": 27.0,
+        "max_ms": 27.0
+      },
+      "transition:foreground_admission->steady_wait": {
+        "samples": 1,
+        "p50_ms": 0.0,
+        "p95_ms": 0.0,
+        "max_ms": 0.0
+      },
+      "transition:progress_queries->steady_wait": {
+        "samples": 1,
+        "p50_ms": 0.0,
+        "p95_ms": 0.0,
+        "max_ms": 0.0
+      },
+      "transition:startup->foreground_admission": {
+        "samples": 1,
+        "p50_ms": 120.0,
+        "p95_ms": 120.0,
+        "max_ms": 120.0
+      },
+      "transition:steady_wait->progress_queries": {
+        "samples": 1,
+        "p50_ms": 558.0,
+        "p95_ms": 558.0,
+        "max_ms": 558.0
+      }
+    },
+    "delivery_events_persisted": 120,
+    "encrypted_payload_rows": 133,
+    "unexpected_waiter_errors": [],
+    "external_side_effect_attempts": []
+  },
+  "bundled_asset_smoke": {
+    "count": 2,
+    "passed": true,
+    "asset_source_root": "autohunt\\agent\\evaluation\\fixtures\\job_site\\frontend",
+    "asset_source_kind": "bundled_isolated_fixture",
+    "greetings_before_any_reply": 2,
+    "replies_detected": 2,
+    "confirmed_remote_applications": 2,
+    "confirmed_local_applications": 2,
+    "duplicate_greetings": 0,
+    "duplicate_applications": 0
+  },
+  "external_model_calls": 0,
+  "real_recruitment_actions": 0,
+  "production_code_changed": false,
+  "limits": {
+    "search_result_target": 100,
+    "grouped_search_quota_total": 100,
+    "search_candidate_budget": 200,
+    "delivery_batch": 200,
+    "public_board_default_rows": 100
+  },
+  "notes": [
+    "120 browser jobs share one nominal workflow; they are not 120 independently varied scenarios.",
+    "Browser site APIs use an isolated in-memory backend; local receipt checks use real SQLite.",
+    "HR replies were injected after all greetings; timing excludes human wait and real network/model latency.",
+    "Browser executor methods were driven directly; complete rule-loop scheduling overhead is not measured.",
+    "The 120-job run used local mock HTML; optional asset-root selection was then added and bundled HTML tested on two jobs.",
+    "Runtime watch/load and browser delivery are separate experiments, not one combined long-duration soak.",
+    "Schema/board capability failures remain present; engineering checks reproduce them without changing production limits."
+  ],
+  "source_sha256": {
+    "autohunt/agent/app/jobs/store.py": "3e88aad1d0a777c39aacaf157771871ac4e05af25c2e41588b9947129be90b5b",
+    "autohunt/agent/app/workflow/mock_coordinator.py": "a78a3a363627e9d7a703cfabe8783d83ad11482ed93ad00145aa734708fad410",
+    "autohunt/agent/app/workflow/planning.py": "be51db2ebe8ce83bf6da967be7cb1141ca89d4dc5fb0a3c308eca95c78b8c8a3",
+    "autohunt/agent/app/workflow/execution.py": "a4f0c7781b4bd6b920a10301e739e29029e9e81a37481cd636a3b4058e2f6d70",
+    "autohunt/agent/app/workflow/delivery_quantity.py": "da1328f0d57f8e2e0ea7801cfa726c2251acfff4d2811ec4670b4bf5fee4d0c5",
+    "autohunt/agent/app/core/agent_tools.py": "3aa10cfce32d7e3c7f677ec2621196ebb824c70e537a3eef4292694028f26456",
+    "autohunt/agent/app/runtime/store.py": "6ff1cb760da2d430a9888dc58410b27c7f3d7c5d71c0951e119565fc16e2232e",
+    "autohunt/agent/app/runtime/manager.py": "324336bc64ea98635ed1a1723f8fb9c7480ab546bdaf2b25a501212a62e45d0f",
+    "autohunt/agent/evaluation/delivery_limit_contract.py": "617091ec4feccc0b44bb9e191946e71adc4410de5923ef442358578bd3854890",
+    "autohunt/agent/evaluation/delivery_request_contract.py": "7e4f22e0589affa374f57c3f2894d2d1d156b778b3ea5ad9a0d65fb5ad129d82",
+    "autohunt/agent/evaluation/delivery_scale_contract.py": "28f5b11008b5e6afe74193c5d8351dc13a5195a54b8978ffa9ab7485c4d56990",
+    "autohunt/agent/app/delivery/automation.py": "7cca8508781677a2212df14a55d5003ac7b82f29e3cad837b07c9eff5ea14639",
+    "autohunt/agent/app/delivery/mock_site_adapter.py": "c8b3ec7f7bd73e87a9cb6b8f3cfff25ccd4d58e55b5e4fd43b206f691b2a9589",
+    "autohunt/agent/app/delivery/resume_binding.py": "5680747b332c7d8dfb9a7dbc955d95fe648f8d8d80ea959f6c3a5695847cdc36",
+    "mock-site/frontend/job.html": "01153941ed731688289e07137c63887cf0636b9f684d9aa245a2e3491c473139",
+    "mock-site/frontend/js/api.js": "27810513170d1709fb9a1c7da0dfc9bab0fd76ecc25123970a64ad43b7349229",
+    "mock-site/frontend/css/style.css": "56e360c8b260a049903acb1482ab8bdb3a6f78d52044910c478df63e4cc31b27",
+    "autohunt/agent/app/api/application.py": "ac9bec9d66881cc30eb0d6ba29fe30540a63fc7195e4ba47ab60c2f4d96b8a4e",
+    "autohunt/agent/app/core/models.py": "9e54264af17a19b99424d0a9bb689800f143bccd6d56f4055d476e5ec94851ee",
+    "autohunt/agent/app/core/result_groups.py": "a84eeb9735ee39ddc5240b1560312f5a8fb5068e835da05777ae6fcc5e4955b0",
+    "autohunt/agent/app/core/filter_policy.py": "9d3eca04a98d33973115212cf0f8de122174d7f416ea40907001850196cd93f1",
+    "autohunt/agent/app/runtime/search_state.py": "4669f80f79b629993b3320f4f313007ddda358f0f84ac2407aad9d2bfca3904c",
+    "autohunt/frontend/app/page.tsx": "48d78c8cfbd6b85a65e7ef59bf8a57a364d759c9862506b8e6e6da9ed0538d2f",
+    "autohunt/frontend/lib/use-job-board.ts": "5a6cadca0c3fd5af026db8d115d5334baac506ad8977ed1d9db78115f7633dec",
+    "autohunt/frontend/lib/latest-snapshot.ts": "e4a7dd4c834109a602d33d83e7cacd07e7ff8fe8f1b5e0492aa45229f0b9348f",
+    "autohunt/agent/app/runtime/task_results.py": "9850a9ce1e415df78db50ed357c6993225536f455f7358214d93c9c75e2f312b",
+    "autohunt/agent/evaluation/delivery_scale_runtime.py": "615c766321ce71e6607a1eee0b02544229a17d40641cbfa91db4de6f2204e447",
+    "autohunt/agent/evaluation/fixtures/job_site/frontend/job.html": "34c056fff9b437e1606498145b0fdf845f5e796f9ff88d25148056179b8fe47c",
+    "autohunt/agent/evaluation/fixtures/job_site/frontend/js/api.js": "29905a8829732daea5642276529b026d0aef3db5e247ffae1347c1dc77f2a451",
+    "autohunt/agent/evaluation/fixtures/job_site/frontend/css/style.css": "2fe700cf1ef776a2b93bd2daaa4ab3923bdca32092f1e745f9ba06a43fde61b5"
+  },
+  "source_changed_during_runs": [],
+  "local_logs": {
+    "component": "autohunt/agent/evaluation/results/delivery-scale-contract/20261128T171934.602798Z/summary.json",
+    "browser120": "autohunt/agent/evaluation/results/delivery-scale-browser/20261128T171751.757768Z/result.json",
+    "surface": "autohunt/agent/evaluation/results/delivery-scale-surface/20261128T171824.097268Z/result.json",
+    "runtime": "autohunt/agent/evaluation/results/delivery-scale-runtime/20261128T172501.958292Z/summary.json",
+    "bundled_smoke": "autohunt/agent/evaluation/results/delivery-scale-browser/20261128T172408.348360Z/result.json"
+  }
+}
