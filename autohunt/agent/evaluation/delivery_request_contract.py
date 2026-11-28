@@ -243,11 +243,36 @@ class DeliveryUserChain(unittest.IsolatedAsyncioTestCase):
         self.assert_result(run, 0, 20)
         self.coordinator._ensure_applicant_bound.assert_not_awaited()
 
-    async def test_fewer_qualified_jobs_are_not_filled_from_unknown_candidates(self):
+    async def test_unknown_qualification_does_not_reduce_available_batch(self):
         self.seed(7, qualification="unknown")
         self.seed(2, qualification="pass", start=10)
         run = await self.execute("投递20个")
-        self.assert_result(run, 2, 18)
+        self.assert_result(run, 9, 11)
+        result = run["checkpoint"]["plan"]["steps"][0]["result"]
+        self.assertEqual((result["excluded"], result["unknown"], result["insufficient"]), (0, 0, 0))
+        self.assertEqual(len(result["qualification_advisories"]), 7)
+
+    async def test_one_unknown_qualification_job_reaches_queue_and_chat_with_shortfall(self):
+        ids = self.seed(1, qualification="unknown")
+        self.snapshot(ids)
+        run = await self.execute("投递前20个")
+        self.assert_result(run, 1, 19)
+        result = run["checkpoint"]["plan"]["steps"][0]["result"]
+        self.assertEqual(result["qualification_advisories"], [{"job_id": ids[0], "status": "unknown"}])
+        self.assertEqual(result["insufficient"], 0)
+        history = self.jobs.conversation_history(conversation_id="default", limit=20)
+        self.assertTrue(any("实际入队1个" in item["content"] and "尚差19个" in item["content"]
+            for item in history if item["role"] == "assistant"))
+        self.assertFalse(any("资历" in item["content"] and "未入队" in item["content"] for item in history))
+
+    async def test_explicit_user_filter_still_excludes_jobs_with_advisory_qualification(self):
+        self.seed(3, qualification="unknown", salary="8-10K")
+        wanted = self.seed(1, qualification="fail", start=10)
+        run = await self.execute("投递20个")
+        self.assert_result(run, 1, 19)
+        result = run["checkpoint"]["plan"]["steps"][0]["result"]
+        self.assertEqual(result["excluded"], 3)
+        self.assertEqual(result["job_ids"], wanted)
 
     async def test_new_round_explicit_delivery_does_not_reuse_old_salary_ceiling(self):
         self.make_search("old")

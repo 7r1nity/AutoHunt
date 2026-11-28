@@ -30,6 +30,7 @@ MODULES = (
     "task_results_contract", "task_control_contract", "planning_budget_contract",
     "typed_filter_contract", "predicate_repair_contract", "predicate_revision_contract",
     "delivery_limit_contract", "delivery_round_contract", "workflow_wait_delivery_contract", "delivery_request_contract",
+    "qualification_advisory_contract",
 )
 
 

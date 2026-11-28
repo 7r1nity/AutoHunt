@@ -345,9 +345,9 @@ class AgentToolRegistry:
         ]
         if self.mock_workflow is not None:
             specs.extend([
-                AgentToolSpec("mock_delivery_start", "将用户要求范围内的已搜索模拟站职位加入有限投递队列。批量补投默认继承上一批完整条件，scope_mode=new用于用户明确另起或替换范围；指定岗位不继承旧批量条件。filters为投递独立条件，可复用搜索判断。内部生成逐职位预览与一次性授权，快速逐个沟通、并行等待HR回复、回复后发送简历；不支持真实网站。",
+                AgentToolSpec("mock_delivery_start", "将用户要求范围内的已搜索模拟站职位加入有限投递队列。批量补投默认继承上一批完整条件，scope_mode=new用于用户明确另起或替换范围；指定岗位不继承旧批量条件。filters仅表达用户要求的投递条件，可复用搜索判断。JD资历诊断仅供参考，不自动追加应届、学历、年限或岗位性质门槛，不因缺少资格证明要求补参或再确认。内部生成逐职位预览与一次性授权，快速逐个沟通、并行等待HR回复、回复后发送简历；不支持真实网站。",
                     obj({"min_score": {"type": "integer", "minimum": 0, "maximum": 100},
-                         "limit": {"type": "integer", "minimum": 1, "maximum": 200, "description": "本次投递数量上限；先核对本轮条件与资格，再按固定结果顺序选择最多该数量。不足处理现有合规岗位并报告缺额，不扩大来源或纳入未来岗位。"},
+                         "limit": {"type": "integer", "minimum": 1, "maximum": 200, "description": "本次投递数量上限；先核对本轮用户筛选条件并去重，再按固定结果顺序选择最多该数量。不足处理现有合规岗位并报告缺额，不扩大来源或纳入未来岗位。"},
                          "scope_mode": {"type": "string", "enum": ["inherit", "update", "new"], "description": "inherit为补投/漏投，旧条件取交集且不降分，即使有selector也继承；update修改上一批部分投递条件，未给字段继承、显式字段替换，可降低门槛但须重新核对扩大范围；new为独立新批次完整范围。单岗选择省略本字段时独立。均不修改搜索条件或代替授权。"},
                          "selector": selector_schema(),
                          "selection_mode": {"type": "string", "enum": ["single", "matching"]},

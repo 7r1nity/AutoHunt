@@ -43,10 +43,14 @@ MATCH_INSTRUCTIONS = (
     "评分权重：用户本轮搜索方向 50%，简历技能证据 30%，简历目标岗位 10%，JD 信息完整度 10%。"
     "80 分及以上 APPLY，50-79 分 REVIEW，低于 50 分 SKIP。排除关键词是硬约束；"
     "与本轮搜索方向一致的职位不得仅因技能重合度低而 SKIP，应进入 REVIEW 供人工审核。"
-    "额外输出requirements数组，逐项核对JD明确要求的学历、年限、资格等硬条件；无此类硬条件时返回[]。"
+    "可选输出requirements数组，记录JD要求与候选人证据的差异和风险；可以省略或返回[]。"
+    "这类资格判断仅作建议（advisory），JD中的默认要求不自动构成投递拒绝条件，也不是额外评分门槛。"
+    "不得仅因应届身份、学历、工作年限、N年项目经历、实习或正式身份、外包或第三方身份缺乏证据或不满足，"
+    "把按搜索方向和技能匹配得出的APPLY自动降为REVIEW或SKIP。"
+    "用户明确提出的排除关键词仍是硬约束；用户明确的外包、岗位性质、招聘对象等筛选由独立filters执行，不能擅自增加这些限制。"
     "每项为{name,status:pass|fail|unknown,job_quote:JD连续原文,candidate_evidence:[{field:提供的证据字段名,quote:候选人连续原文}],reason}。"
     "candidate_facts.documents是最小化候选人证据；不能从技能、方向推断学历年限。"
-    "pass和fail都需双方直接证据，未体现不能当作不会或不满足，应unknown；匹配分与硬条件分开。"
+    "pass和fail都需双方直接证据，未体现不能当作不会或不满足，应unknown；建议中的unknown或fail不否决匹配结果。"
 )
 
 

@@ -216,14 +216,15 @@ class MatchingContracts(unittest.IsolatedAsyncioTestCase):
     def request(self):
         return JobAnalysisRequest(title="虚构后端工程师",description="【合成JD】必须硕士学历和五年工作经验。负责后端接口设计与质量检查。",
             candidate_facts={"document_id":"fixture","digest":"fixed-digest","documents":{"education":"学历：本科","years_experience":"相关工作经验1年"}})
-    async def test_high_score_cannot_override_qualification_failure(self):
+    async def test_default_qualification_failure_is_advisory_without_changing_match(self):
         async def generate(request):
             return LLMResult(json.dumps({"score":99,"decision":"APPLY","matched_skills":[],"missing_skills":[],"reasoning":"synthetic",
                 "requirements":[{"name":"学历","status":"fail","job_quote":"必须硕士学历","candidate_evidence":[{"field":"education","quote":"学历：本科"}]}]},ensure_ascii=False),"fixture","scripted")
         result=await match_job(generate,self.request())
         self.assertEqual(result.qualification["status"],"fail")
         self.assertEqual(result.score,99)
-        self.assertEqual(result.decision,"REVIEW")
+        self.assertEqual(result.decision,"APPLY")
+        self.assertEqual(result.qualification["policy"],"advisory")
 
     async def test_invented_or_missing_candidate_evidence_stays_unknown(self):
         analysis=JobAnalysis(score=99,decision="APPLY",matched_skills=[],missing_skills=[],reasoning="test",requirements=[
@@ -255,7 +256,7 @@ class MatchingContracts(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(qualification_status(store.get_job(ident),"original-document"),"fail")
             self.assertEqual(qualification_status(store.get_job(ident),"changed-document"),"unknown")
 
-    async def test_actual_batch_queue_does_not_promote_high_score_over_fail_or_unknown(self):
+    async def test_actual_batch_queue_uses_user_scope_not_default_qualification_veto(self):
         from evaluation.delivery_evidence_contract import PersistedFlow
         fixture=PersistedFlow("test_search_enrichment_then_queue_has_no_second_model_verdict")
         await fixture.asyncSetUp()
@@ -263,10 +264,13 @@ class MatchingContracts(unittest.IsolatedAsyncioTestCase):
             fixture.context.owner=asyncio.current_task()
             await fixture.seed(qualification_statuses=("fail","unknown"))
             result=await fixture.coordinator.queue_deliveries(session_id="default",task_id="search",min_score=85)
-            self.assertEqual(result["queued"],0)
-            self.assertEqual(result["insufficient"],1)
-            self.assertEqual(result["no_match"],1)
-            self.assertFalse(fixture.store.mock_delivery_queue())
+            self.assertEqual(result["queued"],2)
+            self.assertEqual(result["insufficient"],0)
+            self.assertEqual(result["no_match"],0)
+            self.assertEqual(len(fixture.store.mock_delivery_queue()),2)
+            # Widening the policy must not manufacture positive evidence.
+            self.assertEqual([json.loads(fixture.store.get_job(i)["qualification_evidence"])["status"]
+                             for i in (1,2)], ["fail","unknown"])
         finally:
             await fixture.asyncTearDown()
 

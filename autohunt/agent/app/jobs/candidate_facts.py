@@ -32,6 +32,12 @@ def match_facts(workspace, candidate=None):
 
 
 def verify_requirements(analysis, request, *, assessed):
+    """Verify optional qualification diagnostics, never add an execution gate.
+
+    User-requested exclusions and filter expressions have their own policies.
+    A JD requirement does not become a user restriction merely by appearing in
+    these model-supplied suggestions; invalid evidence remains unknown.
+    """
     documents=request.candidate_facts.get("documents",{})
     checked=[]
     for item in analysis.requirements:
@@ -45,16 +51,13 @@ def verify_requirements(analysis, request, *, assessed):
             and len(e["quote"].strip())>=2 and e.get("field") in documents and e["quote"] in documents[e["field"]] for e in evidence)
         if not valid_job or status!="unknown" and not valid_candidate:
             status="unknown"
-        checked.append({"name":str(item.get("name","") or "未说明的岗位硬条件")[:300],"status":status,
+        checked.append({"name":str(item.get("name","") or "未说明的岗位要求")[:300],"status":status,
                         "job_quote":job_quote if valid_job else "","candidate_evidence":evidence if valid_candidate else [],
                         "reason":str(item.get("reason","") or "")[:500]})
     status="fail" if any(r["status"]=="fail" for r in checked) else "unknown" if not assessed or any(r["status"]=="unknown" for r in checked) else "pass"
-    qualification={"status":status,"assessed":assessed,"requirements":checked,
+    qualification={"status":status,"policy":"advisory","assessed":assessed,"requirements":checked,
                    "resume_digest":request.candidate_facts.get("digest"),"document_id":request.candidate_facts.get("document_id")}
-    updates={"requirements":checked,"qualification":qualification}
-    if status!="pass" and analysis.decision=="APPLY":
-        updates.update(decision="REVIEW",reasoning="岗位资历条件"+("不满足" if status=="fail" else "待核实")+"；"+analysis.reasoning)
-    return analysis.model_copy(update=updates)
+    return analysis.model_copy(update={"requirements":checked,"qualification":qualification})
 
 
 def qualification_status(job,digest):

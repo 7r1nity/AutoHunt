@@ -283,7 +283,7 @@ class MockWorkflowCoordinator:
         eligible, already_delivered, not_applicable = [], 0, 0
         already_queued = {row["job_id"] for row in self.jobs.mock_delivery_queue(active_only=False)} if bounded else set()
         outside_targets = []
-        qualification_unknown=qualification_failed=0
+        qualification_advisories = {}
         for item in evidence:
             job = self.jobs.get_job(item["id"])
             if not explicit or bounded:
@@ -304,14 +304,11 @@ class MockWorkflowCoordinator:
                 continue
             from ..jobs.candidate_facts import qualification_status
             qualification=qualification_status(job,document_digest)
-            if qualification=="fail" and not outside_search_exception:
-                qualification_failed+=1
-                if explicit:
-                    outside_targets.append({"job_id": job["id"], "title": job["title"], "reason": "qualification_not_met"})
-                continue
-            if qualification in ({"unknown", "legacy"} if bounded else {"unknown"}) and (not explicit or bounded):
-                qualification_unknown+=1
-                continue
+            # A JD's candidate requirements are advice, not implicit user filters.
+            # Keep the original verdict for explanation without converting missing
+            # evidence into either a pass or an automatic-delivery refusal.
+            if qualification != "pass":
+                qualification_advisories[job["id"]] = {"job_id": job["id"], "status": qualification}
             if item.get("filter_status", "pass") != "pass" and not outside_search_exception and not (explicit and not bounded and item.get("filter_status") == "unknown"):
                 not_applicable += 1
                 if explicit and item.get("filter_status") == "fail":
@@ -323,8 +320,8 @@ class MockWorkflowCoordinator:
             eligible.append(job)
         if outside_targets and not bounded:
             return {"queued": 0, "reason": "outside_scope_confirmation_required", "outside_targets": outside_targets,
-                "message": f"选中的岗位有 {len(outside_targets)} 个未满足原搜索或资历条件。若仍要申请，请明确允许这次指定岗位例外；搜索条件和其他岗位投递范围保持不变。尚未加入队列。"}
-        scope_evidence, excluded, unknown = {}, qualification_failed, qualification_unknown
+                "message": f"选中的岗位有 {len(outside_targets)} 个未满足原搜索条件。若仍要申请，请明确允许这次指定岗位例外；搜索条件和其他岗位投递范围保持不变。尚未加入队列。"}
+        scope_evidence, excluded, unknown = {}, 0, 0
         if filters is not None:
             from ..core.job_filters import evaluate_filter, validate_filter
             filters = validate_filter(filters).model_dump(mode="json")
@@ -362,9 +359,13 @@ class MockWorkflowCoordinator:
             assert_scope_current()
             if waiting:
                 return {**waiting, "requested_limit": limit, "eligible_count": eligible_count,
-                        "selected_job_ids": selected_job_ids, "shortfall": None, "quantity_pending": True}
+                        "selected_job_ids": selected_job_ids, "shortfall": None, "quantity_pending": True,
+                        "qualification_advisories": [qualification_advisories[ident] for ident in selected_job_ids
+                            if ident in qualification_advisories]}
         for job in eligible:
             scope_evidence.setdefault(job["id"], {}).update(delivery_flow="gated")
+            if job["id"] in qualification_advisories:
+                scope_evidence[job["id"]]["qualification_advisory"] = qualification_advisories[job["id"]]
             if explicit:
                 scope_evidence[job["id"]].update(selection_evidence)
         assert_scope_current()
@@ -423,7 +424,7 @@ class MockWorkflowCoordinator:
                        "仅处理当前简历的已搜索职位，不启用每日任务，也不自动添加未来职位。可说「停止自动投递」。")
         elif reason == "insufficient_evidence":
             message = (f"已找到候选岗位，但其中 {insufficient} 个缺少投递所需证据"
-                       "（分数、薪资、JD、学历/年限等资历或筛选状态），无法确认是否符合；本批次未入队。"
+                       "（分数、JD 或用户指定的薪资、筛选条件），无法确认是否符合；本批次未入队。"
                        "请选择：刷新已有结果、补一次最小范围搜索，或明确接受未知条件。")
         elif reason == "no_search_evidence":
             message = "当前简历还没有可用的已完成搜索结果；请先搜索，或指定 source_task_id。"
@@ -454,6 +455,8 @@ class MockWorkflowCoordinator:
                     "source_task_id": task_id} if bounded else {}),
                 "excluded": excluded, "unknown": unknown, "insufficient": insufficient,
                 "scope_checks": [{"job_id": ident, **verdict} for ident, verdict in scope_evidence.items()],
+                "qualification_advisories": [qualification_advisories[ident] for ident in ids
+                    if ident in qualification_advisories],
                 "pending_verification": pending_checks,
                 "no_match": no_match, "already_delivered": already_delivered,
                 "reason": reason, "message": message}

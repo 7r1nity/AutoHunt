@@ -213,6 +213,7 @@ async def plan_request(llm, registry, message: str, *, dialogue: dict, condition
             "明确自动投递且范围完整时user_requested=true，不再要求重复说确认；动作范围需要用户核对时false，由执行器保存范围确认；仅关键业务参数缺失或冲突才提出questions。"
             "修订已有待确认动作时，本轮明确要求执行则updates内user_requested=true；不确定的范围由执行器持久化确认，不能用questions阻断无关分支。"
             "投递仅mock本地模拟站；min_score仅用户要求分数门槛时填写，省略不加分数门槛。真实平台boss/zhaopin可搜索但不能投递。"
+            "只按用户明确提出或有效继承的条件筛选；JD资历诊断是参考信息，不能自行追加外包、实习/正式、应届、学历、工作或项目年限等硬门槛，也不能因此要求补参或确认投递。用户明确要求这些条件时仍须保留到filters执行。"
             "投递20个/20份表示mock_delivery_start.limit=20，这是最终符合条件且未投岗位的入队上限，不是搜索数量或数据库序号。"
             "同一投递总量只生成一个投递步骤，备选范围用filters.any表达，不给每个范围重复一份数量。"
             "投递前20个同时传selector=前20个、limit=20；前N表示本轮最多N个符合条件的岗位，少于N时处理现有符合者并报告缺额，不要求用户补足。第20个仍是严格单岗序号。"

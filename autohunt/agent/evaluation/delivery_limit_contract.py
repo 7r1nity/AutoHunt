@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import gc
+import hashlib
 import json
 import tempfile
 import unittest
@@ -69,7 +70,21 @@ class DeliveryLimitContracts(unittest.IsolatedAsyncioTestCase):
                 "filter_status": filter_status, "filter_evidence": {"status": filter_status, "conditions": []},
                 "qualification_evidence": {"status": qualification, "assessed": True, "requirements": [],
                     "resume_digest": resume_document_digest(self.document)}}
-            receipt = self.jobs.admit_search_result(task_id, job, limit=None, groups=None)
+            if qualification == "legacy":
+                # Optional qualification advice may be absent while a valid
+                # versioned search receipt still proves the exact resume used.
+                job["qualification_evidence"] = None
+                original_receipt = self.jobs._analysis_receipt
+                def bound_receipt(row):
+                    result = original_receipt(row)
+                    result["analysis_receipt"]["resume_digest"] = resume_document_digest(self.document)
+                    result["analysis_receipt_digest"] = hashlib.sha256(
+                        self.jobs._canonical_snapshot(result["analysis_receipt"]).encode()).hexdigest()
+                    return result
+                with patch.object(self.jobs, "_analysis_receipt", bound_receipt):
+                    receipt = self.jobs.admit_search_result(task_id, job, limit=None, groups=None)
+            else:
+                receipt = self.jobs.admit_search_result(task_id, job, limit=None, groups=None)
             ids.append(receipt["job_id"])
         return ids
 
@@ -122,15 +137,64 @@ class DeliveryLimitContracts(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.coordinator.wakeup.is_set())
         self.assertFalse(any(event["kind"] == "effect_checkpoint" for event in self.events))
 
-    async def test_score_and_qualification_are_checked_before_limiting(self):
+    async def test_score_gate_precedes_limit_while_qualification_is_advisory(self):
         self.seed(8, score=60)
         self.seed(8, qualification="unknown", start=10)
         self.seed(8, qualification="fail", start=20)
         wanted = self.seed(25, score=95, start=30)
         result = await self.queue(min_score=85)
         self.assertEqual(result["selected_job_ids"], wanted[:20])
-        self.assertEqual(result["eligible_count"], 25)
+        self.assertEqual(result["eligible_count"], 41)
         self.assertEqual(result["queued"], 20)
+
+    async def test_default_qualification_advisories_do_not_block_bounded_batches(self):
+        expected = {}
+        for index, status in enumerate(("fail", "unknown", "legacy")):
+            for ident in self.seed(2, qualification=status, start=index * 10):
+                expected[ident] = status
+        result = await self.queue()
+        self.assertEqual((result["queued"], result["eligible_count"], result["shortfall"]), (6, 6, 14))
+        self.assertEqual((result["excluded"], result["unknown"], result["insufficient"]), (0, 0, 0))
+        self.assertEqual({item["job_id"]: item["status"] for item in result["qualification_advisories"]}, expected)
+        for row in self.jobs.mock_delivery_queue():
+            advisory = row["scope_evidence"]["qualification_advisory"]
+            self.assertEqual(advisory["status"], expected[row["job_id"]])
+            frozen = row["eligibility_snapshot"]["qualification_evidence"]
+            if expected[row["job_id"]] == "legacy":
+                self.assertIn(frozen, (None, "null"))
+            else:
+                self.assertEqual(json.loads(frozen)["status"], expected[row["job_id"]])
+            self.assertIsNotNone(self.jobs.assert_delivery_queue_facts(row))
+
+    async def test_explicit_single_selection_needs_no_qualification_exception(self):
+        ids = []
+        for index, status in enumerate(("fail", "unknown", "legacy")):
+            ids.extend(self.seed(1, qualification=status, start=index * 10))
+        result = await self.coordinator.queue_deliveries(session_id="default", job_ids=ids,
+            selection_evidence={"source": "ui_click"})
+        self.assertEqual(result["job_ids"], ids)
+        self.assertEqual(result["reason"], "queued")
+        self.assertNotIn("outside_targets", result)
+        self.assertEqual((result["excluded"], result["unknown"], result["insufficient"]), (0, 0, 0))
+
+    async def test_explicit_user_salary_filter_still_excludes_qualification_advisories(self):
+        for index, status in enumerate(("fail", "unknown", "legacy")):
+            self.seed(1, qualification=status, salary="15-18K", start=index * 10)
+        result = await self.queue(filters={"op": "condition", "salary": {"unit": "monthly", "minimum": 20000}})
+        self.assertEqual((result["queued"], result["shortfall"], result["excluded"]), (0, 20, 3))
+        self.assertEqual((result["unknown"], result["insufficient"]), (0, 0))
+        self.coordinator._ensure_applicant_bound.assert_not_awaited()
+
+    async def test_unknown_explicit_user_filter_still_requires_evidence(self):
+        self.seed(1, qualification="fail")
+        async def unknown(*args, **kwargs):
+            return {"status": "unknown", "conditions": [{"status": "unknown", "reason": "用户明确条件缺少证据"}]}
+        with patch("app.core.job_filters.evaluate_filter", unknown):
+            result = await self.queue(filters={"op": "condition", "text": "用户明确要求的企业福利", "quote": "企业福利"})
+        self.assertEqual((result["queued"], result["shortfall"], result["unknown"]), (0, 20, 1))
+        self.assertEqual(result["insufficient"], 1)
+        self.assertEqual(result["qualification_advisories"], [])
+        self.coordinator._ensure_applicant_bound.assert_not_awaited()
 
     async def test_independent_salary_filter_applies_before_limit(self):
         self.seed(9, salary="15-18K")
@@ -192,13 +256,14 @@ class DeliveryLimitContracts(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["shortfall"], 18)
         self.assertEqual(result["insufficient"], 25)
 
-    async def test_unknown_explicit_selection_does_not_bypass_bounded_batch_checks(self):
-        unknown = self.seed(3, qualification="unknown")
+    async def test_explicit_selection_cannot_bypass_unknown_user_filter(self):
+        unknown = self.seed(3, filter_status="unknown")
         wanted = self.seed(1, start=10)
         result = await self.queue(job_ids=[*unknown, *wanted], selection_evidence={"allow_unverified": True})
         self.assertEqual(result["job_ids"], wanted)
         self.assertEqual(result["shortfall"], 19)
-        self.assertEqual(result["unknown"], 3)
+        self.assertEqual(result["insufficient"], 3)
+        self.assertEqual(result["unknown"], 0)
 
     async def test_known_below_score_explicit_rows_are_not_called_unknown(self):
         low = self.seed(15, score=60)
