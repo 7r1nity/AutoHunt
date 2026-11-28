@@ -3,13 +3,14 @@
 import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { ImportedResume, ImportedResumeEditor } from "@/components/imported-resume";
 import { useAgentRuntime } from "@/lib/use-agent-runtime";
+import { useJobBoard } from "@/lib/use-job-board";
 import { RuntimePanel } from "@/components/runtime-panel";
 import { MetricsDashboard } from "@/components/metrics-dashboard";
 import { JobTargetChoices } from "@/components/job-target-choices";
 import { InterviewPreparation } from "@/components/interview-preparation";
 import { ApplicationExport } from "@/components/application-export";
 import { WorkspaceIcon } from "@/components/workspace-icon";
-import { interruptionCommand, interruptionScope, progressCommand, terminalRun } from "@/lib/agent-runtime";
+import { changesJobInventory, interruptionCommand, interruptionScope, progressCommand, terminalRun } from "@/lib/agent-runtime";
 import type { TaskResults } from "@/lib/agent-runtime";
 import { createChatTurn, createMessageId, mergeTaskResults } from "@/lib/chat-message";
 import { chatDisplay } from "@/lib/chat-display";
@@ -383,7 +384,7 @@ export default function Home() {
   const [conversationLoading, setConversationLoading] = useState(true);
   const [chatDetailsOpen, setChatDetailsOpen] = useState(false);
   const [agentStatus, setAgentStatus] = useState<AgentStatus>("idle");
-  const [jobs, setJobs] = useState<Job[]>([]);
+  const { jobs, refreshJobs, boardSync } = useJobBoard();
   const [materials, setMaterials] = useState<Material[]>([]);
   const [resumes, setResumes] = useState<ResumeProfile[]>([]);
   const [candidateMaterials, setCandidateMaterials] = useState<CandidateMaterial[]>([]);
@@ -532,9 +533,10 @@ export default function Home() {
 
   useEffect(() => {
     runtime.notifications.filter((notification) => notification.sessionId === runtime.sessionId).forEach(({ runId, event }) => {
-      const key = `${runId}:${event.seq}`;
+      const key = `${runtime.sessionId}:${runId}:${event.seq}`;
       if (runtimeNotificationIdsRef.current.has(key)) return;
       runtimeNotificationIdsRef.current.add(key);
+      if (changesJobInventory(event)) void refreshJobs({ invalidate: true });
       if (event.kind === "browser_summary") void fetchInsights();
       if (event.kind === "workflow_summary") {
         void fetchInsights();
@@ -564,7 +566,15 @@ export default function Home() {
         selectedOperationIds: proposal?.operations.map((operation) => operation.id),
       }]);
     });
-  }, [runtime.notifications, runtime.sessionId]);
+  }, [runtime.notifications, runtime.sessionId, refreshJobs]);
+
+  useEffect(() => {
+    if (activeView === "board") void refreshJobs({ invalidate: true });
+  }, [activeView, refreshJobs]);
+
+  useEffect(() => {
+    void refreshJobs({ invalidate: true });
+  }, [runtime.sessionId, refreshJobs]);
 
   useEffect(() => {
     if (activeView !== "profile") return;
@@ -687,14 +697,16 @@ export default function Home() {
     || (conversationLoading && !chatIsControl)
     || (Boolean(runtime.busyRun) && !chatIsControl && !chatIsQuery);
 
-  async function refreshAutomation(): Promise<BrowserTask["status"] | null> {
+  async function refreshAutomation(invalidateJobs = false): Promise<BrowserTask["status"] | null> {
     const sessionAtPoll = runtime.currentSession.current;
+    // The board reads independently. A stalled browser/stats/delivery endpoint
+    // must never hide a successful job snapshot or block its own polling lane.
+    void refreshJobs({ invalidate: invalidateJobs });
     try {
       let taskStatus: BrowserTask["status"] | null = null;
       let completedTask: BrowserTask | null = null;
-      const [taskResponse, jobsResponse, statsResponse, deliveryResponse] = await Promise.all([
+      const [taskResponse, statsResponse, deliveryResponse] = await Promise.all([
         fetch(`/api/agent/browser${activeTaskIdRef.current ? `?run_id=${encodeURIComponent(activeTaskIdRef.current)}` : ""}`, { cache: "no-store" }),
-        fetch("/api/agent/jobs", { cache: "no-store" }),
         fetch("/api/agent/stats", { cache: "no-store" }),
         fetch(`/api/agent/delivery${deliveryTaskIdRef.current ? `?run_id=${encodeURIComponent(deliveryTaskIdRef.current)}` : ""}`, { cache: "no-store" }),
       ]);
@@ -752,12 +764,6 @@ export default function Home() {
           setNotice(task.takeover_reason ? `${task.detail} · ${task.takeover_reason}` : task.detail);
         }
       }
-      let latestJobs: Job[] = [];
-      if (jobsResponse.ok) {
-        const stored = await jobsResponse.json();
-        latestJobs = stored.filter((job: { stage: string }) => job.stage !== "rejected").map((job: Record<string, unknown>) => ({ ...job, sourceUrl: job.source_url })) as Job[];
-        setJobs((current) => sameSnapshot(current, latestJobs) ? current : latestJobs);
-      }
       if (statsResponse.ok) {
         const nextStats: AutomationStats = await statsResponse.json();
         setAutomationStats((current) => sameSnapshot(current, nextStats) ? current : nextStats);
@@ -796,7 +802,7 @@ export default function Home() {
     try {
       await runtime.interrupt();
       setNotice("已核验当前会话任务及投递队列停止；已发送内容保留。");
-      await refreshAutomation();
+      await refreshAutomation(true);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "停止浏览器任务失败");
     } finally {
@@ -839,7 +845,7 @@ export default function Home() {
           : message));
       }
       setNotice("浏览器任务已启动，正在检查登录状态并搜索职位");
-      await refreshAutomation();
+      await refreshAutomation(true);
     } catch (error) {
       setMessages((current) => current.map((message) => message.id === id ? { ...message, actionState: "failed" } : message));
       setNotice(error instanceof Error ? error.message : "搜索启动失败");
@@ -861,7 +867,7 @@ export default function Home() {
         setMessages((current) => current.map((message) => message.id === id
           ? { ...message, actionState: currentState }
           : message));
-        await refreshAutomation();
+        await refreshAutomation(true);
         setNotice(task.status === "completed" ? "搜索已经完成，请查看搜索摘要和申请看板" : staleCard ? "这是旧任务的登录确认卡片，请查看当前任务状态" : "浏览器任务正在执行，无需重复确认登录");
         return;
       }
@@ -870,7 +876,7 @@ export default function Home() {
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.detail ?? "继续失败");
       setNotice(payload.detail ?? "已提交登录确认，正在检查页面状态");
-      await refreshAutomation();
+      await refreshAutomation(true);
     } catch (error) {
       setMessages((current) => current.map((message) => message.id === id ? { ...message, actionState: "pending" } : message));
       setNotice(error instanceof Error ? error.message : "继续搜索失败");
@@ -886,7 +892,7 @@ export default function Home() {
       setNotice(error instanceof Error ? error.message : "停止失败");
     }
     setMessages((current) => current.map((message) => message.id === id ? { ...message, actionState: "cancelled" } : message));
-    await refreshAutomation();
+    await refreshAutomation(true);
   }
 
   async function importMockJob() {
@@ -898,7 +904,7 @@ export default function Home() {
     const payload = await response.json();
     if (!response.ok) { setNotice(payload.detail ?? "导入模拟职位失败"); return; }
     setNotice("已把模拟职位导入待审核列；投递将先发起沟通，收到HR回复后发送已授权简历");
-    await refreshAutomation();
+    await refreshAutomation(true);
   }
   async function advanceJob(id: number) {
     const currentJob = jobs.find((job) => job.id === id);
@@ -909,7 +915,7 @@ export default function Home() {
         const payload = await response.json();
         if (!response.ok) { setNotice(payload.detail ?? "投递未启动"); return; }
         setNotice(payload.message ?? "已加入该岗位投递队列，正在发送当前简历");
-        await refreshAutomation();
+        await refreshAutomation(true);
       } catch {
         setNotice("投递请求结果尚未确认，请查看队列状态；不要反复点击发送");
       }
@@ -919,10 +925,7 @@ export default function Home() {
     if (next[currentJob.stage] === currentJob.stage) return;
     const response = await fetch("/api/agent/jobs", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id, stage: next[currentJob.stage] }) });
     if (!response.ok) { setNotice("职位状态更新失败"); return; }
-    setJobs((current) => current.map((job) => {
-      if (job.id !== id) return job;
-      return { ...job, stage: next[job.stage] };
-    }));
+    await refreshJobs({ invalidate: true });
     setNotice("看板状态已更新并写入本次 Demo 会话");
   }
 
@@ -942,7 +945,7 @@ export default function Home() {
       setDeliveryTask(task);
     }
     setNotice("一次性授权已生成并由本地投递执行器消费；正在打开职位页面");
-    await refreshAutomation();
+    await refreshAutomation(true);
   }
 
   async function resumeDelivery() {
@@ -951,13 +954,13 @@ export default function Home() {
     if (!response.ok) { setNotice(payload.detail ?? "继续投递失败"); return; }
     setDeliveryTask(payload as DeliveryTask);
     setNotice(payload.detail ?? "正在继续投递");
-    await refreshAutomation();
+    await refreshAutomation(true);
   }
 
   async function rejectJob(id: number) {
     const response = await fetch("/api/agent/jobs", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id, stage: "rejected" }) });
     if (!response.ok) { setNotice("跳过职位失败"); return; }
-    setJobs((current) => current.filter((job) => job.id !== id));
+    await refreshJobs({ invalidate: true });
     setNotice("职位已跳过，后续推荐将降低相似岗位权重");
   }
 
@@ -1439,7 +1442,7 @@ export default function Home() {
               action: "confirm_login", actionTaskId: task.id!, actionQuery: task.query, actionQueries: [task.query],
               actionState: task.status === "waiting_for_user" ? "pending" : task.status === "completed" ? "completed" : "started",
             } : item));
-            void refreshAutomation();
+            void refreshAutomation(true);
           }
         }
       }) as { message?: string; lane?: string; action?: string; action_query?: string; action_queries?: string[];
@@ -1544,7 +1547,7 @@ export default function Home() {
       if (runtime.currentSession.current !== session) return;
       showResult(result);
       setNotice(result.message);
-      await refreshAutomation();
+      await refreshAutomation(true);
     } catch (error) {
       if (runtime.currentSession.current !== session) return;
       const text = error instanceof Error ? error.message : "停止尚未确认，请核对当前结果与运行记录";
@@ -1589,7 +1592,7 @@ export default function Home() {
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.detail ?? "会话同步失败");
       setWorkflowNotice(`已同步 ${payload.conversations} 个会话；等待回复 ${payload.awaiting_reply}，已投递 ${payload.submitted}，检测到 HR 回复 ${payload.replied}。`);
-      await refreshAutomation();
+      await refreshAutomation(true);
     } catch (error) {
       setWorkflowNotice(error instanceof Error ? error.message : "会话同步失败");
     } finally {
@@ -1983,7 +1986,8 @@ export default function Home() {
             </section>}
 
             {activeView === "board" && <section className="board-section panel standalone-board">
-              <div className="section-heading"><div><h2>每一份申请，都有下一步</h2><div className="board-actions"><button className="button secondary compact" onClick={() => void importMockJob()}>导入模拟职位</button><button className="button secondary compact" disabled={workflowBusy} onClick={() => void syncMockWorkflow()}>同步模拟站会话</button><ApplicationExport /></div></div><div className="legend"><span><i className="auto" />允许自动投递</span><span><i />需要人工确认</span><span className="click-hint">点击卡片查看详情</span></div></div>
+              <div className="section-heading"><div><h2>每一份申请，都有下一步</h2><div className="board-actions"><button type="button" className="button secondary compact" aria-label="刷新看板" disabled={boardSync.refreshing} onClick={() => void refreshJobs({ invalidate: true })}>{boardSync.refreshing ? "同步中…" : "刷新看板"}</button><button className="button secondary compact" onClick={() => void importMockJob()}>导入模拟职位</button><button className="button secondary compact" disabled={workflowBusy} onClick={() => void syncMockWorkflow()}>同步模拟站会话</button><ApplicationExport /></div></div><div className="legend"><span><i className="auto" />允许自动投递</span><span><i />需要人工确认</span><span className="click-hint">点击卡片查看详情</span></div></div>
+              <p className="workflow-feedback" role="status" aria-label="看板同步状态">{boardSync.refreshing ? "正在同步看板…" : boardSync.failed ? "看板同步失败，显示上次结果。请刷新重试。" : boardSync.updatedAt ? `已同步 ${new Date(boardSync.updatedAt).toLocaleTimeString("zh-CN", { hour12: false })}` : "尚未读取到看板状态"}</p>
               {workflowNotice && <p className="workflow-feedback">{workflowNotice}</p>}
               <div className="kanban">
                 {boardStages.map((stage) => (

@@ -13,6 +13,19 @@ export type TargetChoice = { id: string; step_id: string; expected_revision: num
 
 export type RunEvent = { seq: number; kind: string; data: Record<string, unknown> };
 
+export const changesJobInventory = (event: Pick<RunEvent, "kind">): boolean =>
+  ["browser", "delivery", "status", "plan_step", "response", "browser_summary", "workflow_summary"].includes(event.kind);
+
+export function notificationForRunEvent(event: RunEvent, hasForegroundCallback: boolean): RunEvent | null {
+  if (!changesJobInventory(event)) return null;
+  // execute() owns its response placeholder. Forward only the invalidation in
+  // that case, so a job-changing chat result refreshes the board without also
+  // appending the same assistant reply through the notification channel.
+  return event.kind === "response" && hasForegroundCallback
+    ? { seq: event.seq, kind: event.kind, data: { inventory_changed: true } }
+    : event;
+}
+
 export type TaskResults = {
   message: string; result_message?: string; status?: string; conversation_id?: string;
   snapshot_id?: string; snapshot?: Record<string, unknown> | null;

@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { AgentRun, RunEvent, TargetChoice, TaskResults, createRun, followRun, terminalRun } from "./agent-runtime";
+import { AgentRun, RunEvent, TargetChoice, TaskResults, createRun, followRun, notificationForRunEvent, terminalRun } from "./agent-runtime";
 
 export type SessionSearchState = { queries: string[]; locations: string[]; result_limit: number | null;
   salary_min: number | null; query_source: string; revision: number;
@@ -57,8 +57,9 @@ export function useAgentRuntime() {
     const controller = new AbortController();
     connections.current.set(run.id, controller);
     void followRun(run.id, (event) => {
-      if (event.kind === "browser_summary" || event.kind === "workflow_summary" || event.kind === "response" && !onEvent) {
-        setNotifications((current) => [...current.slice(-99), { sessionId: run.session_id, runId: run.id, event }]);
+      const notification = notificationForRunEvent(event, Boolean(onEvent));
+      if (notification && mounted.current && !controller.signal.aborted) {
+        setNotifications((current) => [...current.slice(-99), { sessionId: run.session_id, runId: run.id, event: notification }]);
       }
       if (currentSession.current === run.session_id && mounted.current) {
         if (event.kind === "search_state") setSearchState(event.data.conditions as SessionSearchState);

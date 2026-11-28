@@ -1,0 +1,253 @@
+{
+  "evaluated_on": "2026-11-28",
+  "scope": "Offline refresh/SSE contracts and production frontend with isolated synthetic APIs. Not model accuracy or real-site application E2E.",
+  "source_sha256": {
+    "app/page.tsx": "48d78c8cfbd6b85a65e7ef59bf8a57a364d759c9862506b8e6e6da9ed0538d2f",
+    "lib/agent-runtime.ts": "86ebcaeb4e92824ab6602e9651f9f86a2baf301ac0565ffcd60a393f2275afb4",
+    "lib/use-agent-runtime.ts": "3033b7068b94a6623e5efd0916ffb0a662c96352de13a9128a6a43feaf6f63ea",
+    "lib/use-job-board.ts": "5a6cadca0c3fd5af026db8d115d5334baac506ad8977ed1d9db78115f7633dec",
+    "lib/latest-snapshot.ts": "e4a7dd4c834109a602d33d83e7cacd07e7ff8fe8f1b5e0492aa45229f0b9348f"
+  },
+  "offline_snapshot_contract": {
+    "passed": 12,
+    "failed": 0,
+    "cases": [
+      {
+        "name": "concurrent_polls_share_one_read_and_one_publication",
+        "status": "passed",
+        "duration_ms": 17
+      },
+      {
+        "name": "event_invalidation_drops_pending_old_snapshot_then_reads_fresh",
+        "status": "passed",
+        "duration_ms": 0
+      },
+      {
+        "name": "burst_of_delivery_events_coalesces_to_one_followup_read",
+        "status": "passed",
+        "duration_ms": 0
+      },
+      {
+        "name": "timeout_aborts_read_is_bounded_and_next_refresh_recovers",
+        "status": "passed",
+        "duration_ms": 28
+      },
+      {
+        "name": "malformed_reader_rejection_retains_prior_snapshot_and_recovers",
+        "status": "passed",
+        "duration_ms": 0
+      },
+      {
+        "name": "dispose_aborts_pending_read_and_prevents_late_publication",
+        "status": "passed",
+        "duration_ms": 0
+      },
+      {
+        "name": "idle_callback_reentrant_refresh_is_not_lost",
+        "status": "passed",
+        "duration_ms": 0
+      },
+      {
+        "name": "synchronous_refresh_start_invalidation_does_not_open_parallel_lane",
+        "status": "passed",
+        "duration_ms": 0
+      },
+      {
+        "name": "all_seven_inventory_event_types_keep_original_payload_and_sequence",
+        "status": "passed",
+        "duration_ms": 0
+      },
+      {
+        "name": "foreground_response_only_notifies_invalidation_without_duplicate_reply",
+        "status": "passed",
+        "duration_ms": 0
+      },
+      {
+        "name": "hook_preserves_source_session_tag_and_ignores_aborted_old_stream",
+        "status": "passed",
+        "duration_ms": 49
+      },
+      {
+        "name": "hook_foreground_response_keeps_callback_and_cancel_still_settles_busy",
+        "status": "passed",
+        "duration_ms": 31
+      }
+    ]
+  },
+  "isolated_board_browser": {
+    "passed": true,
+    "scenarios": 12,
+    "checks": 31,
+    "cases": [
+      {
+        "name": "delivery-event-transitions",
+        "passed": true,
+        "checks": [
+          "delivery_sse_updates_review_to_waiting_hr_without_page_reload",
+          "hr_reply_does_not_invent_submission_before_backend_receipt",
+          "confirmed_backend_submission_updates_delivered_column",
+          "all_business_requests_read_only_and_intercepted"
+        ],
+        "jobs_reads": 6,
+        "maximum_parallel_jobs_reads": 1,
+        "elapsed_ms": 3578
+      },
+      {
+        "name": "browser-hang-stats-json-delivery-status",
+        "passed": true,
+        "checks": [
+          "jobs_render_independently_of_hung_failed_or_invalid_related_endpoints",
+          "all_business_requests_read_only_and_intercepted"
+        ],
+        "jobs_reads": 2,
+        "maximum_parallel_jobs_reads": 1,
+        "elapsed_ms": 1062
+      },
+      {
+        "name": "delivery-hang-browser-json-stats-network",
+        "passed": true,
+        "checks": [
+          "jobs_render_independently_of_hung_failed_or_invalid_related_endpoints",
+          "all_business_requests_read_only_and_intercepted"
+        ],
+        "jobs_reads": 2,
+        "maximum_parallel_jobs_reads": 1,
+        "elapsed_ms": 1063
+      },
+      {
+        "name": "event-during-inflight-jobs",
+        "passed": true,
+        "checks": [
+          "event_invalidates_inflight_snapshot_before_it_can_publish_old_review",
+          "one_followup_read_publishes_current_stage_without_parallel_jobs_requests",
+          "all_business_requests_read_only_and_intercepted"
+        ],
+        "jobs_reads": 5,
+        "maximum_parallel_jobs_reads": 1,
+        "elapsed_ms": 1281
+      },
+      {
+        "name": "return-to-board",
+        "passed": true,
+        "checks": [
+          "returning_to_board_refreshes_without_waiting_for_periodic_poll",
+          "all_business_requests_read_only_and_intercepted"
+        ],
+        "jobs_reads": 4,
+        "maximum_parallel_jobs_reads": 1,
+        "elapsed_ms": 1344
+      },
+      {
+        "name": "visibility-and-focus",
+        "passed": true,
+        "checks": [
+          "visibility_return_refreshes_current_backend_snapshot",
+          "window_focus_refreshes_current_backend_snapshot",
+          "all_business_requests_read_only_and_intercepted"
+        ],
+        "jobs_reads": 5,
+        "maximum_parallel_jobs_reads": 1,
+        "elapsed_ms": 1250
+      },
+      {
+        "name": "duplicate-events",
+        "passed": true,
+        "checks": [
+          "duplicate_sse_frames_keep_one_card_without_business_mutation",
+          "all_business_requests_read_only_and_intercepted"
+        ],
+        "jobs_reads": 5,
+        "maximum_parallel_jobs_reads": 1,
+        "elapsed_ms": 2250
+      },
+      {
+        "name": "previous-session-event",
+        "passed": true,
+        "checks": [
+          "delayed_previous_session_delivery_event_does_not_replace_current_view",
+          "all_business_requests_read_only_and_intercepted"
+        ],
+        "jobs_reads": 5,
+        "maximum_parallel_jobs_reads": 1,
+        "elapsed_ms": 1359
+      },
+      {
+        "name": "jobs-status-failure-recovery",
+        "passed": true,
+        "checks": [
+          "failed_jobs_read_keeps_last_snapshot_and_explicit_stale_indicator",
+          "successful_retry_clears_stale_indicator_using_backend_status",
+          "all_business_requests_read_only_and_intercepted"
+        ],
+        "jobs_reads": 5,
+        "maximum_parallel_jobs_reads": 1,
+        "elapsed_ms": 1281
+      },
+      {
+        "name": "jobs-json-failure-recovery",
+        "passed": true,
+        "checks": [
+          "failed_jobs_read_keeps_last_snapshot_and_explicit_stale_indicator",
+          "successful_retry_clears_stale_indicator_using_backend_status",
+          "all_business_requests_read_only_and_intercepted"
+        ],
+        "jobs_reads": 5,
+        "maximum_parallel_jobs_reads": 1,
+        "elapsed_ms": 1360
+      },
+      {
+        "name": "jobs-shape-failure-recovery",
+        "passed": true,
+        "checks": [
+          "failed_jobs_read_keeps_last_snapshot_and_explicit_stale_indicator",
+          "successful_retry_clears_stale_indicator_using_backend_status",
+          "all_business_requests_read_only_and_intercepted"
+        ],
+        "jobs_reads": 5,
+        "maximum_parallel_jobs_reads": 1,
+        "elapsed_ms": 1297
+      },
+      {
+        "name": "authoritative-empty-list",
+        "passed": true,
+        "checks": [
+          "valid_empty_backend_list_removes_ghost_cards_without_becoming_stale_error",
+          "all_business_requests_read_only_and_intercepted"
+        ],
+        "jobs_reads": 4,
+        "maximum_parallel_jobs_reads": 1,
+        "elapsed_ms": 1203
+      }
+    ]
+  },
+  "existing_chat_replay": {
+    "passed": true,
+    "scenarios": 9,
+    "checks": 60
+  },
+  "single_job_button": {
+    "passed": true,
+    "synthetic_posts": 1,
+    "preview_dialogs": 0
+  },
+  "reload": {
+    "passed": true,
+    "observation_seconds": 10,
+    "document_requests": 1,
+    "document_initializations": 1,
+    "page_errors": [],
+    "hmr_errors": []
+  },
+  "typecheck": "passed",
+  "production_build": "passed in isolated source copy; live development cache preserved",
+  "source_changed_during_run": [],
+  "model_calls": 0,
+  "real_recruitment_actions": 0,
+  "local_logs": {
+    "snapshot": "evaluation/results/frontend-snapshot/20261128T033105806Z/summary.json",
+    "browser": "evaluation/results/frontend-board-sync/20261128T032935.934658Z/result.json",
+    "chat": "evaluation/results/delivery-status-ui/20261128T033013.620802Z/result.json",
+    "single_delivery": "evaluation/results/frontend-delivery/20261128T033013.306826Z/result.json",
+    "reload": "evaluation/results/frontend-reload/20261128T033025.277650Z/result.json"
+  }
+}
