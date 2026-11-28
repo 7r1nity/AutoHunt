@@ -19,6 +19,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from playwright.async_api import async_playwright, expect
+from evaluation.job_page_fixture import job_page_response
 
 
 RESULTS = Path(__file__).parent / "results"
@@ -139,7 +140,9 @@ async def replay(browser, origin: str, output: Path, name: str, command: str,
         elif target.path.endswith("/search-state"):
             payload = {"queries": [], "locations": [], "result_limit": None, "salary_min": None,
                        "query_source": "synthetic", "revision": 1}
-        elif target.path in {"/api/agent/jobs", "/api/agent/resumes", "/api/agent/materials"}:
+        elif target.path == "/api/agent/jobs":
+            payload = job_page_response([], target.query)
+        elif target.path in {"/api/agent/resumes", "/api/agent/materials"}:
             payload = []
         elif target.path in {"/api/agent/browser", "/api/agent/delivery"}:
             payload = {"status": "idle", "detail": "隔离回放，不访问招聘浏览器"}

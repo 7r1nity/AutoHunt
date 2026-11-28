@@ -5,6 +5,7 @@ from enum import StrEnum
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
+from .search_limits import MAX_SEARCH_RESULTS, MAX_SEARCH_CANDIDATES, DEFAULT_SEARCH_CANDIDATES, candidate_budget
 from ..resume_layout import ResumeLayoutReport
 
 
@@ -210,15 +211,15 @@ class MockWorkflowUpdate(BaseModel):
     daily_time: str = Field(default="09:00", pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")
     min_score: int = Field(default=75, ge=0, le=100)
     max_contacts: int = Field(default=3, ge=1, le=200, strict=True)
-    max_search_jobs: int = Field(default=30, ge=1, le=200, strict=True)
+    max_search_jobs: int = Field(default=DEFAULT_SEARCH_CANDIDATES, ge=1, le=MAX_SEARCH_CANDIDATES, strict=True)
 
 
 class BrowserSearchRequest(BaseModel):
     search_state_revision: int | None = Field(default=None, ge=0)
     conversation_id: str = Field(default="default", pattern=r"^[a-zA-Z0-9_-]{1,80}$")
     query: str = Field(min_length=1, max_length=120)
-    max_jobs: int = Field(default=30, ge=1, le=200)
-    result_limit: int | None = Field(default=None, ge=1, le=100)
+    max_jobs: int = Field(default=DEFAULT_SEARCH_CANDIDATES, ge=1, le=MAX_SEARCH_CANDIDATES)
+    result_limit: int | None = Field(default=None, ge=1, le=MAX_SEARCH_RESULTS)
     result_groups: list[dict] | None = None
     salary_min: int | None = Field(default=None, ge=0, le=10_000_000)
     source: Literal["mock", "boss", "zhaopin"] = "mock"
@@ -249,6 +250,8 @@ class BrowserSearchRequest(BaseModel):
             self.result_limit = sum(item["count"] for item in self.result_groups)
         elif original_total:
             self.result_limit = original_total
+        if "max_jobs" not in self.model_fields_set:
+            self.max_jobs = candidate_budget(self.result_limit)
         from .salary_conditions import normalized_search_filters
         self.filters = normalized_search_filters(self.filters, self.salary_min)
         grouped_filter(self.filters, self.result_groups)  # Validate executable scope before starting a browser.

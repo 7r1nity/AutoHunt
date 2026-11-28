@@ -21,6 +21,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 from playwright.async_api import async_playwright, expect
+from evaluation.job_page_fixture import job_page_response
 
 
 def check_control_parity():
@@ -161,7 +162,9 @@ async def exercise(origin: str, output: Path):
                 payload = [{"id": "default", "title": "合成任务会话"}, {"id": "other", "title": "合成空会话"}]
             elif target.path == "/api/agent/chat":
                 payload = {"messages": histories[session]}
-            elif target.path in {"/api/agent/jobs", "/api/agent/resumes", "/api/agent/materials"}:
+            elif target.path == "/api/agent/jobs":
+                payload = job_page_response([], target.query)
+            elif target.path in {"/api/agent/resumes", "/api/agent/materials"}:
                 payload = []
             elif target.path in {"/api/agent/browser", "/api/agent/delivery"}:
                 payload = {"status": "idle", "detail": "合成浏览器空闲"}
@@ -369,7 +372,9 @@ async def exercise_api(origin: str, output: Path):
                     response = await client.get("/api/v1/conversations/current", params={"conversation_id": session})
                     await route.fulfill(status=response.status_code, json=response.json())
                     return
-                elif target.path in {"/api/agent/jobs", "/api/agent/resumes", "/api/agent/materials"}:
+                elif target.path == "/api/agent/jobs":
+                    payload = job_page_response([], target.query)
+                elif target.path in {"/api/agent/resumes", "/api/agent/materials"}:
                     payload = []
                 elif target.path in {"/api/agent/browser", "/api/agent/delivery"}:
                     payload = {"status": "idle", "detail": "合成UI状态"}

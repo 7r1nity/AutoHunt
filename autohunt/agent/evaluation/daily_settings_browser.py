@@ -17,6 +17,7 @@ from urllib.parse import urlsplit
 import httpx
 from cryptography.fernet import Fernet
 from playwright.async_api import async_playwright, expect
+from evaluation.job_page_fixture import job_page_response
 
 
 async def run(root):
@@ -61,7 +62,9 @@ async def run(root):
             elif url.path.startswith("/api/") and request.method not in {"GET", "HEAD"}:
                 writes.append(url.path)
                 await route.abort()
-            elif url.path in {"/api/agent/runs", "/api/agent/resumes", "/api/agent/materials", "/api/agent/jobs"}:
+            elif url.path == "/api/agent/jobs":
+                await route.fulfill(json=job_page_response([], url.query))
+            elif url.path in {"/api/agent/runs", "/api/agent/resumes", "/api/agent/materials"}:
                 await route.fulfill(json=[])
             elif url.path == "/api/agent/conversations":
                 await route.fulfill(json=[{"id": "default", "title": "合成设置验收会话"}])

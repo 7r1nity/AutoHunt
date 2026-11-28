@@ -487,9 +487,15 @@ def _validate_draft(draft: RequestDraft, registry, message: str, *, dialogue: di
             steps.append(refresh)
             refreshes.append(refresh)
             goals.append({"quote": "按更新后的条件刷新已有职位证据", "disposition": "steps", "step_ids": [key]})
-    for producer in [*searches, *refreshes]:
+    producers = [*searches, *refreshes]
+    # A sole result producer has one unambiguous condition-write prerequisite.
+    # Multiple searches may be independent branches; only their declared
+    # ancestors define their state, never every update in the same plan.
+    if len(producers) == 1:
+        producer = producers[0]
         for update in updates:
-            if update["id"] not in producer["depends_on"]:
+            if (update["id"] not in producer["depends_on"]
+                    and producer["id"] not in dependency_ancestors(update["id"], steps)):
                 producer["depends_on"].append(update["id"])
     evidence_producers = [*searches, *refreshes]
     context = active_run()
@@ -522,7 +528,8 @@ def _validate_draft(draft: RequestDraft, registry, message: str, *, dialogue: di
                 "missing_slots": [], "user_requested": True})
             goals.append({"quote": "搜索完成报告", "disposition": "steps", "step_ids": [key]})
 
-    for step in steps:
+    from .search_projection import dependency_order, projected_search_state
+    for step in dependency_order(steps):
         name = step["tool"]
         spec = tools[name]
         args = effective_arguments(registry, name, normalize_encoding(step["arguments"], spec.parameters))
@@ -581,15 +588,25 @@ def _validate_draft(draft: RequestDraft, registry, message: str, *, dialogue: di
                 # All keywords were invalid after cleaning — treat as missing.
                 args.pop("queries", None)
             if name == "job_search_start":
+                from ..core.search_limits import with_target_budget, candidate_budget
+                needs_profile = any(item["tool"] == "search_state_update"
+                    and item["arguments"].get("use_resume_profile")
+                    and item["id"] in dependency_ancestors(step["id"], steps) for item in steps)
+                inherited = projected_search_state(step, steps, conditions,
+                    candidate=registry.candidate_state.read() if needs_profile else None,
+                    resume_version=registry.resume_workspace.read_document().version if needs_profile else None)
+                args.update(with_target_budget(args, inherited))
                 if "result_limit" in args and "result_groups" not in args:
                     args["result_groups"] = None
                 # Inheritance is data reuse, not another semantic extractor.
                 for key in ("locations", "salary_min", "result_limit", "result_groups", "max_jobs", "source", "filters"):
-                    if key not in args and conditions.get(key) is not None:
-                        args[key] = copy.deepcopy(conditions[key])
+                    if key not in args:
+                        args[key] = copy.deepcopy(inherited[key])
+                if args.get("max_jobs") is None:
+                    args["max_jobs"] = candidate_budget(args.get("result_limit"))
                 if not args.get("queries"):
-                    if conditions.get("queries"):
-                        args["queries"] = list(conditions["queries"])
+                    if inherited.get("queries"):
+                        args["queries"] = list(inherited["queries"])
                     else:
                         step["missing_slots"].append("queries")
                         questions.append("请上传并启用简历，或说明目标岗位；目前没有可用的岗位方向。")

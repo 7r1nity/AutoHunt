@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import re
 from pydantic import BaseModel, ConfigDict, Field
+from ..core.search_limits import MAX_SEARCH_RESULTS
 
 NUMBER = r"[零〇一二两三四五六七八九十百\d]+"
 
@@ -10,7 +11,7 @@ NUMBER = r"[零〇一二两三四五六七八九十百\d]+"
 class JobReference(BaseModel):
     """An ordinal anchors identity; qualifiers only verify that same item."""
     model_config = ConfigDict(extra="forbid")
-    ordinal: int = Field(ge=1, le=100)
+    ordinal: int = Field(ge=1, le=MAX_SEARCH_RESULTS)
     snapshot_id: str | None = Field(default=None,max_length=128)
     title: str | None = Field(default=None,max_length=200)
     company: str | None = Field(default=None,max_length=200)

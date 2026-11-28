@@ -10,6 +10,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from playwright.async_api import async_playwright
+from evaluation.job_page_fixture import job_page_response
 
 
 async def run():
@@ -44,7 +45,8 @@ async def run():
             elif target.path == "/api/agent/conversations":
                 status = 200
                 payload = [{"id": "default", "title": "合成会话", "created_at": "2026-01-01T00:00:00Z"}]
-            elif target.path in {"/api/agent/chat", "/api/agent/jobs", "/api/agent/resumes", "/api/agent/documents", "/api/agent/materials"}: status, payload = 200, []
+            elif target.path == "/api/agent/jobs": status, payload = 200, job_page_response([], target.query)
+            elif target.path in {"/api/agent/chat", "/api/agent/resumes", "/api/agent/documents", "/api/agent/materials"}: status, payload = 200, []
             elif target.path in {"/api/agent/browser", "/api/agent/delivery"}: status, payload = 200, {"status": "idle", "detail": "合成空闲"}
             elif target.path == "/api/agent/stats": status, payload = 200, {"review": 0, "applying": 0, "waiting": 0, "interview": 0, "discovered": 0, "stored": 0, "duplicates": 0, "matched": 0}
             elif target.path in {"/api/agent/conversations/default/search-state", "/api/agent/conversations/default/context"}:

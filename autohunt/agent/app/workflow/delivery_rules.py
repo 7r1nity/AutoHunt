@@ -31,7 +31,7 @@ def build_rules(coordinator) -> list[Rule]:
         candidates = observation.get("reply_candidates") or []
         # Production observations include the board's stored reply. No-reply waits
         # are not browser work and must not steal rapid dispatch turns.
-        return any(run.get("observed_reply", True) for run in candidates) and bool(observation.get("browser_idle", True))
+        return any(run.get("ready_for_check", run.get("observed_reply", True)) for run in candidates) and bool(observation.get("browser_idle", True))
 
     # ------------------------------------------------- recovery of failed starts
     async def recover_stalled_start(observation: Observation) -> str:

@@ -140,8 +140,12 @@ def edited_plan(plan: dict, edit: RevisionDraft, registry, *, stamp: str, sessio
                 or step["tool"] in result.get("revoked_tools", [])):
             raise ValueError("只能修改尚未执行的步骤；已执行、已撤回和结果不确定的步骤不会重放")
         spec = registry._tools[step["tool"]]
+        patch = update.arguments
+        if step["tool"] in {"job_search_start", "search_state_update"}:
+            from ..core.search_limits import with_target_budget
+            patch = with_target_budget(patch, step.get("staged_arguments", step["arguments"]))
         arguments = effective_arguments(registry, step["tool"], normalize_encoding(
-            {**step.get("staged_arguments", step["arguments"]), **update.arguments}, spec.parameters))
+            {**step.get("staged_arguments", step["arguments"]), **patch}, spec.parameters))
         # Explicit null clears optional nonnullable arguments, rather than inventing a default.
         for key, value in list(arguments.items()):
             if value is None and key not in spec.parameters.get("required", []) and "null" not in spec.parameters.get("properties", {}).get(key, {}).get("type", []):

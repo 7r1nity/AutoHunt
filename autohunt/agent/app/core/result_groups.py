@@ -7,12 +7,13 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .job_filters import combine, compose_filters, evaluate_filter, filter_schema, validate_filter
 from .filter_policy import project_filter, project_groups
+from .search_limits import MAX_SEARCH_RESULTS, MAX_RESULT_GROUPS
 
 
 class ResultGroup(BaseModel):
     model_config = ConfigDict(extra="forbid")
     label: str = Field(min_length=1, max_length=80)
-    count: int = Field(ge=1, le=100)
+    count: int = Field(ge=1, le=MAX_SEARCH_RESULTS)
     filters: dict | None
 
     @field_validator("filters")
@@ -32,8 +33,8 @@ class ResultGroup(BaseModel):
 def normalize_groups(groups):
     projected, _ = project_groups(groups)
     values = [ResultGroup.model_validate(item).model_dump(mode="json") for item in (projected or [])]
-    if len(values) > 10 or sum(item["count"] for item in values) > 100:
-        raise ValueError("分组最多10组，总数最多100个")
+    if len(values) > MAX_RESULT_GROUPS or sum(item["count"] for item in values) > MAX_SEARCH_RESULTS:
+        raise ValueError(f"分组最多{MAX_RESULT_GROUPS}组，总数最多{MAX_SEARCH_RESULTS}个")
     if len({item["label"] for item in values}) != len(values):
         raise ValueError("分组名称不能重复")
     return values
@@ -42,7 +43,7 @@ def normalize_groups(groups):
 def groups_schema():
     item = ResultGroup.model_json_schema()
     item["properties"]["filters"] = {"anyOf": [filter_schema(), {"type": "null"}]}
-    return {"type": ["array", "null"], "maxItems": 10,
+    return {"type": ["array", "null"], "maxItems": MAX_RESULT_GROUPS,
             "description": "分组数量配额，例如深圳5份、杭州5份；每组filters是必须核实的非禁用条件，null表示不再限制类别的配额。省略继承，null或[]清除。",
             "items": item}
 

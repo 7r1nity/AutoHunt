@@ -167,9 +167,9 @@ class Projection(unittest.TestCase):
 
     def test_retired_groups_do_not_hide_invalid_counts_or_original_duplicate_labels(self):
         base={"label":"实习","count":1,"filters":leaf("实习")}
-        for groups in [[{**base,"count":0}], [{**base,"count":101}], [{**base,"count":True}],
+        for groups in [[{**base,"count":0}], [{**base,"count":201}], [{**base,"count":True}],
                        [{**base,"label":str(i)} for i in range(11)],
-                       [{**base,"count":60}, {**base,"label":"正式","count":60}],
+                       [{**base,"count":101}, {**base,"label":"正式","count":100}],
                        [base, {**base,"filters":leaf("深圳")}],
                        [{**base,"extra":"invalid"}]]:
             with self.subTest(groups=groups), self.assertRaises(ValueError):

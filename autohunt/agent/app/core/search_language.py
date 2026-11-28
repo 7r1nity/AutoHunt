@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 
 from .search_contract import explicit_search_constraints, safe_role_keyword, simple_search_patch
 from .task_semantics import understand
+from .search_limits import MAX_SEARCH_RESULTS
 
 SEARCH_CITIES = (
     "深圳", "北京", "上海", "广州", "杭州", "成都", "武汉", "南京", "苏州", "西安",
@@ -171,7 +172,7 @@ def _parse_search_message(message: str) -> SearchLanguage:
         counted = re.match(r"^(\d+)\s*(?:份|个|条)\s*", role)
         if counted:
             count = int(counted[1])
-            if not 1 <= count <= 100:
+            if not 1 <= count <= MAX_SEARCH_RESULTS:
                 unknown.append(clause)
                 continue
             fields["result_limit"] = count

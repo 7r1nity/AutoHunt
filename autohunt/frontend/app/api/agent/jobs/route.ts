@@ -19,7 +19,15 @@ async function requestBackend(path: string, init?: RequestInit) {
   }
 }
 
-export async function GET() { return requestBackend("/api/v1/jobs"); }
+export async function GET(request: NextRequest) {
+  const query = new URLSearchParams();
+  for (const name of ["stage", "limit", "offset", "snapshot"]) {
+    const value = request.nextUrl.searchParams.get(name);
+    if (value !== null) query.set(name, value);
+  }
+  const path = request.nextUrl.searchParams.get("page") === "true" ? "/api/v1/jobs/page" : "/api/v1/jobs";
+  return requestBackend(`${path}${query.size ? `?${query}` : ""}`);
+}
 
 export async function PUT(request: NextRequest) {
   const body = await request.json();

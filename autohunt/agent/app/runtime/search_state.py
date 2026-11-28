@@ -5,16 +5,17 @@ import hashlib
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from typing import Literal
 from ..core.job_filters import validate_filter
+from ..core.search_limits import MAX_SEARCH_RESULTS, MAX_SEARCH_CANDIDATES, with_target_budget
 
 
 class SearchState(BaseModel):
     model_config = ConfigDict(extra="forbid")
     queries: list[str] = Field(default_factory=list, max_length=5)
     locations: list[str] = Field(default_factory=list, max_length=5)
-    result_limit: int | None = Field(default=None, ge=1, le=100)
+    result_limit: int | None = Field(default=None, ge=1, le=MAX_SEARCH_RESULTS)
     result_groups: list[dict] | None = None
     salary_min: int | None = Field(default=None, ge=0, le=10_000_000)
-    max_jobs: int | None = Field(default=None, ge=1, le=200)
+    max_jobs: int | None = Field(default=None, ge=1, le=MAX_SEARCH_CANDIDATES)
     source: Literal["mock", "boss", "zhaopin"] = "mock"
     filters: dict | None = None
     query_source: str = "resume"
@@ -52,10 +53,10 @@ class SearchPatch(BaseModel):
     model_config = ConfigDict(extra="forbid")
     queries: list[str] | None = Field(default=None, max_length=5)
     locations: list[str] | None = Field(default=None, max_length=5)
-    result_limit: int | None = Field(default=None, ge=1, le=100)
+    result_limit: int | None = Field(default=None, ge=1, le=MAX_SEARCH_RESULTS)
     result_groups: list[dict] | None = None
     salary_min: int | None = Field(default=None, ge=0, le=10_000_000)
-    max_jobs: int | None = Field(default=None, ge=1, le=200)
+    max_jobs: int | None = Field(default=None, ge=1, le=MAX_SEARCH_CANDIDATES)
     use_resume_profile: bool = False
     source: Literal["mock", "boss", "zhaopin"] | None = None
     filters: dict | None = None
@@ -114,7 +115,7 @@ def prepare_search_state(saved: dict | None, candidate=None, resume_version=None
 
 def merge_search_state(saved: dict, patch: dict, candidate=None, resume_version=None) -> dict:
     validated = SearchPatch.model_validate(patch)
-    values = validated.model_dump(exclude_unset=True)
+    values = with_target_budget(validated.model_dump(exclude_unset=True), saved)
     # A new total replaces old quotas unless the model explicitly supplies them.
     if "result_limit" in values and "result_groups" not in values:
         values["result_groups"] = None

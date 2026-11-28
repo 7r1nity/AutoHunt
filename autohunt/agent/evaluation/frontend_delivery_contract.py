@@ -10,6 +10,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from playwright.async_api import async_playwright
+from evaluation.job_page_fixture import job_page_response
 
 
 async def run():
@@ -38,7 +39,7 @@ async def run():
                         posts.append(route.request.post_data_json)
                         payload = {"queued": 1, "job_ids": [133], "message": "合成岗位已入队"}
                     else:
-                        payload = [job, uncertain]
+                        payload = job_page_response([job, uncertain], target.query)
                 elif target.path == "/api/agent/conversations":
                     payload = [{"id": "default", "title": "合成会话", "created_at": "2026-01-01T00:00:00Z"}]
                 elif target.path.startswith("/api/agent/runs") or target.path in {"/api/agent/chat", "/api/agent/resumes", "/api/agent/documents", "/api/agent/materials"}:

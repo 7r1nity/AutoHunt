@@ -15,6 +15,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ..core.security import redact
+from ..core.search_limits import MAX_SEARCH_RESULTS
 
 Topic = Literal["search", "applications", "resume", "general"]
 ACTION_TOOLS = {"job_search_start", "resume_propose_patch", "interview_preparation_generate"}
@@ -464,7 +465,7 @@ def slot_answer_patch(saved: dict, message: str, *, clock: float | None = None) 
     if frame.missing_slots == ["result_limit"]:
         from ..core.search_contract import NUMBER, numeric_value
         answer = re.fullmatch(rf"(?:那就|就|要)?\s*({NUMBER})(?:个|份|条)?(?:吧)?[。!！ ]*", message.strip())
-        if answer and 1 <= numeric_value(answer[1]) <= 100:
+        if answer and 1 <= numeric_value(answer[1]) <= MAX_SEARCH_RESULTS:
             return {"result_limit": numeric_value(answer[1])}
     if frame.missing_slots == ["salary_min"]:
         answer = re.fullmatch(r"(\d+(?:\.\d+)?)\s*([kK千万]|元)[。!！ ]*", message.strip())

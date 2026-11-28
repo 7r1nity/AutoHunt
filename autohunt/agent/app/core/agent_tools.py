@@ -19,6 +19,7 @@ from ..runtime.context import active_run, emit, effect_checkpoint, save_search_s
 from ..runtime.dialogue import bounded_data, compact_state, resolve_reference, ACTION_TOOLS
 from ..runtime.search_state import merge_search_state, prepare_search_state
 from .search_contract import missing_search_message
+from .search_limits import MAX_SEARCH_RESULTS, MAX_SEARCH_CANDIDATES, candidate_budget
 from .result_groups import groups_schema
 from .job_filters import filter_schema
 from .job_targets import TargetClarification, resolve_job_targets
@@ -290,10 +291,10 @@ class AgentToolRegistry:
                           obj({
                               "queries": {"type": "array", "items": {"type": "string", "maxLength": 120}, "maxItems": 5},
                               "locations": {"type": "array", "items": {"type": "string"}, "maxItems": 5},
-                              "result_limit": {"type": ["integer", "null"], "minimum": 1, "maximum": 100},
+                              "result_limit": {"type": ["integer", "null"], "minimum": 1, "maximum": MAX_SEARCH_RESULTS},
                               "result_groups": groups_schema(),
                               "salary_min": {"type": ["integer", "null"], "minimum": 0, "maximum": 10000000},
-                              "max_jobs": {"type": ["integer", "null"], "minimum": 1, "maximum": 200},
+                              "max_jobs": {"type": ["integer", "null"], "minimum": 1, "maximum": MAX_SEARCH_CANDIDATES},
                               "use_resume_profile": {"type": "boolean", "description": "明确要求使用当前简历方向时设为 true"},
                               "source": {"type": "string", "enum": ["mock", "boss", "zhaopin"]},
                               "filters": {**filter_schema(), "type": ["object", "null"], "description": "完整语义条件树；null 显式清除；省略保持"},
@@ -326,8 +327,8 @@ class AgentToolRegistry:
                     "query": {"type": "string", "maxLength": 120, "description": "岗位关键词，不包含城市；省略表示继承会话条件，再使用当前简历"},
                     "queries": {"type": "array", "items": {"type": "string", "maxLength": 120}, "maxItems": 5},
                     "locations": {"type": "array", "items": {"type": "string", "maxLength": 40}, "maxItems": 5},
-                    "max_jobs": {"type": "integer", "minimum": 1, "maximum": 200, "description": "候选职位读取预算，不是最终结果数量；通常省略，由系统按目标数量估算"},
-                    "result_limit": {"type": "integer", "minimum": 1, "maximum": 100, "description": "目标符合条件的去重职位数量，包含已在看板中的结果"},
+                    "max_jobs": {"type": "integer", "minimum": 1, "maximum": MAX_SEARCH_CANDIDATES, "description": "候选职位读取预算，不是最终结果数量；通常省略，由系统按目标数量估算"},
+                    "result_limit": {"type": ["integer", "null"], "minimum": 1, "maximum": MAX_SEARCH_RESULTS, "description": "目标符合条件的去重职位数量，包含已在看板中的结果；null明确清除旧数量限制"},
                     "result_groups": groups_schema(),
                     "salary_min": {"type": "integer", "minimum": 0, "maximum": 10000000, "description": "最低月薪，单位元；按薪资区间下限筛选，未知或日薪不算符合"},
                     "use_resume_profile": {"type": "boolean", "description": "明确要求按照当前简历重新搜索时使用，其他字段仍继承"},
@@ -687,7 +688,7 @@ class AgentToolRegistry:
             query=query,
             queries=queries[:6],
             locations=locations[:5] or None,
-            max_jobs=int(args.get("max_jobs", min(200, max(30, int(args.get("result_limit", 0)) * 5)))),
+            max_jobs=int(args.get("max_jobs", candidate_budget(args.get("result_limit")))),
             result_limit=args.get("result_limit"),
             result_groups=args.get("result_groups"),
             salary_min=args.get("salary_min"),

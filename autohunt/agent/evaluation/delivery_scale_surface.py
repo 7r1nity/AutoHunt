@@ -3,8 +3,8 @@
 The actual authenticated ASGI jobs route is called in an isolated subprocess.
 Its store is a temporary SQLite file; lifespan workers are never started. The
 frontend receives that exact route result through intercepted APIs in a new browser.
-Observed product limits are reported as unmet capability goals, not disguised
-as a successful 120-job end-to-end run.
+The legacy array route stays compatible; the board consumes all pages through
+the new snapshot-bound route. This is surface coverage, not recruitment E2E.
 """
 from __future__ import annotations
 
@@ -21,6 +21,7 @@ import time
 import traceback
 from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 from cryptography.fernet import Fernet
 from playwright.async_api import async_playwright, expect
@@ -53,7 +54,20 @@ with patch('httpx.AsyncClient.send',side_effect=AssertionError('No outbound HTTP
     started=time.perf_counter()
     response=client.get('/api/v1/jobs',headers={'X-AutoHunt-Key':'synthetic-scale-api-key'})
     assert response.status_code==200,response.text[:200]
-    result={'rows':response.json(),'elapsed_ms':round((time.perf_counter()-started)*1000,3),
+    legacy_count=len(response.json())
+    assert client.get('/api/v1/jobs/page').status_code==401
+    pages=[];rows=[];offset=0;snapshot=None
+    while True:
+        params={'limit':100,'offset':offset}
+        if snapshot is not None:params['snapshot']=snapshot
+        response=client.get('/api/v1/jobs/page',params=params,headers={'X-AutoHunt-Key':'synthetic-scale-api-key'})
+        assert response.status_code==200,response.text[:200]
+        page=response.json();pages.append(page);rows.extend(page['items'])
+        snapshot=page['snapshot']
+        if page['next_offset'] is None:break
+        offset=page['next_offset']
+    assert len(rows)==pages[0]['total']==len({row['id'] for row in rows})
+    result={'rows':rows,'pages':pages,'legacy_array_count':legacy_count,'elapsed_ms':round((time.perf_counter()-started)*1000,3),
             'authentication_checked':True,'full_asgi_dependency_assembly_tested':True,
             'lifespan_workers_started':False,'outbound_http_requests':0}
     client.close()
@@ -88,7 +102,7 @@ async def run(origin, target, output):
         "app/api/application.py", "app/jobs/store.py", "app/core/models.py",
         "app/core/result_groups.py", "app/core/filter_policy.py", "app/runtime/search_state.py")]
     paths += [FRONTEND / relative for relative in (
-        "app/page.tsx", "lib/use-job-board.ts", "lib/latest-snapshot.ts")]
+        "app/page.tsx", "app/api/agent/jobs/route.ts", "lib/use-job-board.ts", "lib/job-board-pages.ts", "lib/latest-snapshot.ts")]
     hashes = {str(p.relative_to(ROOT.parent)): hashlib.sha256(p.read_bytes()).hexdigest() for p in paths}
     report = {"target": target, "engineering_passed": False, "single_search_and_full_board_goal_met": False,
               "external_model_calls": 0, "real_recruitment_actions": 0, "source_sha256": hashes,
@@ -117,18 +131,31 @@ async def run(origin, target, output):
                     "reasoning": "合成记录，不是真实招聘", "stage": "review", "filter_status": "pass"})
             actual = await asyncio.to_thread(read_http_board, database, directory)
             payload = actual.pop("rows")
+            pages = actual.pop("pages")
             stored = store.list_jobs(limit=200)
             assert len(stored) == target
             assert {item["id"] for item in payload} <= {item.id for item in stored}
             report["board_api"] = {"seeded_jobs": target, "returned_jobs": len(payload),
-                                   "omitted_jobs": target-len(payload), **actual}
+                                   "omitted_jobs": target-len(payload), "page_count": len(pages), **actual}
             async with async_playwright() as pw:
                 browser = await pw.chromium.launch(headless=True)
                 try:
                     fixture = Fixture(origin, output, "board-as-returned-by-public-api")
                     fixture.jobs = payload
                     fixture.context = await browser.new_context(service_workers="block", viewport={"width": 1480, "height": 1100})
-                    await fixture.context.route("**/*", fixture.intercept)
+                    async def intercept(route):
+                        target_url = urlsplit(route.request.url)
+                        if target_url.path == "/api/agent/jobs":
+                            query = parse_qs(target_url.query)
+                            assert route.request.method == "GET" and query.get("page") == ["true"]
+                            offset = int(query.get("offset", [0])[0])
+                            page = next(row for row in pages if row["offset"] == offset)
+                            if offset:
+                                assert query.get("snapshot") == [page["snapshot"]]
+                            await route.fulfill(json=page)
+                        else:
+                            await fixture.intercept(route)
+                    await fixture.context.route("**/*", intercept)
                     fixture.page = await fixture.context.new_page()
                     fixture.page.on("pageerror", lambda error: fixture.page_errors.append(str(error)))
                     started = time.perf_counter()
@@ -152,6 +179,7 @@ async def run(origin, target, output):
             gc.collect()
         accepted = next(row["accepted"] for row in report["search_boundaries"] if row["name"] == f"search_{target}")
         report["single_search_and_full_board_goal_met"] = accepted and len(payload) == target
+        assert report["single_search_and_full_board_goal_met"], "Public search/complete-board goal remains unmet"
         report["engineering_passed"] = True
     except BaseException:
         report["error"] = traceback.format_exc()
@@ -172,7 +200,6 @@ def main():
     parser.add_argument("--jobs", type=int, default=120, choices=[120, 200])
     args = parser.parse_args()
     # Fixture itself rejects all hosts except this origin; enforce local input too.
-    from urllib.parse import urlsplit
     parsed = urlsplit(args.origin)
     if parsed.scheme != "http" or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
         parser.error("Only a local frontend origin is allowed")

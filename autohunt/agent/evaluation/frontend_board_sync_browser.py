@@ -56,6 +56,8 @@ class Fixture:
         self.allowed = urlsplit(origin)
         self.jobs = [job()]
         self.jobs_failure = None
+        self.jobs_failures_by_offset = {}
+        self.conflict_rows = None
         self.jobs_holds = deque()
         self.related_modes = {}
         self.related_hold = asyncio.Event()
@@ -122,9 +124,20 @@ class Fixture:
             self.jobs_reads += 1
             self.active_jobs_reads += 1
             self.maximum_parallel_jobs_reads = max(self.maximum_parallel_jobs_reads, self.active_jobs_reads)
-            snapshot, failure = copy.deepcopy(self.jobs), self.jobs_failure
+            query = parse_qs(target.query)
+            offset = int(query.get("offset", ["0"])[0])
+            limit = int(query.get("limit", ["100"])[0])
+            snapshot, failure = copy.deepcopy(self.jobs), self.jobs_failures_by_offset.get(offset, self.jobs_failure)
+            revision = hashlib.sha256(json.dumps(snapshot, sort_keys=True).encode()).hexdigest()
+            if offset and self.conflict_rows is not None:
+                self.jobs = self.conflict_rows
+                self.conflict_rows = None
+                failure = "conflict"
+            elif query.get("snapshot", [revision])[0] != revision:
+                failure = "conflict"
             hold = self.jobs_holds.popleft() if self.jobs_holds else None
             self.job_snapshots.append({"read": self.jobs_reads, "failure": failure, "held": hold is not None,
+                                       "offset": offset, "snapshot": revision,
                                        "rows": [{key: row.get(key) for key in ("id", "role", "stage")} for row in snapshot]})
             try:
                 if hold:
@@ -136,10 +149,19 @@ class Fixture:
                     await route.fulfill(content_type="application/json", body="{invalid-json")
                 elif failure == "status":
                     await route.fulfill(status=503, json={"detail": "合成岗位列表暂时不可用"})
+                elif failure == "conflict":
+                    await route.fulfill(status=409, json={"detail": {"code": "jobs_snapshot_changed"}})
                 elif failure == "shape":
-                    await route.fulfill(json=[job("unconfirmed-client-invented-stage")])
+                    await route.fulfill(json={"items": [job("unconfirmed-client-invented-stage")],
+                        "total": 1, "offset": offset, "limit": limit, "next_offset": None, "snapshot": revision})
                 else:
-                    await route.fulfill(json=snapshot)
+                    if query.get("page") == ["true"]:
+                        end = min(offset + limit, len(snapshot))
+                        await route.fulfill(json={"items": snapshot[offset:end], "total": len(snapshot),
+                            "offset": offset, "limit": limit, "next_offset": end if end < len(snapshot) else None,
+                            "snapshot": revision})
+                    else:
+                        await route.fulfill(json=snapshot)
             except PlaywrightError:
                 # A superseded/unmounted request may already have been aborted.
                 pass
@@ -218,7 +240,7 @@ class Fixture:
         self.page.on("pageerror", lambda error: self.page_errors.append(str(error)))
         async with self.page.expect_response(lambda response: urlsplit(response.url).path == "/api/agent/conversations"):
             await self.page.goto(self.origin, wait_until="domcontentloaded", timeout=90_000)
-        await self.page.get_by_text("已保存 1 个职位", exact=True).wait_for(timeout=15_000)
+        await self.page.get_by_text(f"已保存 {len(self.jobs)} 个职位", exact=True).wait_for(timeout=15_000)
         await self.open_board()
 
     async def open_board(self):
@@ -411,6 +433,48 @@ async def authoritative_empty_list(f, browser):
     f.checks.append("valid_empty_backend_list_removes_ghost_cards_without_becoming_stale_error")
 
 
+def many_jobs(count=250, *, stage="applying", prefix="合成批量岗位"):
+    return [job(stage, id=501 + index, role=f"{prefix}{index+1:03d}") for index in range(count)]
+
+
+async def complete_250_board(f, browser):
+    f.jobs = many_jobs()
+    await f.open(browser)
+    await expect(f.page.locator(".standalone-board .job-card")).to_have_count(250)
+    await expect(f.page.get_by_role("heading", name="合成批量岗位250", exact=True)).to_have_count(1)
+    offsets = {item["offset"] for item in f.job_snapshots}
+    assert {0, 100, 200} <= offsets
+    f.checks.append("250_accumulated_rows_are_aggregated_without_default_100_truncation")
+
+
+async def late_page_failure(f, browser):
+    await f.open(browser)
+    await f.stage("review")
+    f.jobs = many_jobs()
+    f.jobs_failures_by_offset[100] = "status"
+    await f.refresh()
+    await expect(f.page.get_by_role("status", name="看板同步状态", exact=True)).to_contain_text("看板同步失败")
+    await f.stage("review")
+    f.checks.append("second_page_failure_does_not_publish_first_100_partial_rows")
+    f.jobs_failures_by_offset.clear()
+    await f.refresh()
+    await expect(f.page.locator(".standalone-board .job-card")).to_have_count(250)
+    f.checks.append("page_failure_retry_publishes_complete_250_row_snapshot")
+
+
+async def changed_page_snapshot(f, browser):
+    await f.open(browser)
+    await f.stage("review")
+    f.jobs = many_jobs(stage="review", prefix="过期分页岗位")
+    f.conflict_rows = many_jobs(stage="waiting", prefix="最新分页岗位")
+    await f.refresh()
+    await expect(f.page.locator(".standalone-board .kanban-column").nth(2).locator(".job-card")).to_have_count(250)
+    await expect(f.page.get_by_role("heading", name=re.compile("过期分页岗位"))).to_have_count(0)
+    await expect(f.page.get_by_role("heading", name="最新分页岗位250", exact=True)).to_have_count(1)
+    assert any(item["failure"] == "conflict" for item in f.job_snapshots)
+    f.checks.append("between_page_409_restarts_whole_batch_without_mixing_snapshot_rows")
+
+
 async def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--origin", default="http://127.0.0.1:3000")
@@ -423,7 +487,7 @@ async def main():
     frontend = Path(__file__).parents[2] / "frontend"
     source_files = [frontend / relative for relative in (
         "app/page.tsx", "lib/agent-runtime.ts", "lib/use-agent-runtime.ts",
-        "lib/use-job-board.ts", "lib/latest-snapshot.ts")]
+        "lib/use-job-board.ts", "lib/latest-snapshot.ts", "lib/job-board-pages.ts")]
     source_hashes = {str(path.relative_to(frontend)): hashlib.sha256(path.read_bytes()).hexdigest()
                      for path in source_files}
     summary = {"passed": False, "model_calls": 0, "real_recruitment_actions": 0,
@@ -444,6 +508,9 @@ async def main():
         ("jobs-json-failure-recovery", stale_indicator, ("json",)),
         ("jobs-shape-failure-recovery", stale_indicator, ("shape",)),
         ("authoritative-empty-list", authoritative_empty_list, ()),
+        ("complete-250-board", complete_250_board, ()),
+        ("late-page-failure", late_page_failure, ()),
+        ("changed-page-snapshot", changed_page_snapshot, ()),
     ]
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)

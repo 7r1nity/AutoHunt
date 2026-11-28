@@ -19,6 +19,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, urlsplit
 
 from playwright.async_api import async_playwright, expect
+from evaluation.job_page_fixture import job_page_response
 
 
 ROOT = Path(__file__).resolve().parent
@@ -114,7 +115,7 @@ async def exercise(origin, output):
                     "response": {"resume_proposal": proposal_fixture()}}] if mode["proposal"] else []
                 status, payload = 200, {"messages": messages}
             elif target.path == "/api/agent/jobs":
-                status, payload = 200, [job]
+                status, payload = 200, job_page_response([job], target.query)
             elif target.path in {"/api/agent/runs", "/api/agent/resumes", "/api/agent/materials", "/api/agent/interview-preparations"}:
                 status, payload = 200, []
             elif target.path in {"/api/agent/browser", "/api/agent/delivery"}:

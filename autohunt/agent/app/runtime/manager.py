@@ -94,24 +94,51 @@ class AgentRuntime:
         self.stop_contexts: dict[str, dict] = {}
         self.stop_lock = asyncio.Lock()
         self.watch_limits = WatchLimits.configured()
+        # HR waiters release model/browser slots. Their SQLite/encryption work
+        # must also release the event loop, without creating 120 worker threads.
+        self._watch_io_slots = asyncio.Semaphore(4)
+        self._control_io_slots = asyncio.Semaphore(2)
+
+    async def _background_io(self, function, *args, control=False, **kwargs):
+        """Bound local DB work; drain an in-flight write before cancellation.
+
+        Cancelling to_thread alone does not stop its thread. Waiting for that
+        call to finish keeps stop/shutdown from returning before a late write.
+        No browser/model/sending operation belongs in this lane.
+        """
+        async with self._control_io_slots if control else self._watch_io_slots:
+            work = asyncio.create_task(asyncio.to_thread(function, *args, **kwargs))
+            try:
+                return await asyncio.shield(work)
+            except asyncio.CancelledError:
+                while not work.done():
+                    try:
+                        await asyncio.shield(work)
+                    except asyncio.CancelledError:
+                        continue
+                    except Exception:
+                        break
+                if not work.cancelled():
+                    work.exception()  # Consume a DB error without hiding cancellation.
+                raise
 
     async def start(self):
         self.sessions.clear()
         self.slots = asyncio.Semaphore(2)
-        self.recover_search_summaries()
+        await self._background_io(self.recover_search_summaries)
         # A persisted control request must never restart as a normal model task.
         # Settle pending stops before admitting other recovered foreground work.
-        for control in self.store.list(active=True, limit=None):
+        for control in await self._background_io(self.store.list, active=True, limit=None):
             if ((control.get("payload") or {}).get("control_kind") == "stop"
                     or control["kind"] == "chat" and stop_scope((control.get("payload") or {}).get("message", ""))):
                 self.store.update(control["id"], checkpoint={"phase": "control_result", "control_kind": "stop"})
                 await self._stop_command(control, stop_scope(control["payload"].get("message", "")) or "session")
         # Re-enqueue only requests which never began. Side effects are not replayed.
-        for run in reversed(self.store.list(active=True, limit=None)):
+        for run in reversed(await self._background_io(self.store.list, active=True, limit=None)):
             if ((run.get("payload") or {}).get("control_kind") == "progress"
                     or run["kind"] == "chat" and progress_requested((run.get("payload") or {}).get("message", ""))):
                 try:
-                    self._progress_answer(run)
+                    await self._background_io(self._progress_answer, run, control=True)
                 except Exception:
                     # Reporting is read-only. A failed recovery query must not
                     # prevent unrelated work or the application from starting.
@@ -180,7 +207,10 @@ class AgentRuntime:
                 self.tasks[run["id"]] = task
                 task.add_done_callback(lambda done: self.tasks.pop(run["id"], None))
             elif progress:
-                self._progress_answer(run)
+                task = asyncio.create_task(self._progress_answer_async(run), name=f"progress-command-{run['id']}")
+                self.tasks[run["id"]] = task
+                task.add_done_callback(lambda done: self.tasks.pop(run["id"], None)
+                    if self.tasks.get(run["id"]) is done else None)
             else:
                 self.schedule(run["id"])
         return run
@@ -237,6 +267,20 @@ class AgentRuntime:
                 return run["result"]
             raise ValueError("同一结果查询尚在处理，请稍后重试")
         return self._progress_answer(run)
+
+    async def _progress_answer_async(self, run: dict) -> dict | None:
+        try:
+            return await self._background_io(self._progress_answer, run, control=True)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # _progress_answer already persists the failure. SSE consumers read
+            # that record; do not leave an unobserved task exception behind.
+            return None
+
+    async def progress_result_async(self, session_id: str, message: str = "当前结果", *, request_id: str | None = None) -> dict:
+        """Use from async callers; synchronous HTTP handlers use progress_result."""
+        return await self._background_io(self.progress_result, session_id, message, request_id=request_id, control=True)
 
     def track_delivery(self, task_id: str, session_id: str = "default") -> dict:
         run, created = self.store.create(session_id, f"delivery:{task_id}", "delivery", {})
@@ -584,17 +628,17 @@ class AgentRuntime:
         return prepare_search_state(saved, candidate, version)
 
     async def execute(self, run_id: str, *, watch_only=False):
-        run = self.store.get(run_id)
-        if run["kind"] == "learning_plan":
-            self.finish(run_id, "cancelled", "该功能已移除；历史记录保留，不再执行")
-            return
         if watch_only:
             try:
                 await self.watch(run_id)
             except asyncio.CancelledError:
                 raise
             except Exception:
-                self.finish(run_id, "failed", "恢复任务状态时发生错误，请查看执行记录")
+                await self._background_io(self.finish, run_id, "failed", "恢复任务状态时发生错误，请查看执行记录")
+            return
+        run = self.store.get(run_id)
+        if run["kind"] == "learning_plan":
+            self.finish(run_id, "cancelled", "该功能已移除；历史记录保留，不再执行")
             return
         lock = self.sessions.setdefault(run["session_id"], asyncio.Lock())
         try:
@@ -744,14 +788,17 @@ class AgentRuntime:
                         detail, error_type=type(exc).__name__)
 
     async def watch(self, run_id: str):
-        run = self.store.get(run_id)
+        run = await self._background_io(self.store.get, run_id)
         if run["status"] in TERMINAL:
+            return
+        if run["kind"] == "learning_plan":
+            await self._background_io(self.finish, run_id, "cancelled", "该功能已移除；历史记录保留，不再执行")
             return
         if (run["checkpoint"] or {}).get("phase") == "action_plan":
             await self.watch_plan(run_id)
             return
         if (run["checkpoint"] or {}).get("delivery_id"):
-            await self.watch_delivery(run_id)
+            await self.watch_delivery(run_id, task_id=run["checkpoint"]["delivery_id"])
             return
         proposal = (run["result"] or {}).get("resume_proposal")
         if proposal:
@@ -1139,26 +1186,54 @@ class AgentRuntime:
             if current.get("id") == workflow["id"]:
                 self.store.mutate_dialogue(run["session_id"], {"op": "workflow", "request": {**current, "status": "finished"}})
 
-    async def watch_delivery(self, run_id: str):
-        run = self.store.get(run_id)
-        task_id = run["checkpoint"]["delivery_id"]
+    async def watch_delivery(self, run_id: str, *, task_id: str | None = None):
+        if task_id is None:
+            run = await self._background_io(self.store.get, run_id)
+            task_id = run["checkpoint"]["delivery_id"]
         previous = None
         while True:
-            view = self.observe_delivery(task_id)
-            key = (str(view.status), view.checkpoint, view.recruiter_reply, view.submitted)
+            view = await self._background_io(self._read_delivery_observation, run_id, task_id)
+            if view is None:
+                return
+            # Liveness checks and any in-memory worker state stay on the loop.
+            view = self.observe_delivery(task_id, view=view)
+            key = (str(view.status), view.checkpoint, view.recruiter_reply, view.submitted, view.detail, view.takeover_reason)
             if key != previous:
                 previous = key
-                status = "waiting_user" if view.status == "waiting_for_user" else "waiting_reply" if view.status == "waiting_for_reply" else "running"
-                self.store.update(run_id, status=status)
-                self.store.event(run_id, "delivery", {"task": view.model_dump(mode="json"), "status": status, "detail": view.detail})
+                saved = await self._background_io(self._save_delivery_observation, run_id, task_id, view)
+                if saved is None:
+                    return
+                view = saved
             if view.status in {"completed", "failed", "outcome_indeterminate", "cancelled"}:
-                batch = next((item for item in self.jobs.mock_delivery_queue(active_only=False) if item["run_id"] == task_id), None)
-                if batch and view.submitted and not self.store.has_event(run_id, "response"):
-                    message = f"模拟站自动投递 · 职位 #{view.job_id}：已核实简历投递完成。"
-                    self.store.event(run_id, "response", {"result": {"message": message, "delivery": view.model_dump(mode="json")}})
-                self.finish(run_id, str(view.status), view.detail, result={"delivery": view.model_dump(mode="json")})
                 return
             await asyncio.sleep(1)
+
+    def _read_delivery_observation(self, run_id: str, task_id: str):
+        run = self.store.get(run_id)
+        if (run["status"] in TERMINAL | {"cancelling"} or run["cancel_requested"]
+                or (run.get("checkpoint") or {}).get("delivery_id") != task_id):
+            return None
+        return self.jobs.get_delivery_run(task_id)
+
+    def _save_delivery_observation(self, run_id: str, task_id: str, view):
+        # The background admission itself yields. Publish the latest durable
+        # receipt, rather than settling a stale terminal/working snapshot.
+        view = self.jobs.get_delivery_run(task_id)
+        status = "waiting_user" if view.status == "waiting_for_user" else "waiting_reply" if view.status == "waiting_for_reply" else "running"
+        data = {"task": view.model_dump(mode="json"), "status": status, "detail": view.detail}
+        if not self.store.record_delivery_observation(run_id, task_id, data):
+            return None
+        if view.status in {"completed", "failed", "outcome_indeterminate", "cancelled"}:
+            # A single bound queue lookup replaces scanning the entire batch for
+            # each completed child. Older JobStore adapters retain their fallback.
+            lookup = getattr(self.jobs, "_stored_delivery_queue_item", None)
+            batch = lookup(view.job_id) if callable(lookup) else next(
+                (item for item in self.jobs.mock_delivery_queue(active_only=False) if item["run_id"] == task_id), None)
+            if batch and batch.get("run_id") == task_id and view.submitted and not self.store.has_event(run_id, "response"):
+                message = f"模拟站自动投递 · 职位 #{view.job_id}：已核实简历投递完成。"
+                self.store.event(run_id, "response", {"result": {"message": message, "delivery": view.model_dump(mode="json")}})
+            self.finish(run_id, str(view.status), view.detail, result={"delivery": view.model_dump(mode="json")})
+        return view
 
     def observe_browser(self, task_id: str):
         """A dead worker is not a live browser lease; never replay it on restart."""
@@ -1171,9 +1246,8 @@ class AgentRuntime:
             view = self.jobs.update_task(task_id, status=BrowserTaskStatus.FAILED, detail=detail, checkpoint="worker_lost")
         return view
 
-    def observe_delivery(self, task_id: str):
-        from ..core.models import DeliveryTaskStatus
-        view = self.jobs.get_delivery_run(task_id)
+    def observe_delivery(self, task_id: str, *, view=None):
+        view = view if view is not None else self.jobs.get_delivery_run(task_id)
         code = None
         alive = self.delivery and self.delivery.current().id == task_id and self.delivery.worker and not self.delivery.worker.done()
         if view.status == "waiting_for_user" and wait_expired(view.updated_at, self.watch_limits.human):
@@ -1184,14 +1258,7 @@ class AgentRuntime:
             if not alive:
                 code = "worker_lost"
         if code:
-            uncertain = view.checkpoint in {"communication_started", "communication_unconfirmed", "submit_started", "submission_unconfirmed"} and not view.submitted
-            detail = "任务等待已过期或执行器中断；不自动重放，已确认的投递保留，请核对执行记录"
-            if uncertain:
-                self.jobs.mark_outcome_indeterminate(view.job_id, detail)
-            elif not view.submitted:
-                self.jobs.mark_delivery_failed(view.job_id, detail)
-            status = DeliveryTaskStatus.OUTCOME_INDETERMINATE if uncertain else DeliveryTaskStatus.COMPLETED if view.submitted else DeliveryTaskStatus.FAILED
-            view = self.jobs.update_delivery_run(task_id, status=status, detail=detail, checkpoint=code)
+            view = self.jobs.record_delivery_worker_loss(view, code)
             if self.delivery and self.delivery.current().id == task_id and (not self.delivery.worker or self.delivery.worker.done()):
                 self.delivery.state = view
         return view

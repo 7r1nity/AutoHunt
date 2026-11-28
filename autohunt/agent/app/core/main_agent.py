@@ -1013,7 +1013,7 @@ class AutoHuntAgent:
                 lane=AgentLane.MARKET,
                 tool_events=[ToolEvent(tool="job_results_read", status="ok", detail="0")],
             )
-        total = len(self.job_store.list_jobs(limit=100)) if self.job_store is not None else len(jobs)
+        total = self.job_store.count_jobs(include_rejected=False) if self.job_store is not None else len(jobs)
         lines = [f"当前已保存 **{total}** 个职位，以下是匹配度最高的 {len(jobs)} 个：", ""]
         for index, job in enumerate(jobs, 1):
             lines.append(

@@ -83,7 +83,8 @@ async def measure(output: Path, count: int, seconds: float, interval: float):
               ]}
     try:
         jobs = JobStore(output / "jobs.db")
-        ledger = RunStore(output / "runtime.db", Fernet.generate_key().decode())
+        runtime_key = Fernet.generate_key().decode()
+        ledger = RunStore(output / "runtime.db", runtime_key)
         services = ReadOnlyService(side_effects)
         runtime = AgentRuntime(ledger, NS(llm=services), jobs, services, services)
         runtime.delivery = services
@@ -111,7 +112,9 @@ async def measure(output: Path, count: int, seconds: float, interval: float):
             delivery_ids.append(delivery_id)
         report["seed_seconds"] = round(time.perf_counter() - seed_started, 3)
 
-        original_observe = runtime.observe_delivery
+        original_observe = runtime._read_delivery_observation
+        original_save = runtime._save_delivery_observation
+        saved_observations = set()
         started = time.perf_counter()
         cpu_started = time.process_time()
         phase = "startup"
@@ -122,16 +125,22 @@ async def measure(output: Path, count: int, seconds: float, interval: float):
             now = time.perf_counter()
             phase_seconds[phase] += now - phase_started
             phase, phase_started = name, now
-        def observed(delivery_id):
+        def observed(run_id, delivery_id):
             tick = time.perf_counter()
-            value = original_observe(delivery_id)
+            value = original_observe(run_id, delivery_id)
             read_ms.append((time.perf_counter() - tick) * 1000)
             observations[delivery_id] += 1
             offset = round(time.perf_counter() - started, 6)
             first_observed.setdefault(delivery_id, offset)
             last_observed[delivery_id] = offset
             return value
-        runtime.observe_delivery = observed
+        def saved(run_id, delivery_id, view):
+            accepted = original_save(run_id, delivery_id, view)
+            if accepted:
+                saved_observations.add(delivery_id)
+            return accepted
+        runtime._read_delivery_observation = observed
+        runtime._save_delivery_observation = saved
 
         async def sample_lag():
             loop = asyncio.get_running_loop()
@@ -150,7 +159,12 @@ async def measure(output: Path, count: int, seconds: float, interval: float):
         for run_id in run_ids:
             runtime.schedule(run_id, watch_only=True)
         tasks = [runtime.tasks[run_id] for run_id in run_ids]
-        await asyncio.sleep(.25)
+        # End startup only after every initial observation and durable event
+        # has completed; thread admission must not hide startup work elsewhere.
+        startup_deadline = asyncio.get_running_loop().time() + 15
+        while len(saved_observations) < count:
+            assert asyncio.get_running_loop().time() < startup_deadline, "Initial observations did not all persist"
+            await asyncio.sleep(.02)
         assert all(not task.done() for task in tasks), "A real waiting coroutine exited unexpectedly"
 
         change_phase("foreground_admission")
@@ -168,15 +182,15 @@ async def measure(output: Path, count: int, seconds: float, interval: float):
         report["foreground_slot_acquire_ms"] = round((time.perf_counter() - tick) * 1000, 3)
         runtime.slots.release()
 
-        # Include a full unchanged production watch interval, rather than
-        # labelling synchronous progress reads as steady background waiting.
+        # Include a full unchanged production watch interval, separately from
+        # progress-control queries and their result verification.
         change_phase("steady_wait")
         await asyncio.sleep(1.1)
         change_phase("progress_queries")
         progress_rows = []
         for index in range(3):
             tick = time.perf_counter()
-            result = runtime.progress_result("default", "当前投递进度", request_id=f"synthetic-scale-progress-{index}")
+            result = await runtime.progress_result_async("default", "当前投递进度", request_id=f"synthetic-scale-progress-{index}")
             progress_ms.append((time.perf_counter() - tick) * 1000)
             counts = result["snapshot"]["counts"]
             assert counts["contacted"] == count and counts["waiting_reply"] == count
@@ -228,12 +242,64 @@ async def measure(output: Path, count: int, seconds: float, interval: float):
             delivery_events_persisted=sum(len(events) for events in delivery_events),
             encrypted_payload_rows=encrypted_payload_rows, encrypted_runtime=True,
             unexpected_waiter_errors=[], external_side_effect_attempts=side_effects)
-        (output / "observations.json").write_text(json.dumps({"counts": dict(observations),
-            "first_offset_seconds": first_observed, "last_offset_seconds": last_observed,
+        window_counts = dict(observations)
+        window_last = dict(last_observed)
+
+        # Independently measure real service startup from the same encrypted
+        # durable waits. This is separate from the original schedule-burst
+        # measurement above, so restore timing cannot conceal that baseline.
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        report["pre_restore_watchers_cancelled"] = len(tasks)
+        ledger = RunStore(output / "runtime.db", runtime_key)
+        runtime = AgentRuntime(ledger, NS(llm=services), jobs, services, services)
+        runtime.delivery = services
+        original_observe = runtime._read_delivery_observation
+        original_save = runtime._save_delivery_observation
+        runtime._read_delivery_observation = observed
+        runtime._save_delivery_observation = saved
+        saved_observations.clear()
+        restore_lags = []
+        restore_done = asyncio.Event()
+        async def restore_probe():
+            loop = asyncio.get_running_loop()
+            while not restore_done.is_set():
+                tick = loop.time()
+                await asyncio.sleep(interval)
+                restore_lags.append(max(0., (loop.time() - tick - interval) * 1000))
+        restore_sampler = asyncio.create_task(restore_probe())
+        try:
+            await asyncio.sleep(0)
+            tick = time.perf_counter()
+            await runtime.start()
+            start_return_ms = (time.perf_counter() - tick) * 1000
+            tasks = [runtime.tasks[run_id] for run_id in run_ids]
+            async with asyncio.timeout(15):
+                while len(saved_observations) < count:
+                    assert all(not task.done() for task in tasks)
+                    await asyncio.sleep(.02)
+            restore_ready_ms = (time.perf_counter() - tick) * 1000
+        finally:
+            restore_done.set()
+            await restore_sampler
+        assert all(not task.done() for task in tasks)
+        assert all(ledger.get(run_id)["status"] == "waiting_reply" for run_id in run_ids)
+        assert all(len([e for e in ledger.all_events(run_id) if e["kind"] == "delivery"]) == 1 for run_id in run_ids)
+        assert not side_effects
+        report["runtime_start_recovery"] = {"start_return_ms": round(start_return_ms, 3),
+            "all_waiters_observed_ms": round(restore_ready_ms, 3), "live_waiters": count,
+            "event_loop_lag": latency(restore_lags), "duplicate_observation_events": 0,
+            "external_side_effect_attempts": []}
+        (output / "observations.json").write_text(json.dumps({"counts": window_counts,
+            "first_offset_seconds": first_observed, "last_offset_seconds": window_last,
+            "restore_observation_counts": {key: observations[key] - window_counts[key] for key in delivery_ids},
+            "restore_event_loop_lag_ms": restore_lags,
             "event_loop_lag_ms": lag_ms, "phase_timer_samples": lag_samples,
             "foreground_admission_ms": admissions_ms,
             "progress_result_ms": progress_ms}, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception:
+        report["passed"] = False
         report["error"] = traceback.format_exc()
         report["external_side_effect_attempts"] = side_effects
     finally:

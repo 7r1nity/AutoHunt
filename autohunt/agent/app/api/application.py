@@ -992,10 +992,27 @@ async def sync_mock_workflow() -> dict:
 
 
 @app.get("/api/v1/jobs", response_model=list[StoredJobView])
-async def list_stored_jobs(stage: str | None = None) -> list[StoredJobView]:
+async def list_stored_jobs(stage: str | None = None, limit: int = Query(default=100, ge=1, le=1000)) -> list[StoredJobView]:
     if stage and stage not in {"review", "applying", "waiting", "interview", "outcome_indeterminate", "rejected"}:
         raise HTTPException(status_code=422, detail="Invalid job stage")
-    return job_store.list_jobs(stage=stage)
+    return job_store.list_jobs(stage=stage, limit=limit)
+
+
+@app.get("/api/v1/jobs/page")
+def page_stored_jobs(stage: str | None = None, limit: int = Query(default=100, ge=1, le=200),
+                           offset: int = Query(default=0, ge=0),
+                           snapshot: str | None = Query(default=None, pattern=r"^[a-f0-9]{64}$")) -> dict:
+    """Complete board pagination, separate from the legacy bounded list API."""
+    if stage and stage not in {"review", "applying", "waiting", "interview", "outcome_indeterminate", "rejected"}:
+        raise HTTPException(status_code=422, detail="Invalid job stage")
+    from ..jobs.store import JobSnapshotChanged
+    try:
+        return job_store.list_jobs_page(stage=stage, limit=limit, offset=offset, snapshot=snapshot)
+    except JobSnapshotChanged as exc:
+        raise HTTPException(status_code=409, detail={"code": "jobs_snapshot_changed",
+            "message": "申请看板在分页期间已更新，请从第一页重新读取。"}) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @app.get("/api/v1/applications/export")

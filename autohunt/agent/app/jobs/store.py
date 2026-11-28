@@ -50,6 +50,10 @@ def city_from_location(location: str) -> str:
     return first if first else "未注明"
 
 
+class JobSnapshotChanged(ValueError):
+    """The board changed between pages; never merge inconsistent snapshots."""
+
+
 class JobStore:
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -606,6 +610,47 @@ class JobStore:
                 raise KeyError(run_id)
         return self.get_delivery_run(run_id)
 
+    def record_delivery_worker_loss(self, expected: DeliveryTaskView, code: str) -> DeliveryTaskView:
+        """Settle a lost worker only while its exact observed version still owns it.
+
+        Async observers can resume after the browser has already confirmed a
+        submission or moved to another job. Run and board changes share this CAS
+        transaction; a stale view must never downgrade confirmed evidence.
+        """
+        if code not in {"worker_lost", "human_timeout"}:
+            raise ValueError("Unsupported delivery watchdog reason")
+        with self.lock, self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT * FROM delivery_runs WHERE id=?", (expected.id,)).fetchone()
+            if row is None:
+                raise KeyError(expected.id)
+            current = DeliveryTaskView(**dict(row))
+            keys = ("updated_at", "status", "checkpoint", "submitted", "job_id", "preview_id", "target_url",
+                    "resume_document_id", "resume_version", "resume_digest", "action")
+            if (current.submitted or current.status not in {"starting", "running", "waiting_for_user"}
+                    or any(getattr(current, key) != getattr(expected, key) for key in keys)):
+                return current
+            uncertain = current.checkpoint in {
+                "communication_started", "communication_unconfirmed", "submit_started", "submission_unconfirmed"}
+            status = DeliveryTaskStatus.OUTCOME_INDETERMINATE if uncertain else DeliveryTaskStatus.FAILED
+            detail = "任务等待已过期或执行器中断；不自动重放，已确认的投递保留，请核对执行记录"
+            timestamp = utc_now()
+            db.execute("UPDATE delivery_runs SET status=?,checkpoint=?,detail=?,updated_at=? WHERE id=?",
+                       (status.value, code, detail, timestamp, current.id))
+            latest = db.execute("SELECT id FROM delivery_runs WHERE job_id=? ORDER BY started_at DESC,rowid DESC LIMIT 1",
+                                (current.job_id,)).fetchone()
+            if latest and latest["id"] == current.id:
+                db.execute("UPDATE jobs SET stage=?,mode=?,reasoning=?,last_seen_at=? WHERE id=? "
+                           "AND removed_at IS NULL AND stage NOT IN ('waiting','interview','rejected')",
+                    ("outcome_indeterminate" if uncertain else "review", "需要人工核验" if uncertain else "需要重新授权",
+                     detail, timestamp, current.job_id))
+            db.execute("INSERT INTO browser_events(task_id,event_type,detail,sample_json,created_at) VALUES (?,?,?,?,?)",
+                (current.id, "delivery_watchdog", detail,
+                 json.dumps({"code": code, "observed_status": str(current.status), "observed_checkpoint": current.checkpoint},
+                            ensure_ascii=False), timestamp))
+            return current.model_copy(update={"status": status, "checkpoint": code, "detail": detail,
+                                               "updated_at": datetime.fromisoformat(timestamp)})
+
     def authorize_delivery_run(
         self, preview_id: str, run_id: str, *, resume_document_id: str | None = None,
         resume_version: int | None = None, resume_digest: str | None = None,
@@ -843,27 +888,77 @@ class JobStore:
     def get_job_from_connection(db, job_id):
         return dict(db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone())
 
-    def list_jobs(self, stage: str | None = None, limit: int = 100) -> list[StoredJobView]:
+    @staticmethod
+    def _board_query(stage: str | None = None, *, include_rejected=True):
         # Visibility is an explicit admission/removal decision, not a projection
         # of whichever search most recently updated the shared verdict cache.
-        query = "SELECT j.*,d.content_hash AS review_hash FROM jobs j LEFT JOIN job_review_decisions d ON d.job_id=j.id WHERE j.board_visible=1 AND j.removed_at IS NULL"
+        condition = "j.board_visible=1 AND j.removed_at IS NULL"
         params: list[Any] = []
         if stage:
-            query += " AND j.stage=?"
+            condition += " AND j.stage=?"
             params.append(stage)
-        query += " ORDER BY j.score DESC,j.last_seen_at DESC LIMIT ?"
-        params.append(limit)
-        with self.lock, self._connect() as db:
-            rows = db.execute(query, params).fetchall()
+        elif not include_rejected:
+            condition += " AND j.stage<>'rejected'"
+        return condition, params
+
+    @classmethod
+    def _job_views(cls, rows) -> list[StoredJobView]:
         return [StoredJobView(
             id=row["id"], role=row["title"], company=row["company"], location=row["location"],
             salary=row["salary"], source=row["source"], source_url=row["source_url"], score=row["score"],
             stage=row["stage"], mode=row["mode"], tags=json.loads(row["tags"]), reason=row["reasoning"],
             posted=row["last_seen_at"], recruiter_reply=row["recruiter_reply"],
             recruiter_reply_at=row["recruiter_reply_at"],
-            review_approved=row["review_hash"] == self.review_fingerprint(dict(row)),
+            review_approved=row["review_hash"] is not None and row["review_hash"] == cls.review_fingerprint(dict(row)),
             filter_status=row["filter_status"],
         ) for row in rows]
+
+    def list_jobs(self, stage: str | None = None, limit: int = 100) -> list[StoredJobView]:
+        condition, params = self._board_query(stage)
+        query = ("SELECT j.*,d.content_hash AS review_hash FROM jobs j LEFT JOIN job_review_decisions d ON d.job_id=j.id WHERE "
+                 + condition + " ORDER BY j.score DESC,j.last_seen_at DESC,j.id DESC LIMIT ?")
+        with self.lock, self._connect() as db:
+            rows = db.execute(query, [*params, limit]).fetchall()
+        return self._job_views(rows)
+
+    def count_jobs(self, stage: str | None = None, *, include_rejected=True) -> int:
+        """Count the complete visible scope; legacy lists include rejected rows."""
+        condition, params = self._board_query(stage, include_rejected=include_rejected)
+        with self.lock, self._connect() as db:
+            return int(db.execute("SELECT COUNT(*) FROM jobs j WHERE " + condition, params).fetchone()[0])
+
+    def list_jobs_page(self, stage: str | None = None, *, limit=100, offset=0, snapshot=None) -> dict:
+        """A bounded response from a complete, consistently ordered board view.
+
+        Only light display/review fields are scanned for the revision, never JD
+        description, resumes or chat. Each request has one SQLite read snapshot;
+        a changed revision between pages requires a complete client re-read.
+        """
+        if type(limit) is not int or not 1 <= limit <= 200 or type(offset) is not int or offset < 0:
+            raise ValueError("Invalid job page bounds")
+        if offset and snapshot is None:
+            raise ValueError("Subsequent job pages require the first page snapshot")
+        condition, params = self._board_query(stage, include_rejected=False)
+        query = """SELECT j.id,j.title,j.company,j.location,j.salary,j.source,j.source_url,j.score,
+                    j.stage,j.mode,j.tags,j.reasoning,j.last_seen_at,j.recruiter_reply,j.recruiter_reply_at,
+                    j.filter_status,j.content_hash,d.content_hash AS review_hash,
+                    CASE WHEN d.job_id IS NOT NULL THEN j.filter_evidence END AS filter_evidence,
+                    CASE WHEN d.job_id IS NOT NULL THEN j.qualification_evidence END AS qualification_evidence
+                   FROM jobs j LEFT JOIN job_review_decisions d ON d.job_id=j.id WHERE """ + condition + " ORDER BY j.score DESC,j.last_seen_at DESC,j.id DESC"
+        with self.lock, self._connect() as db:
+            db.execute("PRAGMA query_only=ON")
+            rows = db.execute(query, params).fetchall()
+        revision = hashlib.sha256(json.dumps([dict(row) for row in rows], ensure_ascii=False,
+            sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        if snapshot is not None and snapshot != revision:
+            raise JobSnapshotChanged("Job board changed while paging")
+        total = len(rows)
+        if offset > total:
+            raise ValueError("Job page offset exceeds total")
+        items = self._job_views(rows[offset:offset + limit])
+        end = offset + len(items)
+        return {"items": items, "total": total, "offset": offset, "limit": limit,
+                "next_offset": end if end < total else None, "snapshot": revision}
 
     def application_export_rows(self, *, scope: str = "all") -> list[dict[str, Any]]:
         """A consistent, unbounded read projection for Harness result delivery.

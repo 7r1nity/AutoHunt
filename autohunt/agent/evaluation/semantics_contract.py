@@ -275,7 +275,9 @@ async def pipeline(scenario, registry):
         return {"new_task": True}
     if scenario in {"soft_any", "soft_not", "hard_unknown", "rank_not_claimed"}:
         hard = {"op": "condition", "text": "必须双休", "quote": "必须双休"}
-        soft = {"op": "condition", "text": "优先实习", "quote": "优先实习", "mode": "prefer"}
+        # Use an enabled business preference; employment-kind conditions were
+        # globally retired and intentionally project to no filter at all.
+        soft = {"op": "condition", "text": "优先带薪年假", "quote": "优先带薪年假", "mode": "prefer"}
         if scenario == "soft_any":
             tree = validate_filter({"op": "any", "children": [hard, soft]})
             assert combine(tree, iter(["fail", "pass"])) == "fail"

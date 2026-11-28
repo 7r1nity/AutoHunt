@@ -22,6 +22,7 @@ from urllib.parse import parse_qs, urlsplit
 from urllib.request import ProxyHandler, build_opener
 
 from playwright.async_api import Error as PlaywrightError, async_playwright
+from evaluation.job_page_fixture import job_page_response
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -137,7 +138,7 @@ async def exercise(origin: str, output: Path):
                 else:
                     read_queries.append(parse_qs(target.query))
                     payload = reports
-            elif target.path == '/api/agent/jobs': status, payload = 200, [job]
+            elif target.path == '/api/agent/jobs': status, payload = 200, job_page_response([job], target.query)
             elif target.path == '/api/agent/runs': status, payload = 200, []
             elif target.path == '/api/agent/conversations':
                 status, payload = 200, [{'id': 'default', 'title': '合成会话', 'created_at': '2026-01-01T00:00:00Z'}]

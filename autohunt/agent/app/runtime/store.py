@@ -346,6 +346,42 @@ class RunStore:
             db.execute("INSERT INTO agent_run_events (run_id,kind,data,created_at) VALUES (?,?,?,?)",
                        (run_id, kind, self._encode(data), now()))
 
+    def record_delivery_observation(self, run_id: str, delivery_id: str, data: dict) -> bool:
+        """Persist an observation and its event once, without reviving stale work.
+
+        The signature is internal checkpoint data, not a submission authority.
+        Keeping it in the same transaction as the event also deduplicates an
+        unchanged observation after service restart.
+        """
+        status = data["status"]
+        if status not in {"running", "waiting_user", "waiting_reply"}:
+            raise ValueError("Unsupported delivery observation status")
+        task = data["task"]
+        if task.get("id") != delivery_id:
+            raise ValueError("Delivery observation binding mismatch")
+        # Poll timestamps change even when there is no new user-visible state.
+        signature = hashlib.sha256(safe_json({key: task.get(key) for key in (
+            "status", "checkpoint", "recruiter_reply", "submitted", "detail", "takeover_reason",
+        )}).encode()).hexdigest()
+        with self.lock, self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT status,cancel_requested,checkpoint FROM agent_runs WHERE id=?", (run_id,)).fetchone()
+            if not row or row["status"] in TERMINAL | {"cancelling"} or row["cancel_requested"]:
+                return False
+            checkpoint = self._load(row["checkpoint"]) if row["checkpoint"] else {}
+            if checkpoint.get("delivery_id") != delivery_id:
+                return False
+            marker = {"delivery_id": delivery_id, "signature": signature}
+            if checkpoint.get("delivery_observation") == marker and row["status"] == status:
+                return True
+            checkpoint["delivery_observation"] = marker
+            timestamp = now()
+            db.execute("UPDATE agent_runs SET status=?,checkpoint=?,updated_at=? WHERE id=?",
+                       (status, self._encode(checkpoint), timestamp, run_id))
+            db.execute("INSERT INTO agent_run_events (run_id,kind,data,created_at) VALUES (?,?,?,?)",
+                       (run_id, "delivery", self._encode(data), timestamp))
+        return True
+
     def all_events(self, run_id: str) -> list[dict]:
         result, cursor = [], 0
         while page := self.events(run_id, cursor):

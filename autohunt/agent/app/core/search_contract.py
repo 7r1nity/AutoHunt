@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import re
 from decimal import Decimal
+from .search_limits import MAX_SEARCH_RESULTS
 
 
 NUMBER = r"(?:\d{1,3}(?:[,，]\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?|[零〇一二两三四五六七八九十百千万]+)"
@@ -65,7 +66,7 @@ def simple_search_patch(message: str, cities: tuple[str, ...]) -> dict | None:
             patch["locations"] = [m.group() for m in re.finditer(city_names, city.group(1), re.I)]
         elif count:
             value = int(count.group(1))
-            if not 1 <= value <= 100:
+            if not 1 <= value <= MAX_SEARCH_RESULTS:
                 return None
             patch["result_limit"] = value
         elif salary:

@@ -21,7 +21,9 @@ def board_facts(jobs) -> dict:
         "queue_depth": sum(1 for item in queue if item["status"] == "queued"),
         "queue_items": queue,
         "runs": runs,
-        "reply_candidates": jobs.delivery_runs_waiting_reply(limit=50),
+        # Readiness must see beyond the first 50 invalid/cooling waits. Actual
+        # execution still performs at most one due browser check per turn.
+        "reply_candidates": jobs.delivery_runs_waiting_reply(limit=None),
         "failed_starts": jobs.delivery_runs_failed_before_submit(limit=50),
         "uncertain_deliveries": jobs.deliveries_to_reconcile() if hasattr(jobs, "deliveries_to_reconcile") else [],
     }

@@ -114,11 +114,29 @@ class MockWorkflowCoordinator:
             try:
                 # Waiting for a human reply is not active browser work. Keep polling
                 # bounded and quiet rather than looping every two seconds for days.
-                delay = 0.25 if any(item["status"] == "queued" for item in self.jobs.mock_delivery_queue()) else self.poll_seconds
+                # Re-read local facts after the action: sync may have just detected
+                # replies, and a fair sync turn must not put ready sends to sleep.
+                delay = await self._next_poll_delay(settings)
                 await asyncio.wait_for(self.wakeup.wait(), timeout=delay)
             except TimeoutError:
                 pass
             self.wakeup.clear()
+
+    async def _next_poll_delay(self, settings: dict) -> float:
+        """Short turns for executable work, normal polling for external waits.
+
+        Reuse the engine's conditions AND cooldowns. A stored reply alone is not
+        ready work: original ownership/binding and per-run retry time still apply.
+        """
+        try:
+            observation = await self.observe(settings, with_site=False)
+            if observation.get("delivery_idle") and observation.get("browser_idle") and self.engine.matching(observation):
+                return 0.25
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.jobs.record_mock_workflow_error(f"检查后续调度状态失败：{type(exc).__name__}：{exc}")
+        return self.poll_seconds
 
     async def observe(self, settings: dict | None = None, *, with_site: bool = True):
         """Capture board and site facts for one cycle."""
@@ -136,6 +154,9 @@ class MockWorkflowCoordinator:
         facts["applicant_id"] = settings.get("applicant_id")
         facts["delivery_idle"] = not (self.delivery.worker and not self.delivery.worker.done())
         facts["browser_idle"] = not (self.browser.worker and not self.browser.worker.done())
+        queue = {item.get("run_id"): item for item in facts.get("queue_items", []) if item.get("run_id")}
+        facts["reply_candidates"] = [{**run, "ready_for_check": self._reply_check_context(run, queue, observed=True) is not None}
+                                     for run in facts.get("reply_candidates", [])]
         return type(observation)(at=observation.at, facts=facts)
 
     async def _ensure_applicant_bound(self, session_id: str) -> str:
@@ -596,6 +617,31 @@ class MockWorkflowCoordinator:
             break
         return {"recovered": recovered, "skipped": skipped}
 
+    def _reply_check_context(self, run: dict, queue: dict, *, observed=False):
+        """Shared readiness hint and execution preconditions, never new authority."""
+        item = queue.get(run["id"])
+        if item is not None and item["status"] not in {"queued", "dispatched"}:
+            return None
+        owner = item["session_id"] if item else self.delivery_owner(run["id"]) if self.delivery_owner else None
+        binding = item["binding"] if item else {key: run.get(key) for key in
+            ("resume_document_id", "resume_version", "resume_digest")}
+        if (not owner or owner in self.stopping_sessions or "*" in self.stopping_sessions
+                or not run.get("preview_id") or run.get("action") != "submit_resume"
+                or any(value is None for value in binding.values())):
+            return None
+        # Unchecked observed replies need no extra per-job DB query. Execution
+        # re-reads the job, and a recent check also needs the reply timestamp to
+        # distinguish fresh evidence from another attempt at the same reply.
+        cooling = run.get("last_checked_at") and not wait_expired(run["last_checked_at"], self.poll_seconds)
+        job = ({"recruiter_reply": run["observed_reply"]}
+               if observed and "observed_reply" in run and not cooling else self.jobs.get_job(run["job_id"]))
+        if not str(job.get("recruiter_reply") or "").strip():
+            return None
+        fresh = _utc_naive(job.get("recruiter_reply_at")) > _utc_naive(run.get("last_checked_at"))
+        if cooling and not fresh:
+            return None
+        return owner, binding, item
+
     async def check_reply_queue(self) -> dict:
         """Reply monitoring that does not hold the delivery worker.
 
@@ -607,33 +653,21 @@ class MockWorkflowCoordinator:
         is attempted per turn, in least-recently-checked order; dispatch gets the
         browser back before another waiting conversation is visited.
         """
-        from ..delivery.automation import wait_expired
         checked = submitted = attempted = 0
+        queue = {entry.get("run_id"): entry for entry in self.jobs.mock_delivery_queue(active_only=False) if entry.get("run_id")}
         for run in self.jobs.delivery_runs_waiting_reply(limit=None):
             if attempted >= 1:
                 break  # One browser action per turn, not a batch of 50 polls.
             if ((self.delivery.worker and not self.delivery.worker.done())
                     or (self.browser.worker and not self.browser.worker.done())):
                 break  # a dispatch or another reply check holds the slot
-            item = next((entry for entry in self.jobs.mock_delivery_queue(active_only=False)
-                         if entry["run_id"] == run["id"]), None)
-            if item is not None and item["status"] not in {"queued", "dispatched"}:
-                continue
             # Single-job UI authorizations also release the browser while waiting.
             # A site greeting alone is NOT authority: require an active tracked run
             # plus the original preview/resume binding; never create a new preview.
-            owner = item["session_id"] if item else self.delivery_owner(run["id"]) if self.delivery_owner else None
-            binding = item["binding"] if item else {key: run.get(key) for key in
-                ("resume_document_id", "resume_version", "resume_digest")}
-            if (not owner or not run.get("preview_id") or run.get("action") != "submit_resume"
-                    or any(value is None for value in binding.values())):
+            context = self._reply_check_context(run, queue)
+            if context is None:
                 continue
-            job = self.jobs.get_job(run["job_id"])
-            if not str(job.get("recruiter_reply") or "").strip():
-                continue  # Waiting is an HTTP read, not a browser navigation.
-            fresh_reply = _utc_naive(job.get("recruiter_reply_at")) > _utc_naive(run.get("last_checked_at"))
-            if run.get("last_checked_at") and not fresh_reply and not wait_expired(run["last_checked_at"], self.poll_seconds):
-                continue
+            owner, binding, item = context
             attempted += 1
             try:
                 # Record the attempt even if the browser check fails before its

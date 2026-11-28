@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import copy
 import re
+from .search_limits import MAX_SEARCH_RESULTS, MAX_RESULT_GROUPS
 
 
 DISABLED_DIMENSIONS = frozenset({"employment_relationship", "employment_kind",
@@ -211,8 +212,8 @@ def project_keywords(values) -> list[str]:
 def project_groups(groups):
     if groups is not None and not isinstance(groups, list):
         raise ValueError("数量分组必须为列表")
-    if len(groups or []) > 10:
-        raise ValueError("分组最多10组，总数最多100个")
+    if len(groups or []) > MAX_RESULT_GROUPS:
+        raise ValueError(f"分组最多{MAX_RESULT_GROUPS}组，总数最多{MAX_SEARCH_RESULTS}个")
     values, total = [], 0
     labels = set()
     for index, original in enumerate(groups or []):
@@ -221,8 +222,8 @@ def project_groups(groups):
             raise ValueError("分组必须包含label、count、filters，且不能包含额外字段")
         item = copy.deepcopy(original)
         count = item.get("count", 0)
-        if type(count) is not int or not 1 <= count <= 100:
-            raise ValueError("分组数量必须为1至100的整数")
+        if type(count) is not int or not 1 <= count <= MAX_SEARCH_RESULTS:
+            raise ValueError(f"分组数量必须为1至{MAX_SEARCH_RESULTS}的整数")
         label = item.get("label")
         if not isinstance(label, str) or not label.strip() or len(label) > 80:
             raise ValueError("分组名称必须为1至80字符的非空字符串")
@@ -230,8 +231,8 @@ def project_groups(groups):
             raise ValueError("分组名称不能重复")
         labels.add(label)
         total += count
-        if total > 100:
-            raise ValueError("分组最多10组，总数最多100个")
+        if total > MAX_SEARCH_RESULTS:
+            raise ValueError(f"分组最多{MAX_RESULT_GROUPS}组，总数最多{MAX_SEARCH_RESULTS}个")
         item["filters"] = project_filter(item.get("filters"))
         item["label"] = project_text(item.get("label", "")) or f"不限类别分组{index+1}"
         values.append(item)
