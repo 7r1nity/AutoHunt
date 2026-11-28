@@ -209,7 +209,7 @@ class Contracts(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rows[self.ids[1]]["status"], "queued")
         self.assertEqual(rows[self.ids[2]]["status"], "queued")
 
-    async def test_remove_category_uses_jd_evidence_and_then_delivers_remaining(self):
+    async def test_remove_retired_category_is_noop_without_semantic_reselection(self):
         original = self.provider.generate
         async def generate(request):
             payload = json.loads(request.user_message)
@@ -226,6 +226,29 @@ class Contracts(unittest.IsolatedAsyncioTestCase):
         self.model_result = {"status": "resolved", "matches": [{"ordinal": 1,
             "evidence": [{"field": "description", "quote": "由第三方签劳动合同"}]}]}
         removed = await self.call("job_remove_selection", {"selector": "第三方或者外包岗位", "selection_mode": "matching"})
+        self.assertEqual(removed.status, "ok")
+        self.assertEqual(removed.content["removed_ids"], [])
+        self.assertTrue(removed.content["ignored_filter"])
+        self.assertEqual(self.model_calls, [])
+        self.assertEqual(len(self.jobs.list_jobs()), 3)
+        self.assertEqual(self.jobs.mock_delivery_queue(), [])
+
+    async def test_allowed_semantic_remove_uses_evidence_then_delivers_remaining(self):
+        original = self.provider.generate
+        async def generate(request):
+            payload = json.loads(request.user_message)
+            self.assertEqual(payload["selector"], "需要出差的岗位")
+            self.assertEqual(payload["selection_mode"], "matching")
+            return await original(request)
+        self.provider.generate = generate
+        with self.jobs._connect() as db:
+            db.execute("UPDATE jobs SET description=? WHERE id=?", ("每月需出差两次，负责客户现场RAG检索系统交付。", self.ids[0]))
+        entries = [{**item, "content_hash": self.jobs.review_fingerprint(self.jobs.get_job(item["id"]))} for item in self.snapshot_items]
+        self.context.dialogue = self.state = apply_operation(self.state, {"op": "snapshot", "topic": "applications", "kind": "job",
+            "source": "synthetic", "items": entries, "displayed": True})
+        self.model_result = {"status": "resolved", "matches": [{"ordinal": 1,
+            "evidence": [{"field": "description", "quote": "每月需出差两次"}]}]}
+        removed = await self.call("job_remove_selection", {"selector": "需要出差的岗位", "selection_mode": "matching"})
         self.assertEqual(removed.status, "ok")
         self.assertEqual(removed.content["removed_ids"], [self.ids[0]])
         delivered = await self.call("mock_delivery_start", {"selector": "移除后的剩余岗位", "selection_mode": "matching"})

@@ -1277,7 +1277,8 @@ class BrowserAutomationService:
                     output.append(cleaned)
             return output[:limit]
 
-        return unique(skills, 100), unique(target_roles, 50), unique(excluded_keywords, 50)
+        from ..core.filter_policy import project_keywords
+        return unique(skills, 100), unique(project_keywords(target_roles), 50), unique(project_keywords(excluded_keywords), 50)
 
     def _candidate_skills(self) -> list[str]:
         return self._candidate_match_context([])[0]
@@ -1320,7 +1321,7 @@ class BrowserAutomationService:
         return matching.result()
 
     async def _check_filters(self, task_id: str, detail: dict, request: BrowserSearchRequest):
-        from ..core.result_groups import grouped_filter, group_verdicts
+        from ..core.result_groups import evaluate_grouped_filter, group_verdicts
         detail["title"] = clean_title(detail.get("title") or "")
         detail["company"] = clean_title(detail.get("company") or "")
         detail["description"] = re.sub(r"\s+", " ", str(detail.get("description") or "")).strip()
@@ -1329,9 +1330,9 @@ class BrowserAutomationService:
         if request.locations and not any(city in str(detail.get("location", "")) for city in request.locations):
             verdict = {"status": "unknown" if detail.get("location") in {None, "", "未注明", "未知"} else "fail", "conditions": [], "reason": "工作地点无法满足本轮城市条件"}
         else:
-            verdict = await evaluate_filter(self.llm.generate, grouped_filter(request.filters, request.result_groups), detail)
+            verdict = await evaluate_grouped_filter(self.llm.generate, request.filters, request.result_groups, detail)
         if request.result_groups:
-            detail["result_group_evidence"] = group_verdicts(request.filters, request.result_groups, verdict)
+            detail["result_group_evidence"] = verdict.get("result_group_evidence") or group_verdicts(request.filters, request.result_groups, verdict)
         detail["filter_status"], detail["filter_evidence"] = verdict["status"], verdict
         if request.filters or request.result_groups or verdict["status"] != "pass":
             self.store.event(task_id, "filter_evaluated", f"{detail.get('title', '')}：{verdict['status']}",

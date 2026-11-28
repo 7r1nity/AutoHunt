@@ -50,6 +50,25 @@ class RequestDraft(Strict):
     reply: str = Field(default="", max_length=1500)
 
 
+def effective_arguments(registry, tool: str, arguments: dict, *, context_only=False) -> dict:
+    """Apply the global scope policy before structure checks and action binding.
+
+    Invalid transport trees still reach their existing precise repair path;
+    semantic mixtures that cannot be projected losslessly need model repair.
+    """
+    from ..core.filter_policy import FilterPolicyRepair, project_arguments
+    try:
+        projector = getattr(registry, "_effective_arguments", None)
+        return projector(tool, arguments) if callable(projector) else project_arguments(arguments)
+    except FilterPolicyRepair as exc:
+        if context_only:
+            return copy.deepcopy(arguments)  # Model context is repair data, never executable scope.
+        raise PlanValidationError("global_filter_projection", str(exc), category="repair",
+                                  tool=tool, field="filters") from exc
+    except ValueError:
+        return copy.deepcopy(arguments)
+
+
 def live_request(dialogue: dict, stamp: str) -> dict | None:
     item = dialogue.get("instruction_request") or {}
     if (item.get("status") == "clarifying" and item.get("resume_stamp") == stamp
@@ -147,6 +166,7 @@ def shortcut_safe(message: str) -> bool:
 async def plan_request(llm, registry, message: str, *, dialogue: dict, conditions: dict,
                        stamp: str, previous: dict | None = None) -> dict:
     """One model owns semantic extraction; validators own shape and effects."""
+    conditions = effective_arguments(registry, "search_state_update", conditions, context_only=True)
     schemas = [item for item in registry.schemas() if item["function"]["name"] not in INTERNAL_TOOLS]
     from ..llm.schema_catalog import compact_tool_catalog
     from ..runtime.context_builder import estimate_tokens
@@ -171,6 +191,10 @@ async def plan_request(llm, registry, message: str, *, dialogue: dict, condition
         live_plan = {key: live_plan.get(key) for key in ("id", "revision", "original", "status", "paused", "scope_review")} | {
             "steps": [{key: step.get(key) for key in ("id", "tool", "arguments", "staged_arguments", "missing_slots", "questions", "status", "depends_on", "task_id", "effect", "execution_phase", "failure")}
                       for step in live_plan["steps"]]}
+        for step in live_plan["steps"]:
+            step["arguments"] = effective_arguments(registry, step["tool"], step.get("arguments") or {}, context_only=True)
+            if step.get("staged_arguments") is not None:
+                step["staged_arguments"] = effective_arguments(registry, step["tool"], step["staged_arguments"], context_only=True)
     from .revision import RevisionDraft
     revision_schema=RevisionDraft.model_json_schema()
     for internal in ("scope_review","plan_id","expected_revision"):
@@ -204,7 +228,7 @@ async def plan_request(llm, registry, message: str, *, dialogue: dict, condition
             "组合节点说明放label，约束全部放children；condition不得含子节点，all/any至少一个，not恰好一个；组合节点mode仅require且无salary。"
             "月薪15k-40k默认range_mode=contained且说明区间完整落入；用户明确有交集用overlap。单独15k未说明最低或期望且上下文不能消歧时询问，不猜精确匹配。"
             "只给最低/以上薪资也按岗位区间下限判断，默认contained，不用overlap；最低15K不能接受10-20K。"
-            "实习日薪低于300不要，用salary(unit=daily,minimum=300,applies_to=internship)，非实习岗位不受限制。未知不等于面议，日薪不折算月薪。"
+            "日薪低于300不要，用salary(unit=daily,minimum=300,applies_to=all)，仅保留工资单位和金额，不恢复已禁用的岗位类型限定。未知不等于面议，日薪不折算月薪。"
             "完整薪资条件树优先于旧salary_min快捷字段，必须保留各分支作用域和OR例外。生成计划仅max_score/min_score/salary_min等schema字段，不搬动搜索门槛。"
             "同义岗位词不必逐字出现于用户原文，可依据专业/简历方向提取。模糊但可执行的表达不要求固定口令。"
             "规则命中与否不是执行授权判断；不要复述内部工具JSON，只在reply给简短自然语言说明。"
@@ -213,19 +237,19 @@ async def plan_request(llm, registry, message: str, *, dialogue: dict, condition
             "明确自动投递且范围完整时user_requested=true，不再要求重复说确认；动作范围需要用户核对时false，由执行器保存范围确认；仅关键业务参数缺失或冲突才提出questions。"
             "修订已有待确认动作时，本轮明确要求执行则updates内user_requested=true；不确定的范围由执行器持久化确认，不能用questions阻断无关分支。"
             "投递仅mock本地模拟站；min_score仅用户要求分数门槛时填写，省略不加分数门槛。真实平台boss/zhaopin可搜索但不能投递。"
-            "只按用户明确提出或有效继承的条件筛选；JD资历诊断是参考信息，不能自行追加外包、实习/正式、应届、学历、工作或项目年限等硬门槛，也不能因此要求补参或确认投递。用户明确要求这些条件时仍须保留到filters执行。"
+            "全局筛选策略已永久禁用四类维度：外包/第三方/劳务派遣关系、实习/正式岗位类型、应届/校招/社招招聘对象、工作/项目经历年限。无论当前输入或历史原话是否提到，均不得生成这些filters、排除关键词、类型配额或隐式岗位选择限制，也不因此追问或拒绝。保留薪资、城市、分数、总数量、福利、技术技能等有效条件；学历等JD资历诊断仅作参考，不自动添加硬门槛。"
             "投递20个/20份表示mock_delivery_start.limit=20，这是最终符合条件且未投岗位的入队上限，不是搜索数量或数据库序号。"
             "同一投递总量只生成一个投递步骤，备选范围用filters.any表达，不给每个范围重复一份数量。"
             "投递前20个同时传selector=前20个、limit=20；前N表示本轮最多N个符合条件的岗位，少于N时处理现有符合者并报告缺额，不要求用户补足。第20个仍是严格单岗序号。"
             "数量投递绑定本轮结果：已有列表提供snapshot_id及其source_task_id；本轮搜索尚未完成时追加投递并依赖该搜索，不改用上一轮结果或重新搜索。"
             "搜索薪资属于job_search_start；各投递/计划分支的薪资和分数条件独立，不能搬到另一个动作。"
             "85以上投递、以下的分析不足表示投递min_score=85，计划max_score=84；85以下且25k以上生成计划还需salary_min=25000。"
-            "mock_delivery_start.filters是投递分支自己的语义条件树，例如只投正式岗、只投有转正机会的实习岗；不能改变搜索范围或忽略该限制。"
+            "mock_delivery_start.filters是投递分支自己的有效条件树，例如只投深圳、要求双休或某项技术；不得带入全局禁用维度，也不能改动其他搜索范围。"
             "dialogue.delivery_scope记录上一批已执行投递的范围，不是授权。补投、漏投或还有几个未投时默认继承该范围；"
-            "scope_mode=inherit（默认）会保留旧条件并与新限制取交集，不得漏掉薪资/岗位类型等条件。"
+            "scope_mode=inherit（默认）会保留旧条件中仍允许的条件并与新限制取交集，不得漏掉薪资/城市等条件；旧的禁用维度不再继承。"
             "用户明确另起独立批次、取消或替换旧限制、降低分数门槛时scope_mode=new，并给出完整新范围。指定单个岗位不继承旧批量范围。"
             "只修改上一批投递的部分条件时使用scope_mode=update：例如搜索结果不变，把85分降为80分，min_score=80且省略filters以保留其他条件；不要另起搜索或改搜索条件。"
-            "投递地点/岗位类别范围扩大但搜索范围不变时，只更新mock_delivery_start的完整filters，用update替换对应条件树；inherit是补投取交集，不能用它表示降低门槛或OR扩大。"
+            "投递地点或其他允许条件扩大但搜索范围不变时，只更新mock_delivery_start的完整filters，用update替换对应条件树；inherit是补投取交集，不能用它表示降低门槛或OR扩大。"
             "扩大搜索城市/岗位方向/数量是搜索范围变化，更新搜索参数并按用户需要新增搜索；不能把原有投递授权自动扩大到未来结果。"
             "指定第几个、前几个、岗位名称投递时必须传mock_delivery_start.selector；序号不是数据库ID，不得用上一轮批量filters替代指定对象。"
             "投递某一轮指定搜索结果时传mock_delivery_start.source_task_id，且只能使用result_sources里的已完成task_id；多轮搜索不明确时先问，不要默认用最近一轮。"
@@ -243,14 +267,12 @@ async def plan_request(llm, registry, message: str, *, dialogue: dict, condition
             "selector只定位对象：单个独立投递省略scope_mode；‘其余/其他符合原条件的岗位继续投’属于原批次，必须scope_mode=inherit，不能因提供selector就丢掉原来的分数、城市和语义条件。"
             "面试准备也用稳定序号或岗位名定位，例如当前简表第一项用selector='第1个'；不要把‘符合条件的岗位’等已由搜索核对的描述再附加到序号，造成不必要的二次定位。"
             "若用户明确要求一个不满足原搜索业务条件的岗位也投，传稳定selector及allow_outside_search=true，系统会保存单岗例外等待一次人工确认；不能把全批条件清空或改动搜索来实现例外。"
-            "正式5份、实习5份等分组请求必须生成result_groups，每组label/count/filters；类别必须require，不可用allow替代，result_limit为各组数量之和。共同城市、薪资、排除条件仍放在搜索filters。只修改总数且不再要求分组时清除旧result_groups。"
+            "分组仅支持未禁用维度，如深圳5份、上海5份，生成result_groups并保留每组count/filters与总量。正式5份、实习5份等已禁用类别仅保留总数10，result_groups=null，不再按类型分配。混合分组删除禁用类别，但保留城市、薪资等残余条件和原总数量，不擅自缩小总量。"
             "任意搜索条件使用filters条件树condition/all/any/not；叶text是完整语义，quote仅作审计，不要求机械复制。"
             "先区分准入范围、每个备选方案的硬条件和排序偏好。叶mode=require表示岗位必须满足的事实，prefer仅排序，allow只是允许包含，不需要JD证明接受。"
             "也可以/也接受是在扩大范围，不得放在all中作为新增require。A或B分别有条件时用any(all(A,A的条件),all(B,B的条件))，共同条件才放在外层all。"
-            "正式岗与实习有不同门槛时，按用户实际给定的各分支用any连接，不增添用户未给的备选。门槛金额只能来自有效用户请求或conditions。"
-            "系统说明和schema里的示例数值不是用户条件，不得复制。用户没有提出日薪门槛且会话也没有该门槛时，绝不能增加日薪条件。没有提出独立实习门槛时只添加allow，不得自行创建带门槛的实习备选分支。"
-            "这里正式岗位/实习岗位是当前岗位的类型事实，不是公司是否接受实习生；不要生成‘接受实习岗位’的require叶。仅说实习也可且没有独立实习门槛时用allow，不额外限制正式岗位。"
-            "校招/应届/社招是招聘对象，不等于正式/实习岗位性质；应届实习及有转正机会的实习仍计入实习组，不能仅凭月薪认定正式。"
+            "不同工资单位或允许范围有不同金额时，按保留的薪资分支用any连接，不再添加实习/正式类型叶。门槛金额只能来自有效用户请求或conditions。"
+            "系统说明和schema里的示例数值不是用户条件，不得复制。用户没有提出日薪门槛且会话也没有该门槛时，绝不能增加日薪条件。岗位类型与招聘对象的描述仅作展示，不能恢复为allow/prefer/require或分组限制。"
             "用户本轮修改搜索条件并要求对已有结果投递时，不能只生成mock_delivery_start：先search_state_update保存完整新条件树，再job_results_refilter刷新已有JD，投递依赖refilter。"
             "若需要新增候选则按新条件job_search_start，后续依赖搜索；若条件未变化且仅要求投递可直接投递。省略的条件继承，明确修改的条件必须覆盖旧树对应要求，不能丢失。"
             "保留条件否定与组合逻辑，不把不要外包理解成取消搜索；缺JD证据不能猜符合。"
@@ -343,6 +365,7 @@ def _validate_draft(draft: RequestDraft, registry, message: str, *, dialogue: di
     from .requests import is_continuation
     from .delivery_quantity import normalize_delivery_quantities
     context = active_run()
+    conditions = effective_arguments(registry, "search_state_update", conditions, context_only=True)
     draft = normalize_delivery_quantities(draft, message,
         live_plan=context.plan_reader() if context and context.plan_reader else None)
 
@@ -502,7 +525,7 @@ def _validate_draft(draft: RequestDraft, registry, message: str, *, dialogue: di
     for step in steps:
         name = step["tool"]
         spec = tools[name]
-        args = normalize_encoding(step["arguments"], spec.parameters)
+        args = effective_arguments(registry, name, normalize_encoding(step["arguments"], spec.parameters))
         step["arguments"] = args
         if name in revoked_tools:
             raise PlanValidationError("revoked_authority", "此动作已撤回，不能自动恢复", category="clarify", tool=name)
@@ -663,7 +686,7 @@ def _validate_draft(draft: RequestDraft, registry, message: str, *, dialogue: di
         for candidate in steps:
             old = by_id.get(candidate["id"])
             if old:
-                if old["tool"] != candidate["tool"] or old["arguments"] != candidate["arguments"]:
+                if old["tool"] != candidate["tool"] or effective_arguments(registry, old["tool"], old["arguments"]) != candidate["arguments"]:
                     raise PlanValidationError("completed_step_changed", "已执行步骤不能原地改写；请追加新步骤或显式刷新分析", category="clarify")
                 continue
             same = next((item for item in retained if item.get("effect", tools[item["tool"]].effect) != "read"

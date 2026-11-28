@@ -156,6 +156,12 @@ class JobAnalysisRequest(BaseModel):
     search_queries: list[str] = Field(default_factory=list, max_length=10)
     candidate_facts: dict[str, Any] = Field(default_factory=dict)
 
+    @field_validator("excluded_keywords", "target_roles", "search_queries")
+    @classmethod
+    def effective_screening_terms(cls, values):
+        from .filter_policy import project_keywords
+        return project_keywords(values)
+
 
 class JobAnalysis(BaseModel):
     score: int = Field(ge=0, le=100)
@@ -229,14 +235,20 @@ class BrowserSearchRequest(BaseModel):
     @classmethod
     def clean_filters(cls, value):
         from .job_filters import validate_filter
+        from .filter_policy import project_filter
+        value = project_filter(value)
         return validate_filter(value).model_dump(mode="json") if value is not None else None
 
     @model_validator(mode="after")
     def mock_actions_only(self):
         from .result_groups import grouped_filter, normalize_groups
-        self.result_groups = normalize_groups(self.result_groups) or None
+        from .filter_policy import project_groups
+        projected_groups, original_total = project_groups(self.result_groups)
+        self.result_groups = normalize_groups(projected_groups) or None
         if self.result_groups:
             self.result_limit = sum(item["count"] for item in self.result_groups)
+        elif original_total:
+            self.result_limit = original_total
         from .salary_conditions import normalized_search_filters
         self.filters = normalized_search_filters(self.filters, self.salary_min)
         grouped_filter(self.filters, self.result_groups)  # Validate executable scope before starting a browser.
@@ -247,7 +259,8 @@ class BrowserSearchRequest(BaseModel):
     @field_validator("query")
     @classmethod
     def strip_query(cls, value: str) -> str:
-        value = value.strip()
+        from .filter_policy import project_text
+        value = project_text(value) or ""
         from .search_contract import safe_role_keyword
         if not safe_role_keyword(value):
             raise ValueError("请提供岗位或行业关键词，不能将整句请求、数量、薪资或城市条件作为关键词")
@@ -259,7 +272,8 @@ class BrowserSearchRequest(BaseModel):
         if not values:
             return None
         from .search_contract import safe_role_keyword
-        cleaned = [value.strip() for value in values if value.strip()]
+        from .filter_policy import project_keywords
+        cleaned = project_keywords(values)
         if any(not safe_role_keyword(value) for value in cleaned):
             raise ValueError("queries 只能包含独立岗位关键词，不能包含整句请求或筛选条件")
         return cleaned[:6] or None

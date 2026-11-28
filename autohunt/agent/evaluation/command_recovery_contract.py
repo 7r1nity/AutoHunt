@@ -39,7 +39,7 @@ def leaf(text):
 
 
 def delivery_step(**changes):
-    return {"id": "deliver_extra", "tool": "mock_delivery_start", "arguments": {"filters": leaf("正式岗位")},
+    return {"id": "deliver_extra", "tool": "mock_delivery_start", "arguments": {"filters": leaf("提供五险一金")},
             "depends_on": ["search"], "user_requested": True, **changes}
 
 
@@ -53,18 +53,18 @@ class DurableCommandContracts(unittest.IsolatedAsyncioTestCase):
         self.store.update(self.parent["id"], checkpoint={"plan": self.value, "phase": "action_plan", "browser_id": "browser-1"})
 
     def normalize(self, payload):
-        return validate_draft(RequestDraft.model_validate(payload), self.registry, "并且把正式岗自动投递",
+        return validate_draft(RequestDraft.model_validate(payload), self.registry, "并且把提供五险一金的岗位自动投递",
             dialogue=self.context.dialogue, conditions={"queries": ["合成分析师"]}, stamp=STAMP)
 
     async def test_recorded_revise_plus_top_level_steps_is_merged_not_rejected(self):
         self.enter(); self.search_only()
         original = copy.deepcopy(self.value)
         payload = {"operation": "revise", "steps": [delivery_step()],
-                   "goals": [{"quote": "把正式岗自动投递", "disposition": "steps", "step_ids": ["deliver_extra"]}]}
+                   "goals": [{"quote": "把提供五险一金的岗位自动投递", "disposition": "steps", "step_ids": ["deliver_extra"]}]}
         normalized = self.normalize(payload)
         self.assertEqual(len(normalized["revision"]["add_steps"]), 1)
         self.assertEqual(normalized["revision"]["plan_id"], self.value["id"])
-        answer = await self.runtime.revise_plan(self.edit_run["id"], normalized["revision"], "并且把正式岗自动投递")
+        answer = await self.runtime.revise_plan(self.edit_run["id"], normalized["revision"], "并且把提供五险一金的岗位自动投递")
         saved = self.store.get(self.parent["id"])["checkpoint"]["plan"]
         self.assertEqual(saved["steps"][:2], original["steps"])
         self.assertEqual(saved["steps"][-1]["evidence_step"], "search")
@@ -83,10 +83,10 @@ class DurableCommandContracts(unittest.IsolatedAsyncioTestCase):
         self.runtime.observe_browser = lambda _: self.view.model_copy(update={"status": BrowserTaskStatus.COMPLETED})
         self.runtime.browser_summary = lambda *args: None
         self.runtime.search_state = lambda _: {"queries": ["合成分析师"]}
-        await self.runtime.watch_plan(self.parent["id"])
-        await self.runtime.watch_plan(self.parent["id"])
+        await asyncio.wait_for(self.runtime.watch_plan(self.parent["id"]), 8)
+        await asyncio.wait_for(self.runtime.watch_plan(self.parent["id"]), 8)
         self.assertEqual([name for name, args in self.calls], ["job_results_read", "mock_delivery_start"])
-        self.assertEqual(self.calls[-1][1]["filters"]["text"], "正式岗位")
+        self.assertEqual(self.calls[-1][1]["filters"]["text"], "提供五险一金")
         self.assertEqual(self.runtime.store.get(self.parent["id"])["status"], "completed")
         TRACES.append({"case": "restart-and-async-completion", "executors": self.calls,
                        "events": self.runtime.store.public_events(self.parent["id"])})
@@ -100,7 +100,7 @@ class DurableCommandContracts(unittest.IsolatedAsyncioTestCase):
         self.context.plan_lookup = lambda plan_id: self.runtime.plan_for_revision("default", plan_id)
         payload = {"operation": "revise", "revision": {"plan_id": "plan-1", "expected_revision": 0}, "steps": [delivery_step()]}
         normalized = self.normalize(payload)
-        await self.runtime.revise_plan(self.edit_run["id"], normalized["revision"], "追加正式岗投递")
+        await self.runtime.revise_plan(self.edit_run["id"], normalized["revision"], "追加提供五险一金的岗位投递")
         child = self.store.get(self.edit_run["id"])
         self.assertEqual(child["parent_id"], self.parent["id"])
         self.assertEqual(child["checkpoint"]["phase"], "action_plan")
@@ -197,10 +197,10 @@ class DurableCommandContracts(unittest.IsolatedAsyncioTestCase):
 class EvidenceReuseContracts(unittest.IsolatedAsyncioTestCase):
     async def test_same_predicate_reuses_verified_jd_evidence_without_model(self):
         async def forbidden(_): raise AssertionError("cached predicate should not call model")
-        facts = {"description": "本岗位为正式岗位，由本公司签订劳动合同。"}
-        prior = {"policy_version": FILTER_POLICY_VERSION, "facts_digest": filter_facts_digest(facts), "conditions": [{"text": "正式岗位", "status": "pass", "mode": "require",
-            "reason": "明确正式", "evidence": [{"field": "description", "quote": "本岗位为正式岗位"}]}]}
-        result = await evaluate_filter(forbidden, leaf("正式岗位"), facts, prior_evidence=prior)
+        facts = {"description": "本岗位为提供五险一金，由本公司签订劳动合同。"}
+        prior = {"policy_version": FILTER_POLICY_VERSION, "facts_digest": filter_facts_digest(facts), "conditions": [{"text": "提供五险一金", "status": "pass", "mode": "require",
+            "reason": "明确提供五险一金", "evidence": [{"field": "description", "quote": "本岗位为提供五险一金"}]}]}
+        result = await evaluate_filter(forbidden, leaf("提供五险一金"), facts, prior_evidence=prior)
         self.assertEqual(result["status"], "pass")
         self.assertTrue(result["conditions"][0]["reused"])
 
@@ -209,21 +209,21 @@ class EvidenceReuseContracts(unittest.IsolatedAsyncioTestCase):
         async def unknown(request):
             calls.append(request)
             return LLMResult('{"conditions":[{"index":0,"status":"unknown","reason":"未说明","evidence":[]}]}', "scripted", "fixture")
-        prior = {"conditions": [{"text": "正式岗位", "status": "pass", "mode": "require",
-            "evidence": [{"field": "description", "quote": "本岗位为正式岗位"}]}]}
-        for text, description in (("正式岗位", "职位已改为实习"), ("有转正机会", "本岗位为正式岗位")):
+        prior = {"conditions": [{"text": "提供五险一金", "status": "pass", "mode": "require",
+            "evidence": [{"field": "description", "quote": "本岗位为提供五险一金"}]}]}
+        for text, description in (("提供五险一金", "职位福利已改为自费保险"), ("提供餐补", "本岗位为提供五险一金")):
             result = await evaluate_filter(unknown, leaf(text), {"description": description}, prior_evidence=prior)
             self.assertEqual(result["status"], "unknown")
         self.assertEqual(len(calls), 2)
 
     async def test_quote_still_present_but_other_facts_changed_is_not_reused(self):
-        facts = {"description": "本岗位为正式岗位，由本公司签订劳动合同。"}
-        prior = {"policy_version": FILTER_POLICY_VERSION, "facts_digest": filter_facts_digest(facts), "conditions": [{"text": "正式岗位", "status": "pass",
-            "mode": "require", "evidence": [{"field": "description", "quote": "本岗位为正式岗位"}]}]}
+        facts = {"description": "本岗位为提供五险一金，由本公司签订劳动合同。"}
+        prior = {"policy_version": FILTER_POLICY_VERSION, "facts_digest": filter_facts_digest(facts), "conditions": [{"text": "提供五险一金", "status": "pass",
+            "mode": "require", "evidence": [{"field": "description", "quote": "本岗位为提供五险一金"}]}]}
         async def unknown(request):
             return LLMResult('{"conditions":[{"index":0,"status":"unknown","reason":"信息矛盾","evidence":[]}]}', "scripted", "fixture")
-        facts["description"] += "以上是旧模板，实际合同为实习协议。"
-        result = await evaluate_filter(unknown, leaf("正式岗位"), facts, prior_evidence=prior)
+        facts["description"] += "以上是旧模板，实际福利不含五险一金。"
+        result = await evaluate_filter(unknown, leaf("提供五险一金"), facts, prior_evidence=prior)
         self.assertEqual(result["status"], "unknown")
         self.assertFalse(result["conditions"][0].get("reused"))
 
@@ -233,12 +233,12 @@ class QueueScopeContracts(unittest.IsolatedAsyncioTestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.jobs = JobStore(Path(self.temp.name) / "jobs.db")
         self.rows, self.model_calls = [], []
-        for index, (status, quote) in enumerate((("pass", "正式岗位"), ("fail", "只招聘实习生"), ("unknown", "招聘类型未说明")), 1):
+        for index, (status, quote) in enumerate((("pass", "提供五险一金"), ("fail", "不提供五险一金"), ("unknown", "福利待遇未说明")), 1):
             row = {"source": "MockJobSite", "source_url": f"http://127.0.0.1:8080/job?id={index}",
                 "title": f"合成岗位{index}", "company": "合成公司", "location": "合成城市", "salary": "20-25K",
                 "description": quote + "。这里只提供合成招聘事实。", "tags": [], "score": 82,
                 "decision": "REVIEW", "reasoning": "合成", "stage": "review", "filter_status": "pass",
-                "filter_evidence": {"status": "pass", "conditions": [{"text": "正式岗位", "status": status,
+                "filter_evidence": {"status": "pass", "conditions": [{"text": "提供五险一金", "status": status,
                     "mode": "require", "evidence": [{"field": "description", "quote": quote}]}]}}
             row["filter_evidence"]["facts_digest"] = filter_facts_digest(row)
             row["filter_evidence"]["policy_version"] = FILTER_POLICY_VERSION
@@ -259,19 +259,19 @@ class QueueScopeContracts(unittest.IsolatedAsyncioTestCase):
         gc.collect(); self.temp.cleanup()
 
     async def test_semantic_scope_queues_only_pass_and_persists_own_evidence(self):
-        result = await self.coordinator.queue_deliveries(session_id="default", task_id="synthetic-search", filters=leaf("正式岗位"))
+        result = await self.coordinator.queue_deliveries(session_id="default", task_id="synthetic-search", filters=leaf("提供五险一金"))
         self.assertEqual((result["queued"], result["excluded"], result["unknown"]), (1, 1, 1))
         queue = self.jobs.mock_delivery_queue()
         self.assertEqual(len(queue), 1)
-        self.assertEqual(json.loads(queue[0]["scope_json"])["filters"]["text"], "正式岗位")
+        self.assertEqual(json.loads(queue[0]["scope_json"])["filters"]["text"], "提供五险一金")
         self.assertEqual(json.loads(queue[0]["scope_evidence_json"])["status"], "pass")
         self.assertEqual(len(self.model_calls), 1)
         self.assertTrue(all(job["filter_status"] == "pass" for job in self.rows))
         TRACES.append({"case": "branch-semantic-scope", "result": result, "queued_job_ids": [item["job_id"] for item in queue]})
 
     async def test_second_queue_request_does_not_duplicate_or_require_new_score(self):
-        first = await self.coordinator.queue_deliveries(session_id="default", filters=leaf("正式岗位"))
-        second = await self.coordinator.queue_deliveries(session_id="default", filters=leaf("正式岗位"))
+        first = await self.coordinator.queue_deliveries(session_id="default", filters=leaf("提供五险一金"))
+        second = await self.coordinator.queue_deliveries(session_id="default", filters=leaf("提供五险一金"))
         self.assertEqual(first["queued"], 1)
         self.assertEqual(second["queued"], 0)
         self.assertEqual(len(self.jobs.mock_delivery_queue()), 1)
@@ -285,8 +285,8 @@ class QueueScopeContracts(unittest.IsolatedAsyncioTestCase):
         self.original_generate = self.coordinator.browser.llm.generate
         self.coordinator.browser.llm.generate = delayed
         self.coordinator.delivery.current = lambda: DeliveryTaskView()
-        task = asyncio.create_task(self.coordinator.queue_deliveries(session_id="default", filters=leaf("正式岗位")))
-        await entered.wait()
+        task = asyncio.create_task(self.coordinator.queue_deliveries(session_id="default", filters=leaf("提供五险一金")))
+        await asyncio.wait_for(entered.wait(), 5)
         await self.coordinator.cancel_delivery_queue("default")
         release.set()
         with self.assertRaises(PreflightRefused):
@@ -300,7 +300,7 @@ class QueueScopeContracts(unittest.IsolatedAsyncioTestCase):
             return await original(request)
         self.coordinator.browser.llm.generate = mutate
         with self.assertRaises(PreflightRefused):
-            await self.coordinator.queue_deliveries(session_id="default", filters=leaf("正式岗位"))
+            await self.coordinator.queue_deliveries(session_id="default", filters=leaf("提供五险一金"))
         self.assertEqual(self.jobs.mock_delivery_queue(), [])
 
 

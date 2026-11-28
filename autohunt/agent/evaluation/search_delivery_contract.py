@@ -30,8 +30,8 @@ from app.workflow.delivery_rules import build_rules
 from app.workflow.rules import Observation, RuleEngine
 
 
-GROUPS = [{"label": "正式", "count": 5, "filters": {"op": "condition", "text": "正式岗位"}},
-          {"label": "实习", "count": 5, "filters": {"op": "condition", "text": "实习岗位"}}]
+GROUPS = [{"label": "深圳", "count": 5, "filters": {"op": "condition", "text": "工作地点在深圳"}},
+          {"label": "上海", "count": 5, "filters": {"op": "condition", "text": "工作地点在上海"}}]
 
 
 def job(index, *, status="pass", groups=None):
@@ -138,7 +138,7 @@ class Admission(unittest.TestCase):
             self.store.authorize_delivery_run(preview.id, run_id="synthetic-run", resume_document_id="synthetic",
                 resume_version=2, resume_digest="changed-digest")
 
-    def test_formal_and_internship_are_independent_quotas(self):
+    def test_shenzhen_and_shanghai_are_independent_quotas(self):
         for i in range(20):
             self.admit(job(i + 1, groups=[{"index": 0, "status": "pass"}, {"index": 1, "status": "fail"}]), groups=GROUPS)
         self.assertEqual(len(self.store.list_jobs()), 5)
@@ -226,7 +226,7 @@ class GroupState(unittest.TestCase):
 
     def test_allowance_is_not_a_quota_classifier(self):
         with self.assertRaises(ValueError):
-            normalize_groups([{"label": "实习", "count": 5, "filters": {"op": "condition", "text": "实习", "mode": "allow"}}])
+            normalize_groups([{"label": "上海", "count": 5, "filters": {"op": "condition", "text": "工作地点在上海", "mode": "allow"}}])
 
 
 class SelectionAndDispatch(unittest.IsolatedAsyncioTestCase):
@@ -251,9 +251,9 @@ class SelectionAndDispatch(unittest.IsolatedAsyncioTestCase):
         async def generate(request):
             calls.append(request)
             criteria = json.loads(request.user_message)["conditions"]
-            return LLMResult(json.dumps({"conditions": [{"index": item["index"], "status": "pass" if item["text"] == "正式岗位" else "fail",
-                "reason": "合成岗位事实", "evidence": [{"field": "description", "quote": "正式岗位"}]} for item in criteria]}), "scripted", "synthetic")
-        verdict = await evaluate_filter(generate, grouped_filter(None, GROUPS), {"description": "本次为正式岗位"})
+            return LLMResult(json.dumps({"conditions": [{"index": item["index"], "status": "pass" if item["text"] == "工作地点在深圳" else "fail",
+                "reason": "合成岗位事实", "evidence": [{"field": "description", "quote": "工作地点在深圳"}]} for item in criteria]}), "scripted", "synthetic")
+        verdict = await evaluate_filter(generate, grouped_filter(None, GROUPS), {"description": "本次工作地点在深圳"})
         self.assertEqual(len(calls), 1)
         self.assertEqual([item["status"] for item in group_verdicts(None, GROUPS, verdict)], ["pass", "fail"])
 

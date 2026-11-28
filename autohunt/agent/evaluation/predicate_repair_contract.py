@@ -27,7 +27,7 @@ from app.workflow.validation import PlanValidationError
 
 STAMP = "synthetic-resume:synthetic-document:1"
 TRACES: list[dict] = []
-MESSAGE = "找深圳的合成岗位，不要外包和第三方，月薪12k至15k；另外查看当前状态。"
+MESSAGE = "找深圳的合成岗位，不要夜班和频繁出差，月薪12k至15k；另外查看当前状态。"
 CITY_QUESTION = "你希望在哪座城市找工作？"
 CITY_MESSAGE = "先问我目标城市再找合成岗位；月薪12k至15k。"
 
@@ -37,14 +37,14 @@ def leaf(text, **fields):
 
 
 def monthly(minimum=12000, maximum=15000):
-    return leaf("月薪12k至15k", salary={"unit": "monthly", "minimum": minimum,
-                                      "maximum": maximum})
+    return leaf(f"月薪区间下限≥{minimum:,}元、上限≤{maximum:,}元", salary={"unit": "monthly", "minimum": minimum,
+                                      "maximum": maximum, "applies_to": "all"})
 
 
 def exclusions():
     return {"op": "all", "children": [
-        {"op": "not", "children": [leaf("外包岗位")]},
-        {"op": "not", "children": [leaf("第三方岗位")]},
+        {"op": "not", "children": [leaf("夜班岗位")]},
+        {"op": "not", "children": [leaf("频繁出差岗位")]},
     ]}
 
 
@@ -176,7 +176,7 @@ class PredicateRepairContracts(unittest.IsolatedAsyncioTestCase):
         self.assert_repaired(value, model, expected)
 
     async def test_not_with_two_children_is_repaired_without_dropping_either_exclusion(self):
-        invalid = {"op": "not", "children": [leaf("外包岗位"), leaf("第三方岗位")]}
+        invalid = {"op": "not", "children": [leaf("夜班岗位"), leaf("频繁出差岗位")]}
         expected = exclusions()
         value, model = await self.plan([search_plan(invalid), search_plan(expected)])
         self.assert_technical_feedback(model)
@@ -184,7 +184,7 @@ class PredicateRepairContracts(unittest.IsolatedAsyncioTestCase):
         children = self.search(value)["arguments"]["filters"]["children"]
         self.assertEqual([child["op"] for child in children], ["not", "not"])
         self.assertEqual([child["children"][0]["text"] for child in children],
-                         ["外包岗位", "第三方岗位"])
+                         ["夜班岗位", "频繁出差岗位"])
 
     async def test_combination_mode_defect_is_a_model_error_not_a_user_slot(self):
         invalid = {"op": "all", "mode": "allow", "children": [monthly()]}
@@ -205,8 +205,8 @@ class PredicateRepairContracts(unittest.IsolatedAsyncioTestCase):
         self.assert_repaired(value, model, expected)
 
     async def test_group_allow_is_repaired_explicitly_and_retains_its_quota(self):
-        invalid = [{"label": "实习", "count": 5, "filters": leaf("实习岗位", mode="allow")}]
-        expected = [{"label": "实习", "count": 5, "filters": leaf("实习岗位")}]
+        invalid = [{"label": "餐补", "count": 5, "filters": leaf("提供餐补", mode="allow")}]
+        expected = [{"label": "餐补", "count": 5, "filters": leaf("提供餐补")}]
         value, model = await self.plan([search_plan(groups=invalid), search_plan(groups=expected)])
         self.assert_technical_feedback(model, "result_groups")
         self.assertEqual(len(model.requests), 2)
@@ -216,7 +216,7 @@ class PredicateRepairContracts(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(value["questions"])
 
     async def test_repair_feedback_preserves_the_original_invalid_predicate_as_data(self):
-        invalid = {"op": "not", "children": [leaf("外包岗位"), leaf("第三方岗位")]}
+        invalid = {"op": "not", "children": [leaf("夜班岗位"), leaf("频繁出差岗位")]}
         value, model = await self.plan([search_plan(invalid), search_plan(exclusions())])
         feedback = model.feedback()
         self.assertEqual(feedback["candidate"]["steps"][0]["arguments"]["filters"], invalid)
@@ -347,7 +347,7 @@ class PredicateRepairContracts(unittest.IsolatedAsyncioTestCase):
                          {"op": "all", "children": []})
 
     async def sibling_plan(self, verdict, *, added_negotiable=False):
-        message = ("分别执行两条独立搜索：深圳合成应用岗位排除外包和第三方；"
+        message = ("分别执行两条独立搜索：深圳合成应用岗位排除夜班和频繁出差；"
                    "深圳合成研究岗位月薪12k至15k，不接受面议。")
         invalid = {"op": "all", "children": []}
         good_filter = monthly()

@@ -53,6 +53,7 @@ def _repairable_predicate_fields(step: dict) -> set[str]:
 
 
 def edited_plan(plan: dict, edit: RevisionDraft, registry, *, stamp: str, session_id: str, message: str) -> dict:
+    from .planning import effective_arguments
     if plan.get("session_id", session_id) != session_id:
         raise ValueError("原任务不属于当前会话")
     if edit.plan_id != plan["id"] or edit.expected_revision != plan.get("revision", 0):
@@ -139,7 +140,8 @@ def edited_plan(plan: dict, edit: RevisionDraft, registry, *, stamp: str, sessio
                 or step["tool"] in result.get("revoked_tools", [])):
             raise ValueError("只能修改尚未执行的步骤；已执行、已撤回和结果不确定的步骤不会重放")
         spec = registry._tools[step["tool"]]
-        arguments = normalize_encoding({**step.get("staged_arguments", step["arguments"]), **update.arguments}, spec.parameters)
+        arguments = effective_arguments(registry, step["tool"], normalize_encoding(
+            {**step.get("staged_arguments", step["arguments"]), **update.arguments}, spec.parameters))
         # Explicit null clears optional nonnullable arguments, rather than inventing a default.
         for key, value in list(arguments.items()):
             if value is None and key not in spec.parameters.get("required", []) and "null" not in spec.parameters.get("properties", {}).get(key, {}).get("type", []):
@@ -216,7 +218,7 @@ def edited_plan(plan: dict, edit: RevisionDraft, registry, *, stamp: str, sessio
         if step["tool"] in result.get("revoked_tools", []):
             raise ValueError("该动作已撤回，新增步骤不能恢复原授权")
         spec = registry._tools[step["tool"]]
-        step["arguments"] = normalize_encoding(step["arguments"], spec.parameters)
+        step["arguments"] = effective_arguments(registry, step["tool"], normalize_encoding(step["arguments"], spec.parameters))
         try:
             registry.validate_arguments(spec.parameters, step["arguments"], path=f"steps.{step['id']}.{step['tool']}.arguments")
         except ValueError as exc:

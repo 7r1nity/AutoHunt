@@ -159,6 +159,22 @@ async def advance(plan: dict, registry) -> list[dict]:
                 observed.append(step); changed = True
                 continue
             task_id = steps.get(step.get("evidence_step"), {}).get("task_id")
+            if hasattr(registry, "_effective_arguments"):
+                try:
+                    prepared = registry._effective_arguments(step["tool"], step["arguments"])
+                except ValueError as exc:
+                    step.update(status="blocked", detail="内部筛选条件需要修复：" + str(exc),
+                        failure={"code": "global_filter_projection", "effect_started": False, "uncertain": False})
+                    observed.append(step); changed = True
+                    persist(plan)
+                    continue
+                if prepared != step["arguments"]:
+                    from ..security.action_grants import action_binding
+                    step["arguments"] = prepared
+                    step["authority_binding"] = action_binding(step["tool"], prepared,
+                        session_id=context.session_id,
+                        requested=step.get("user_requested", (step.get("authority_binding") or {}).get("user_requested", False)))
+                    persist(plan)
             prefix = (registry._delivery_prefix(step["arguments"].get("selector"))
                       if step["tool"] == "mock_delivery_start" and hasattr(registry, "_delivery_prefix") else None)
             if step["tool"] == "mock_delivery_start" and (step["arguments"].get("limit") is not None or prefix is not None):

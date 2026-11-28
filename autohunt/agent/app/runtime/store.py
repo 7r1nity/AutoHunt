@@ -119,17 +119,21 @@ class RunStore:
         return session
 
     def search_state(self, session_id: str) -> dict | None:
+        from .filter_policy_migration import project_conditions
         with self.connect() as db:
             if not db.execute("SELECT 1 FROM agent_sessions WHERE id=?", (session_id,)).fetchone():
                 raise KeyError("会话不存在")
             row = db.execute("SELECT conditions FROM session_search_state WHERE session_id=?", (session_id,)).fetchone()
-            return self._load(row[0]) if row else None
+            return project_conditions(self._load(row[0]), repairable=True) if row else None
 
     def save_search_state(self, session_id: str, conditions: dict) -> dict:
         from .search_state import SearchState
         conditions = SearchState.model_validate(conditions).model_dump(mode="json")
         with self.lock, self.connect() as db:
-            previous = self.search_state(session_id)
+            if not db.execute("SELECT 1 FROM agent_sessions WHERE id=?", (session_id,)).fetchone():
+                raise KeyError("会话不存在")
+            previous_row = db.execute("SELECT conditions FROM session_search_state WHERE session_id=?", (session_id,)).fetchone()
+            previous = self._load(previous_row[0]) if previous_row else None
             conditions["revision"] = (previous or {}).get("revision", 0)
             if previous == conditions:
                 return conditions
@@ -140,14 +144,17 @@ class RunStore:
 
     def dialogue_state(self, session_id: str) -> dict:
         from .dialogue import DialogueState
+        from .filter_policy_migration import project_dialogue
         with self.connect() as db:
             if not db.execute("SELECT 1 FROM agent_sessions WHERE id=?", (session_id,)).fetchone():
                 raise KeyError("会话不存在")
             row = db.execute("SELECT state FROM session_dialogue_state WHERE session_id=?", (session_id,)).fetchone()
-        return DialogueState.model_validate(self._load(row[0]) if row else {}).model_dump(mode="json")
+        return DialogueState.model_validate(project_dialogue(self._load(row[0]) if row else {},
+            session_id=session_id, repairable=True)).model_dump(mode="json")
 
     def mutate_dialogue(self, session_id: str, operation: dict) -> dict:
         from .dialogue import apply_operation
+        from .filter_policy_migration import project_dialogue
         # Background watch updates and foreground turns share atomic read-modify-write.
         with self.lock, self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -155,6 +162,7 @@ class RunStore:
                 raise KeyError("会话不存在")
             row = db.execute("SELECT state FROM session_dialogue_state WHERE session_id=?", (session_id,)).fetchone()
             value = apply_operation(self._load(row[0]) if row else None, operation)
+            value = project_dialogue(value, session_id=session_id, repairable=True)
             encoded = self._encode(value)
             db.execute("INSERT INTO session_dialogue_state VALUES (?,?,?) ON CONFLICT(session_id) DO UPDATE SET state=excluded.state,updated_at=excluded.updated_at",
                        (session_id, encoded, now()))

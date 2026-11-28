@@ -86,7 +86,7 @@ class TypedSalaryContracts(unittest.TestCase):
         expected = ["月薪区间下限≥12,000元", "月薪区间上限≤15,000元",
             "月薪区间下限≥12,000元、上限≤15,000元",
             "月薪区间与要求有交集（下限≥12,000元、上限≤15,000元）",
-            "仅限制实习岗位：日薪区间下限≥300元",
+            "日薪区间下限≥300元",
             "日薪区间下限≥300元、上限≤800元", "薪资面议"]
         for predicate, text in zip(PREDICATES, expected):
             with self.subTest(predicate=predicate):
@@ -102,7 +102,7 @@ class TypedSalaryContracts(unittest.TestCase):
             with self.subTest(value=value):
                 self.assertFalse(schema_accepts(value))
                 self.assertFalse(runtime_accepts(value))
-        semantic = {"op": "condition", "text": "非外包且可远程"}
+        semantic = {"op": "condition", "text": "有五险一金且可远程"}
         self.assertTrue(schema_accepts(semantic))
         self.assertEqual(validate_filter(semantic).text, semantic["text"])
 
@@ -131,10 +131,10 @@ class TypedSalaryContracts(unittest.TestCase):
         monthly, internship, negotiable = typed(PREDICATES[2]), typed(PREDICATES[4]), typed(PREDICATES[6])
         for value in (
             {"op": "any", "children": [monthly, negotiable]},
-            {"op": "all", "children": [monthly, {"op": "condition", "text": "正式岗位"}]},
+            {"op": "all", "children": [monthly, {"op": "condition", "text": "有五险一金"}]},
             {"op": "not", "children": [negotiable]},
             {"op": "any", "children": [monthly, {"op": "all", "children": [
-                {"op": "condition", "text": "实习岗位"}, internship]}]},
+                {"op": "condition", "text": "可远程"}, internship]}]},
         ):
             with self.subTest(value=value):
                 self.assertTrue(schema_accepts(value))
@@ -183,10 +183,10 @@ class TypedSalaryContracts(unittest.TestCase):
         for facts, expected in (
             ({"salary": "300-800元/天", "employment_kind": "internship"}, "pass"),
             ({"salary": "299-800元/天", "employment_kind": "internship"}, "fail"),
-            ({"salary": "12-15K", "employment_kind": "internship"}, "unknown"),
+            ({"salary": "12-15K", "employment_kind": "internship"}, "fail"),
             ({"salary": "面议", "employment_kind": "internship"}, "unknown"),
-            ({"salary": "12-15K", "employment_kind": "regular"}, "pass"),
-            ({"salary": "300元/天"}, "unknown")):
+            ({"salary": "12-15K", "employment_kind": "regular"}, "fail"),
+            ({"salary": "300元/天"}, "pass")):
             with self.subTest(facts=facts):
                 self.assertEqual(judge_salary(predicate, facts)["status"], expected)
 

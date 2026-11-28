@@ -113,7 +113,7 @@ class DurableApprovalContracts(unittest.IsolatedAsyncioTestCase):
         self.assertIn("未设置分数门槛", step["detail"])
 
     def remember_delivery_scope(self):
-        filters = {"op": "all", "children": [{"op": "condition", "text": "正式岗位"},
+        filters = {"op": "all", "children": [{"op": "condition", "text": "双休"},
             {"op": "condition", "text": "月薪至少15k", "salary": {"unit": "monthly", "minimum": 15000}}]}
         remembered = {"id": "old-batch", "session_id": "default", "resume_stamp": STAMP,
             "task_id": "synthetic-search", "min_score": 85, "filters": filters}

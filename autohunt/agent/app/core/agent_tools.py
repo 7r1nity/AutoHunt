@@ -155,11 +155,72 @@ class AgentToolRegistry:
         self.action_policy = ActionPolicy(AlwaysConfirm() if confirmation_policy == "always" else ConfirmRisky(threshold=threshold))
         self._tools = {spec.name: spec for spec in self._build_specs()}
 
+    @staticmethod
+    def _known_identity(selector) -> bool:
+        context = active_run()
+        return isinstance(selector, str) and any(selector.strip() == str(item.get(field) or "").strip()
+            for snapshot in ((context.dialogue or {}).get("snapshots", []) if context else [])
+            for item in snapshot.get("items", []) for field in ("title", "company"))
+
+    def _disabled_removal(self, arguments: dict) -> bool:
+        from .filter_policy import disabled_only
+        return (isinstance(arguments.get("selector"), str)
+                and not self._known_identity(arguments["selector"])
+                and not arguments.get("target_step_id") and not arguments.get("exclude_target_step_id")
+                and disabled_only(arguments["selector"]))
+
+    @staticmethod
+    def _ignored_target_reference(arguments: dict) -> bool:
+        context = active_run()
+        plan = context.plan_reader() if context and context.plan_reader else None
+        references = {arguments.get(key) for key in ("target_step_id", "exclude_target_step_id")} - {None, ""}
+        return bool(references and any(step.get("id") in references and step.get("status") == "completed"
+                    and (step.get("result") or {}).get("ignored_filter")
+                    for step in (plan or {}).get("steps", [])))
+
+    def _effective_arguments(self, name: str, arguments: dict) -> dict:
+        from .filter_policy import project_arguments, disabled_only, project_text
+        from ..runtime.job_references import job_reference
+        result = project_arguments(arguments)
+        if name not in {"mock_delivery_start", "job_target_resolve"} or not result.get("selector"):
+            return result
+        selector = result["selector"]
+        if isinstance(selector, dict):
+            # An ordinal is identity, while a pure retired label was only a
+            # qualifier. Full company/title identities remain unmodified.
+            if selector.get("ordinal") and disabled_only(str(selector.get("title") or "")):
+                result["selector"] = {key: value for key, value in selector.items() if key != "title"}
+            return result
+        reference = job_reference(selector)
+        if reference:
+            if reference[1] and disabled_only(reference[1]):
+                result["selector"] = reference[0]
+            return result
+        if self._known_identity(selector):
+            return result
+        if disabled_only(selector):
+            if name == "mock_delivery_start":
+                # An ignored type is not a target bound. Keep an existing
+                # source/limit/filter bound, otherwise ordinary broad-scope
+                # confirmation remains required before any external action.
+                result.pop("selector", None)
+                result.pop("selection_mode", None)
+            return result
+        projected = project_text(selector)
+        if projected != selector:
+            result.update(selector=projected or "全部已展示", selection_mode="matching")
+        return result
+
     def authorize(self, name: str, arguments: dict) -> ActionDecision:
         spec = self._tools.get(name)
         if spec is None:
             return ActionDecision(Decision.DENY, "unknown_tool", SecurityRisk.UNKNOWN, "工具不存在")
+        arguments = self._effective_arguments(name, arguments)
         self.validate_arguments(spec.parameters, arguments)
+        if (name == "job_remove_selection" and self._disabled_removal(arguments)
+                or name in {"job_remove_selection", "mock_delivery_start"} and self._ignored_target_reference(arguments)):
+            return ActionDecision(Decision.ALLOW, "disabled_filter_noop", SecurityRisk.LOW,
+                                  "该筛选维度已全局移除；不会按此属性删除岗位。")
         decision = self.action_policy.evaluate(name, arguments, spec.effect)
         context = active_run()
         if context and context.cancellation_requested and context.cancellation_requested():
@@ -345,7 +406,7 @@ class AgentToolRegistry:
         ]
         if self.mock_workflow is not None:
             specs.extend([
-                AgentToolSpec("mock_delivery_start", "将用户要求范围内的已搜索模拟站职位加入有限投递队列。批量补投默认继承上一批完整条件，scope_mode=new用于用户明确另起或替换范围；指定岗位不继承旧批量条件。filters仅表达用户要求的投递条件，可复用搜索判断。JD资历诊断仅供参考，不自动追加应届、学历、年限或岗位性质门槛，不因缺少资格证明要求补参或再确认。内部生成逐职位预览与一次性授权，快速逐个沟通、并行等待HR回复、回复后发送简历；不支持真实网站。",
+                AgentToolSpec("mock_delivery_start", "将用户要求范围内的已搜索模拟站职位加入有限投递队列。全局已删除外包/第三方/派遣关系、实习/正式类型、应届/校招/社招及工作/项目年限筛选，当前或历史原话提到也不得恢复。filters只保留薪资、城市、福利、技能等允许条件。批量补投继承上一批仍有效的条件，scope_mode=new用于独立新范围；指定岗位保留其身份锚点。内部生成逐职位预览与一次性授权，快速逐个沟通、并行等待HR回复、回复后发送简历；不支持真实网站。",
                     obj({"min_score": {"type": "integer", "minimum": 0, "maximum": 100},
                          "limit": {"type": "integer", "minimum": 1, "maximum": 200, "description": "本次投递数量上限；先核对本轮用户筛选条件并去重，再按固定结果顺序选择最多该数量。不足处理现有合规岗位并报告缺额，不扩大来源或纳入未来岗位。"},
                          "scope_mode": {"type": "string", "enum": ["inherit", "update", "new"], "description": "inherit为补投/漏投，旧条件取交集且不降分，即使有selector也继承；update修改上一批部分投递条件，未给字段继承、显式字段替换，可降低门槛但须重新核对扩大范围；new为独立新批次完整范围。单岗选择省略本字段时独立。均不修改搜索条件或代替授权。"},
@@ -389,6 +450,12 @@ class AgentToolRegistry:
             return AgentToolOutcome(name, "denied", "工具不在允许列表中", "unknown",
                 failure={"code": "unknown_tool", "retryable": False, "effect_started": False, "uncertain": False})
         context = active_run()
+        try:
+            arguments = self._effective_arguments(name, arguments)
+        except ValueError as exc:
+            return AgentToolOutcome(name, "error", "全局筛选条件需要内部修复：" + str(exc), spec.effect,
+                failure={"code": "global_filter_projection", "retryable": False,
+                         "effect_started": False, "uncertain": False})
         try:
             allowed, reason = self.call_guard.check(spec, arguments, state)
         except Exception as exc:
@@ -682,7 +749,7 @@ class AgentToolRegistry:
             raise ResultSourceClarification(str(exc)) from exc
         constraints = dict(context.search_state or {})
         filters = normalized_search_filters(constraints.get("filters"), constraints.get("salary_min"))
-        from .result_groups import grouped_filter, group_verdicts
+        from .result_groups import grouped_filter, evaluate_grouped_filter
         groups = constraints.get("result_groups")
         semaphore = asyncio.Semaphore(4)
         async def judge(job):
@@ -693,10 +760,11 @@ class AgentToolRegistry:
                     return {"status": "unknown" if not job.get("location") or job["location"] in {"未知", "未注明"} else "fail",
                             "conditions": [], "reason": "工作地点无法满足更新后的城市条件",
                             "digest": filter_digest(validate_filter(filters) if filters else None)}
-                verdict = await evaluate_filter(self.browser.llm.generate, grouped_filter(filters, groups), facts)
-                if groups:
-                    verdict["result_group_evidence"] = group_verdicts(filters, groups, verdict)
-                return verdict
+                prior = job.get("filter_evidence") or {}
+                if isinstance(prior, str):
+                    prior = json.loads(prior)
+                return await evaluate_grouped_filter(self.browser.llm.generate, filters, groups, facts,
+                    prior_evidence=prior)
         async with asyncio.TaskGroup() as group:
             workers = [group.create_task(judge(job)) for job in candidates]
         if stamp != resume_stamp(self.resume_workspace.read_document(), self.candidate_state):
@@ -719,7 +787,7 @@ class AgentToolRegistry:
         from ..workflow.delivery_scope import materialize_delivery_scope
         from ..memory.resume_identity import resume_stamp
         context = active_run()
-        args = dict(args)
+        args = self._effective_arguments("mock_delivery_start", args)
         if args.get("limit") is not None and (type(args["limit"]) is not int or not 1 <= args["limit"] <= 200):
             raise PreflightRefused("本次投递数量上限必须是1至200的整数，未加入队列。")
         # Prefix references mean a bounded batch, whereas 第N remains an exact
@@ -784,6 +852,11 @@ class AgentToolRegistry:
 
     async def _mock_delivery_start(self, args: dict) -> dict:
         effect_checkpoint("preparing")
+        if self._ignored_target_reference(args):
+            limit = args.get("limit")
+            return {"queued": 0, "job_ids": [], "selected_job_ids": [], "ignored_filter": True,
+                    "reason": "retired_target_dimension", "requested_limit": limit, "shortfall": limit,
+                    "message": "定位步骤只包含已全局移除的筛选维度，没有形成具体投递对象；未扩大到全看板或发送任何内容。"}
         context = active_run()
         if context is None:
             raise PreflightRefused("自动投递需要当前会话")
@@ -874,6 +947,11 @@ class AgentToolRegistry:
 
     async def _job_target_resolve(self, args):
         context = active_run()
+        if self._disabled_removal(args):
+            return {"selection": {"items": [], "scope_items": [], "selector": args["selector"],
+                                  "resolution": "retired_dimension", "ignored_filter": True},
+                    "selected_ids": [], "ignored_filter": True,
+                    "message": "该定位仅包含已全局移除的筛选维度，没有选中岗位；不会把它解释为全看板选择。"}
         scope = args.get("scope", "displayed")
         source_args = dict(args)
         if scope == "board":
@@ -914,6 +992,7 @@ class AgentToolRegistry:
                 "message": f"已定位 {len(selected['items'])} 个目标岗位；尚未移除或投递。"}
 
     async def _resolve_job_targets(self, args):
+        args = self._effective_arguments("job_target_resolve", args)
         context = active_run()
         if context is None:
             raise TargetClarification("岗位操作需要当前会话的已展示列表。")
@@ -940,6 +1019,9 @@ class AgentToolRegistry:
         return result
 
     async def _job_remove_selection(self, args):
+        if self._disabled_removal(args) or self._ignored_target_reference(args):
+            return {"removed_ids": [], "history_preserved": True, "ignored_filter": True,
+                    "message": "这些筛选维度已全局移除，未按岗位类型、用工关系、招聘对象或年限移除任何岗位；现有岗位及历史保留。"}
         effect_checkpoint("preparing")
         context = active_run()
         resolved = await self._resolve_job_targets(args)
@@ -1143,6 +1225,7 @@ class AgentToolRegistry:
                 "message": render_job_detail(job, selector, view=view)}
 
     async def _action_propose(self, args):
+        args = {**args, "arguments": self._effective_arguments(args["tool"], args["arguments"])}
         target = self._tools.get(args["tool"])
         if args["tool"] not in ACTION_TOOLS or target is None:
             raise ValueError("不支持通过通用确认执行此动作")

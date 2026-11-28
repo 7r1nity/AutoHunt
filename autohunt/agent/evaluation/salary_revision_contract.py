@@ -83,13 +83,13 @@ class SalaryContracts(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(actual, "pass" if expected else "fail")
                     TRACES.append(dict(kind="salary_range", mode=mode, salary=salary, actual=actual))
 
-    async def test_daily_scope_does_not_exclude_monthly_jobs(self):
+    async def test_daily_threshold_keeps_unit_without_employment_applicability(self):
         expression = leaf("daily", minimum=300, applies_to="internship")
         cases = [("300-500元/天", "实习", "pass"), ("200-400元/天", "实习", "fail"),
                  ("299元/天", "实习", "fail"), ("300元/天", "实习", "pass"),
                  ("面议", "实习", "unknown"), ("未注明", "实习", "unknown"),
-                 ("13-20K", "全职", "pass"), ("13-20K", "社招", "unknown"),
-                 ("13-20K", "应届/校招", "unknown"), ("5-8K", "实习", "unknown"), ("15-20K", "", "unknown")]
+                 ("13-20K", "全职", "fail"), ("13-20K", "社招", "fail"),
+                 ("13-20K", "应届/校招", "fail"), ("5-8K", "实习", "fail"), ("15-20K", "", "fail")]
         for salary, employment, expected in cases:
             self.assertEqual(partial_filter_status(expression, {"salary": salary, "employment_type": employment}), expected)
 
@@ -133,7 +133,8 @@ class SalaryContracts(unittest.IsolatedAsyncioTestCase):
         display = tool_reply("job_search_start", "completed", {"search_conditions": {"salary_min": 15000, "filters": either()}})
         self.assertIn("或 薪资面议", display)
         self.assertNotIn("面议、未知及日薪不算满足", display)
-        self.assertIn("仅限制", filter_summary(leaf("daily", minimum=300, applies_to="internship")))
+        self.assertNotIn("仅限制", filter_summary(leaf("daily", minimum=300, applies_to="internship")))
+        self.assertIn("日薪", filter_summary(leaf("daily", minimum=300, applies_to="internship")))
 
 
 class RevisionContracts(unittest.IsolatedAsyncioTestCase):

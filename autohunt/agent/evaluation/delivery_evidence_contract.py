@@ -44,7 +44,7 @@ def leaf(text):
 
 def scope():
     return {"id": "synthetic-scope", "session_id": "default", "resume_stamp": "stamp",
-            "task_id": "search", "min_score": 85, "filters": leaf("深圳正式全职，月薪至少14000元")}
+            "task_id": "search", "min_score": 85, "filters": leaf("深圳提供五险一金，月薪至少14000元")}
 
 
 def planned(args):
@@ -83,7 +83,7 @@ class Scope(unittest.TestCase):
             self.assertEqual(self.resolve(args), args)
 
     def test_explicit_new_scope_can_replace_old_constraints(self):
-        args = {"scope_mode": "new", "min_score": 80, "filters": leaf("实习岗位")}
+        args = {"scope_mode": "new", "min_score": 80, "filters": leaf("有年终奖")}
         self.assertEqual(self.resolve(args), args)
 
     def test_new_search_does_not_reuse_old_delivery_scope(self):
@@ -116,16 +116,16 @@ class Scope(unittest.TestCase):
 
     def test_salary_narrowing_is_provable_but_alternative_expansion_is_not(self):
         salary = lambda n: {"op": "condition", "text": f"月薪至少{n}", "salary": {"unit": "monthly", "minimum": n}}
-        previous = {**scope(), "filters": {"op": "all", "children": [leaf("正式"), salary(15000)]}}
+        previous = {**scope(), "filters": {"op": "all", "children": [leaf("有五险一金"), salary(15000)]}}
         for amount, needs_confirmation in ((20000, False), (15000, False), (14000, True)):
-            args = {"min_score": 85, "source_task_id": "search", "filters": {"op": "all", "children": [leaf("正式"), salary(amount)]}}
+            args = {"min_score": 85, "source_task_id": "search", "filters": {"op": "all", "children": [leaf("有五险一金"), salary(amount)]}}
             self.assertEqual(bool(delivery_scope_change(args, previous, session_id="default", stamp="stamp")), needs_confirmation)
-        args["filters"] = {"op": "any", "children": [previous["filters"], leaf("实习")]}
+        args["filters"] = {"op": "any", "children": [previous["filters"], leaf("有年终奖")]}
         self.assertIsNotNone(delivery_scope_change(args, previous, session_id="default", stamp="stamp"))
 
     def test_uncertain_paraphrase_requires_confirmation_not_silent_approval(self):
-        previous = {**scope(), "filters": leaf("正式岗位")}
-        self.assertIsNotNone(delivery_scope_change({"min_score": 85, "source_task_id": "search", "filters": leaf("全职工作")},
+        previous = {**scope(), "filters": leaf("有住房补贴")}
+        self.assertIsNotNone(delivery_scope_change({"min_score": 85, "source_task_id": "search", "filters": leaf("提供住宿支持")},
             previous, session_id="default", stamp="stamp"))
 
     def test_structural_subset_proof_has_no_boolean_false_positive(self):
@@ -150,104 +150,94 @@ class Scope(unittest.TestCase):
 
 class Evidence(unittest.IsolatedAsyncioTestCase):
     async def test_generated_tags_never_enter_judgment_or_invalidate_cache(self):
-        facts = {"title": "数据分析师", "description": "当前岗位为正式全职，面向应届毕业生。", "tags": ["SQL"]}
-        requests = []
+        facts = {"title":"数据分析师","description":"当前岗位提供五险一金。","tags":["SQL"]}
+        requests=[]
         async def judge(request):
             requests.append(json.loads(request.user_message))
-            return LLMResult(json.dumps({"conditions": [{"index": 0, "status": "pass", "reason": "全职",
-                "evidence": [{"field": "description", "quote": "当前岗位为正式全职"}]}]}), "scripted", "offline")
-        prior = await evaluate_filter(judge, leaf("正式全职"), facts)
-        stored = {**facts, "source_tags": '["SQL"]', "tags": ["SQL", "虚构模型技能"]}
-        result = await evaluate_filter(judge, leaf("正式全职"), stored, prior_evidence=prior)
-        self.assertEqual(result["status"], "pass")
+            return LLMResult(json.dumps({"conditions":[{"index":0,"status":"pass","reason":"福利明确",
+                "evidence":[{"field":"description","quote":"当前岗位提供五险一金"}]}]}),"scripted","offline")
+        prior=await evaluate_filter(judge,leaf("有五险一金"),facts)
+        stored={**facts,"source_tags":'["SQL"]',"tags":["SQL","虚构模型技能"]}
+        result=await evaluate_filter(judge,leaf("有五险一金"),stored,prior_evidence=prior)
+        self.assertEqual(result["status"],"pass")
         self.assertTrue(result["conditions"][0]["reused"])
-        self.assertEqual(len(requests), 1)
-        self.assertEqual(filter_facts_digest(facts), filter_facts_digest(stored))
-        self.assertNotIn("虚构模型技能", json.dumps(requests, ensure_ascii=False))
+        self.assertEqual(len(requests),1)
+        self.assertEqual(filter_facts_digest(facts),filter_facts_digest(stored))
+        self.assertNotIn("虚构模型技能",json.dumps(requests,ensure_ascii=False))
 
     async def test_real_jd_changes_and_policy_upgrades_require_recheck(self):
-        facts = {"title": "数据分析师", "description": "本岗位是全职。", "tags": []}
-        prior = {"policy_version": FILTER_POLICY_VERSION, "facts_digest": filter_facts_digest(facts),
-            "conditions": [{"text": "全职", "status": "pass", "mode": "require", "evidence": [{"field": "description", "quote": "本岗位是全职"}]}]}
-        cases = [("description", "旧描述：本岗位是全职。现改为实习。"), ("salary", "200元/天"),
-                 ("location", "武汉"), ("company", "新雇主"), ("source_tags", ["实习"])]
-        for field, value in cases:
-            calls = []
+        facts={"title":"数据分析师","description":"本岗位提供五险一金。","tags":[]}
+        prior={"policy_version":FILTER_POLICY_VERSION,"facts_digest":filter_facts_digest(facts),"conditions":[
+            {"text":"有五险一金","status":"pass","mode":"require","evidence":[{"field":"description","quote":"本岗位提供五险一金"}]}]}
+        for field,value in [("description","旧描述：本岗位提供五险一金。福利现已调整。"),("salary","200元/天"),
+                            ("location","武汉"),("company","新雇主"),("source_tags",["新标签"])]:
+            calls=[]
             async def unknown(request):
                 calls.append(request)
-                return LLMResult('{"conditions":[{"index":0,"status":"unknown","evidence":[]}]}', "scripted", "offline")
-            result = await evaluate_filter(unknown, leaf("全职"), {**facts, field: value}, prior_evidence=prior)
-            self.assertEqual((result["status"], len(calls)), ("unknown", 1), field)
-        legacy = {k: v for k, v in prior.items() if k != "policy_version"}
-        result = await evaluate_filter(unknown, leaf("全职"), facts, prior_evidence=legacy)
-        self.assertEqual(result["status"], "unknown")
+                return LLMResult('{"conditions":[{"index":0,"status":"unknown","evidence":[]}]}',"scripted","offline")
+            result=await evaluate_filter(unknown,leaf("有五险一金"),{**facts,field:value},prior_evidence=prior)
+            self.assertEqual((result["status"],len(calls)),("unknown",1),field)
+        legacy={k:v for k,v in prior.items() if k!="policy_version"}
+        result=await evaluate_filter(unknown,leaf("有五险一金"),facts,prior_evidence=legacy)
+        self.assertEqual(result["status"],"unknown")
 
     async def test_new_conditions_do_not_reuse_old_verdict(self):
-        facts = {"description": "本岗位是全职。"}
-        prior = {"policy_version": FILTER_POLICY_VERSION, "facts_digest": filter_facts_digest(facts),
-            "conditions": [{"text": "全职", "status": "pass", "evidence": [{"field": "description", "quote": "本岗位是全职"}]}]}
-        model = AsyncMock(return_value=LLMResult('{"conditions":[{"index":0,"status":"unknown","evidence":[]}]}', "scripted", "offline"))
-        result = await evaluate_filter(model, leaf("全职且不外包"), facts, prior_evidence=prior)
-        self.assertEqual(result["status"], "unknown")
+        facts={"description":"本岗位提供五险一金。"}
+        prior={"policy_version":FILTER_POLICY_VERSION,"facts_digest":filter_facts_digest(facts),"conditions":[
+            {"text":"有五险一金","status":"pass","evidence":[{"field":"description","quote":"本岗位提供五险一金"}]}]}
+        model=AsyncMock(return_value=LLMResult('{"conditions":[{"index":0,"status":"unknown","evidence":[]}]}',"scripted","offline"))
+        result=await evaluate_filter(model,leaf("有五险一金且有住房补贴"),facts,prior_evidence=prior)
+        self.assertEqual(result["status"],"unknown")
         model.assert_awaited_once()
 
     async def test_missing_legacy_source_tags_are_not_reconstructed_from_analysis(self):
         async def judge(request):
-            self.assertEqual(json.loads(request.user_message)["facts"]["tags"], "")
-            return LLMResult('{"conditions":[{"index":0,"status":"unknown","evidence":[]}]}', "scripted", "offline")
-        result = await evaluate_filter(judge, leaf("有资质证书"),
-            {"description": "未说明资质", "source_tags": None, "tags": ["模型推断出的资质"]})
-        self.assertEqual(result["status"], "unknown")
+            self.assertEqual(json.loads(request.user_message)["facts"]["tags"],"")
+            return LLMResult('{"conditions":[{"index":0,"status":"unknown","evidence":[]}]}',"scripted","offline")
+        result=await evaluate_filter(judge,leaf("有资质证书"),{"description":"未说明资质","source_tags":None,"tags":["模型推断出的资质"]})
+        self.assertEqual(result["status"],"unknown")
 
-    async def test_employment_axes_and_unknown_case_matrix(self):
-        cases = [("招聘应届生，当前为正式全职，签订劳动合同。", "regular", "campus", "pass"),
-                 ("校招岗位，性质未披露。", "unknown", "campus", "unknown"),
-                 ("应届生实习，当前为实习协议，之后有转正机会。", "internship", "campus", "fail"),
-                 ("毕业实习，当前为实习协议。", "internship", "campus", "fail"),
-                 ("全职，接受有实习经历的应届生。", "regular", "campus", "pass"),
-                 ("面向社会招聘，性质未披露，月薪20K。", "unknown", "experienced", "unknown")]
-        for industry in ("软件", "金融", "医疗", "外贸", "制造"):
-            for description, kind, channel, verdict in cases:
-                async def judge(request):
-                    self.assertIn("校招/应届/社招属于招聘对象", request.instructions)
-                    e = [{"field": "description", "quote": description}]
-                    return LLMResult(json.dumps({"conditions": [{"index": 0, "status": verdict, "evidence": e}],
-                        "employment": {"kind": {"value": kind, "evidence": e},
-                                       "hiring_channel": {"value": channel, "evidence": e}}}), "scripted", "offline")
-                result = await evaluate_filter(judge, leaf("正式全职"), {"title": industry + "合成岗位", "description": description})
-                self.assertEqual(result["status"], verdict)
-                self.assertEqual(result["employment"]["kind"]["value"], kind)
-                self.assertEqual(result["employment"]["hiring_channel"]["value"], channel)
-                TRACES.append({"industry": industry, "description": description, "result": result})
+    async def test_retired_employment_matrix_never_invokes_classifier_or_blocks(self):
+        descriptions=["招聘应届生，当前为正式全职，签订劳动合同。","校招岗位，性质未披露。",
+            "应届生实习，当前为实习协议，之后有转正机会。","毕业实习，当前为实习协议。",
+            "全职，接受有实习经历的应届生。","面向社会招聘，性质未披露，月薪20K。"]
+        calls=[]
+        async def forbidden(request):
+            calls.append(request)
+            raise AssertionError("Disabled category must not reach the classifier")
+        for industry in ("软件","金融","医疗","外贸","制造"):
+            for description in descriptions:
+                result=await evaluate_filter(forbidden,leaf("正式全职"),{"title":industry+"合成岗位","description":description})
+                self.assertEqual(result["status"],"pass")
+                self.assertEqual(result["conditions"],[])
+                self.assertNotIn("employment",result)
+                TRACES.append({"industry":industry,"description":description,"result":result})
+        self.assertEqual(calls,[])
 
-    async def test_invalid_employment_citation_does_not_create_known_fact(self):
+    async def test_invalid_employment_citation_is_ignored_but_allowed_condition_remains_unknown(self):
         async def judge(_):
-            return LLMResult(json.dumps({"conditions": [{"index": 0, "status": "unknown"}],
-                "employment": {"kind": {"value": "regular", "evidence": [{"field": "description", "quote": "不存在的全职证据"}]}}}), "scripted", "offline")
-        result = await evaluate_filter(judge, leaf("正式全职"), {"description": "校招，性质未披露。"})
-        self.assertEqual(result["employment"]["kind"]["value"], "unknown")
-        self.assertEqual(result["status"], "unknown")
+            return LLMResult(json.dumps({"conditions":[{"index":0,"status":"unknown"}],"employment":{
+                "kind":{"value":"regular","evidence":[{"field":"description","quote":"不存在的全职证据"}]}}}),"scripted","offline")
+        result=await evaluate_filter(judge,leaf("有五险一金"),{"description":"校招，福利未披露。"})
+        self.assertNotIn("employment",result)
+        self.assertEqual(result["status"],"unknown")
 
     async def test_malformed_optional_classification_does_not_poison_valid_conditions(self):
         async def judge(_):
-            return LLMResult(json.dumps({"conditions": [{"index": 0, "status": "pass", "evidence": [{"field": "description", "quote": "当前全职"}]}],
-                "employment": {"kind": {"value": {"bad": "type"}}}}), "scripted", "offline")
-        result = await evaluate_filter(judge, leaf("正式全职"), {"description": "当前全职"})
-        self.assertEqual(result["status"], "pass")
-        self.assertEqual(result["employment"]["kind"]["value"], "unknown")
+            return LLMResult(json.dumps({"conditions":[{"index":0,"status":"pass","evidence":[{"field":"description","quote":"提供五险一金"}]}],
+                "employment":{"kind":{"value":{"bad":"type"}}}}),"scripted","offline")
+        result=await evaluate_filter(judge,leaf("有五险一金"),{"description":"提供五险一金"})
+        self.assertEqual(result["status"],"pass")
+        self.assertNotIn("employment",result)
 
-    async def test_campus_label_cannot_waive_internship_daily_floor(self):
-        expression = {"op": "all", "children": [leaf("当前为实习岗位"),
-            {"op": "condition", "text": "实习日薪至少300元", "salary": {"unit": "daily", "minimum": 300, "applies_to": "internship"}}]}
-        description = "招聘类型：应届/校招。当前签订实习协议，有转正机会。"
-        async def judge(_):
-            e = [{"field": "description", "quote": "当前签订实习协议"}]
-            return LLMResult(json.dumps({"conditions": [{"index": 0, "status": "pass", "evidence": e}],
-                "employment": {"kind": {"value": "internship", "evidence": e}}}), "scripted", "offline")
-        for salary, expected in (("200-400元/天", "fail"), ("300-500元/天", "pass"), ("15-20K", "unknown"), ("面议", "unknown")):
-            result = await evaluate_filter(judge, expression, {"description": description, "salary": salary})
-            self.assertEqual(result["status"], expected, salary)
-            self.assertEqual(result["employment"]["kind"]["value"], "internship")
+    async def test_removed_campus_label_does_not_waive_daily_salary_floor(self):
+        expression={"op":"all","children":[leaf("当前为实习岗位"),{"op":"condition","text":"实习日薪至少300元",
+            "salary":{"unit":"daily","minimum":300,"applies_to":"internship"}}]}
+        async def forbidden(_): raise AssertionError("Salary checks require no employment classification")
+        for salary,expected in (("200-400元/天","fail"),("300-500元/天","pass"),("15-20K","fail"),("面议","unknown")):
+            result=await evaluate_filter(forbidden,expression,{"description":"招聘类型：应届/校招。","salary":salary})
+            self.assertEqual(result["status"],expected,salary)
+            self.assertNotIn("employment",result)
 
 
 class PersistedFlow(unittest.IsolatedAsyncioTestCase):
@@ -261,8 +251,8 @@ class PersistedFlow(unittest.IsolatedAsyncioTestCase):
             self.calls.append(request)
             if len(self.calls) > 2:
                 return LLMResult('{"conditions":[{"index":0,"status":"unknown"}]}', "scripted", "changed-verdict")
-            return LLMResult(json.dumps({"conditions": [{"index": 0, "status": "pass", "reason": "明确全职",
-                "evidence": [{"field": "description", "quote": "当前正式全职岗位"}]}]}), "scripted", "offline")
+            return LLMResult(json.dumps({"conditions": [{"index": 0, "status": "pass", "reason": "明确提供五险一金",
+                "evidence": [{"field": "description", "quote": "当前岗位提供五险一金"}]}]}), "scripted", "offline")
         self.browser = object.__new__(BrowserAutomationService)
         self.browser.store, self.browser.llm = self.store, NS(generate=model)
         self.document = ResumeDocumentView(id="synthetic-doc", version=1)
@@ -285,10 +275,10 @@ class PersistedFlow(unittest.IsolatedAsyncioTestCase):
         self.temp.cleanup()
 
     async def seed(self,qualification_statuses=("pass","pass")):
-        request = BrowserSearchRequest(query="合成分析师", source="mock", filters=leaf("正式全职"), result_limit=2)
+        request = BrowserSearchRequest(query="合成分析师", source="mock", filters=leaf("提供五险一金"), result_limit=2)
         for i in (1, 2):
             detail = {"title": "校招分析师", "company": f"合成公司{i}", "salary": "19-23K", "location": "深圳",
-                "description": "面向应届生，当前正式全职岗位，签订劳动合同。", "tags": ["SQL"], "external_id": str(i)}
+                "description": "面向应届生，当前岗位提供五险一金，签订劳动合同。", "tags": ["SQL"], "external_id": str(i)}
             await self.browser._check_filters("search", detail, request)
             from app.memory.resume_workspace import resume_document_digest
             analysis = JobAnalysis(score=88, decision="APPLY", matched_skills=["Python"], missing_skills=["Graph RAG"], reasoning="合成评分",
@@ -299,7 +289,7 @@ class PersistedFlow(unittest.IsolatedAsyncioTestCase):
     async def test_search_enrichment_then_queue_has_no_second_model_verdict(self):
         self.context.owner = asyncio.current_task()
         await self.seed()
-        result = await self.registry._mock_delivery_start({"filters": leaf("正式全职"), "min_score": 85})
+        result = await self.registry._mock_delivery_start({"filters": leaf("提供五险一金"), "min_score": 85})
         self.assertEqual(result["queued"], 2)
         self.assertEqual(len(self.calls), 2)
         for row in self.store.mock_delivery_queue():
@@ -320,7 +310,7 @@ class PersistedFlow(unittest.IsolatedAsyncioTestCase):
         after = self.store.get_job(1)
         self.assertEqual(after["source_tags"], before["source_tags"])
         self.assertEqual(after["filter_evidence"], before["filter_evidence"])
-        verdict = await evaluate_filter(self.browser.llm.generate, leaf("正式全职"), after,
+        verdict = await evaluate_filter(self.browser.llm.generate, leaf("提供五险一金"), after,
             prior_evidence=json.loads(after["filter_evidence"]))
         self.assertTrue(verdict["conditions"][0]["reused"])
         self.assertEqual(len(self.calls), 2)
@@ -343,7 +333,7 @@ class PersistedFlow(unittest.IsolatedAsyncioTestCase):
         partial["tags"] = ["Python"]
         self.store.upsert_job(partial)
         updated = self.store.get_job(1)
-        result = await evaluate_filter(self.browser.llm.generate, leaf("正式全职"), updated,
+        result = await evaluate_filter(self.browser.llm.generate, leaf("提供五险一金"), updated,
             prior_evidence=json.loads(updated["filter_evidence"]))
         self.assertEqual(result["status"], "unknown")
         self.assertFalse(result["conditions"][0].get("reused"))
@@ -389,13 +379,13 @@ class PersistedFlow(unittest.IsolatedAsyncioTestCase):
     async def test_followup_and_manual_selection_keep_previous_batch_scope(self):
         self.context.owner = asyncio.current_task()
         await self.seed()
-        await self.registry._mock_delivery_start({"filters": leaf("正式全职"), "min_score": 85})
+        await self.registry._mock_delivery_start({"filters": leaf("提供五险一金"), "min_score": 85})
         remembered = copy.deepcopy(self.context.dialogue["delivery_scope"])
         self.context.user_message = "还有两个88分的未投递"
         draft = validate_draft(planned({"min_score": 88}), self.registry, self.context.user_message,
             dialogue=self.context.dialogue, conditions={}, stamp=resume_stamp(self.document, self.candidate))
         args = next(s["arguments"] for s in draft["steps"] if s["tool"] == "mock_delivery_start")
-        self.assertEqual(args["filters"]["text"], "正式全职")
+        self.assertEqual(args["filters"]["text"], "提供五险一金")
         self.assertEqual(args["source_task_id"], "search")
         self.assertEqual(args["min_score"], 88)
         self.assertEqual(args["scope_mode"], "new")
@@ -410,7 +400,7 @@ class PersistedFlow(unittest.IsolatedAsyncioTestCase):
         with self.store._connect() as db:
             db.execute("UPDATE jobs SET source_tags=NULL")
         before = len(self.calls)
-        result = await self.coordinator.queue_deliveries(session_id="default", task_id="search", min_score=85, filters=leaf("正式全职"))
+        result = await self.coordinator.queue_deliveries(session_id="default", task_id="search", min_score=85, filters=leaf("提供五险一金"))
         self.assertEqual((result["queued"], result["insufficient"]), (0, 2))
         self.assertEqual(result["reason"], "insufficient_evidence")
         self.assertEqual(result["scope_checks"], [])
@@ -454,14 +444,14 @@ class PersistedFlow(unittest.IsolatedAsyncioTestCase):
         self.context.action_authority = {"evidence_task_id": "search"}
         self.assertEqual(self.registry._delivery_arguments({"min_score": 85}), {"min_score": 85})
 
-    async def test_campus_without_employment_evidence_stays_pending_off_board(self):
+    async def test_missing_benefit_evidence_stays_pending_off_board(self):
         self.context.owner = asyncio.current_task()
         async def unknown(_):
-            return LLMResult('{"conditions":[{"index":0,"status":"unknown","reason":"只有校招，未披露岗位性质","evidence":[]}]}', "scripted", "offline")
+            return LLMResult('{"conditions":[{"index":0,"status":"unknown","reason":"未披露五险一金","evidence":[]}]}', "scripted", "offline")
         self.browser.llm.generate = unknown
-        request = BrowserSearchRequest(query="分析师", source="mock", filters=leaf("正式全职"), result_limit=2)
+        request = BrowserSearchRequest(query="分析师", source="mock", filters=leaf("提供五险一金"), result_limit=2)
         detail = {"title": "校招分析师", "company": "合成公司", "location": "深圳", "salary": "20-25K",
-            "description": "校招，岗位性质未披露。", "tags": [], "external_id": "3"}
+            "description": "校招，未披露福利。", "tags": [], "external_id": "3"}
         await self.browser._check_filters("search", detail, request)
         analysis = JobAnalysis(score=88, decision="APPLY", matched_skills=[], missing_skills=[], reasoning="合成")
         counts = self.browser._persist_analysis("search", detail, analysis,

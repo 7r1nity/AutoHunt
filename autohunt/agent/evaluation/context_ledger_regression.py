@@ -31,6 +31,7 @@ MODULES = (
     "typed_filter_contract", "predicate_repair_contract", "predicate_revision_contract",
     "delivery_limit_contract", "delivery_round_contract", "workflow_wait_delivery_contract", "delivery_request_contract",
     "qualification_advisory_contract",
+    "global_filter_policy_contract", "global_filter_state_contract", "global_filter_planning_contract", "global_filter_results_contract",
 )
 
 

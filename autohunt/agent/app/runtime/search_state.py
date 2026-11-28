@@ -21,6 +21,12 @@ class SearchState(BaseModel):
     resume_stamp: str = ""
     revision: int = Field(default=0, ge=0)
 
+    @model_validator(mode="before")
+    @classmethod
+    def global_policy(cls, value):
+        from .filter_policy_migration import project_conditions
+        return project_conditions(value, repairable=True) if isinstance(value, dict) else value
+
     @model_validator(mode="after")
     def group_total(self):
         from ..core.result_groups import normalize_groups
@@ -54,6 +60,17 @@ class SearchPatch(BaseModel):
     source: Literal["mock", "boss", "zhaopin"] | None = None
     filters: dict | None = None
 
+    @model_validator(mode="before")
+    @classmethod
+    def global_policy(cls, value):
+        from .filter_policy_migration import project_conditions
+        if not isinstance(value, dict):
+            return value
+        projected = project_conditions(value)
+        if value.get("queries") and projected.get("queries") == []:
+            projected.pop("queries")  # A retired type is not a request to erase the actual role.
+        return projected
+
     @field_validator("result_groups")
     @classmethod
     def clean_groups(cls, value):
@@ -76,6 +93,8 @@ def prepare_search_state(saved: dict | None, candidate=None, resume_version=None
             desired_queries, desired_source = preferences.search_keywords.values[:5], "preference"
         else:
             desired_queries = []
+        from ..core.filter_policy import project_keywords
+        desired_queries = project_keywords(desired_queries)
         # Explicit session roles survive a resume edit. Resume-derived roles do not.
         # Reconcile even with an unchanged stamp: earlier versions could persist
         # an invented default role under the label "resume" with no resume at all.

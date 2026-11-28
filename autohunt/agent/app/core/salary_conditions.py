@@ -35,6 +35,9 @@ class SalaryPredicate(BaseModel):
             raise ValueError("数值薪资条件至少需要一个边界")
         if self.minimum is not None and self.maximum is not None and self.minimum > self.maximum:
             raise ValueError("薪资下界不能超过上界")
+        # Current policy retires employment-type restrictions. Keep legacy
+        # input readable while amount/unit remain ordinary salary predicates.
+        self.applies_to = "all"
         return self
 
 
@@ -87,25 +90,6 @@ def salary_facts(value: str) -> dict:
 def judge_salary(predicate: SalaryPredicate, facts: dict) -> dict:
     salary = str(facts.get("salary") or "")
     observed = salary_facts(salary)
-    if predicate.applies_to == "internship":
-        kind = facts.get("employment_kind")
-        employment = str(facts.get("employment_type") or "")
-        description = str(facts.get("description") or "")
-        match = re.search(r"招聘类型[：:]\s*([^。；;\n]+)", description)
-        employment = employment or (match.group(1) if match else "")
-        # Exact structured role labels are facts; campus/experienced labels
-        # describe the audience, not whether the current contract is an internship.
-        if kind not in {"regular", "internship"}:
-            kind = {"正式": "regular", "正式岗位": "regular", "全职": "regular",
-                    "实习": "internship", "实习生": "internship", "实习岗位": "internship"}.get(employment)
-        if kind == "regular":
-            return {"status": "pass", "reason": "非实习岗位，不受此日薪条件限制", "evidence": []}
-        if kind != "internship":
-            return {"status": "unknown", "reason": "无法确认实习条件是否适用", "evidence": []}
-        if predicate.unit == "daily" and observed["unit"] == "monthly":
-            return {"status": "unknown", "reason": "实习披露的是月薪，无法直接核实日薪门槛，不折算", "evidence": []}
-        if observed["unit"] == "negotiable":
-            return {"status": "unknown", "reason": "实习薪资面议，无法核实日薪门槛", "evidence": []}
     if observed["unit"] == "unknown":
         status, reason = "unknown", "薪资单位或区间未披露，不能猜测或折算"
     elif observed["unit"] == "negotiable" and predicate.unit != "negotiable":

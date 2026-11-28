@@ -495,9 +495,38 @@ class CandidateStateStore:
             profile = CandidateProfileView.model_validate(payload.get("profile", {}))
             profile.evidence = [_sanitize_evidence_item(item) for item in profile.evidence]
             preferences = JobPreferencesView.model_validate(payload.get("preferences", {}))
+            self._project_preferences(preferences, repairable=True)
             return profile, preferences
         except (InvalidToken, json.JSONDecodeError) as exc:
             raise RuntimeError("Candidate preferences could not be decrypted") from exc
+
+    @staticmethod
+    def _project_preferences(preferences, *, repairable=False):
+        from ..core.filter_policy import FilterPolicyRepair, project_keywords
+        for name in ("target_roles", "search_keywords", "excluded_keywords", "work_modes"):
+            field = getattr(preferences, name)
+            try:
+                field.values = project_keywords(field.values)
+            except FilterPolicyRepair:
+                if not repairable:
+                    raise
+        return preferences
+
+    def migrate_filter_policy(self) -> bool:
+        """Persist cleaned preferences without changing candidate evidence."""
+        if not self.path.exists():
+            return False
+        payload = json.loads(self._require_cipher().decrypt(self.path.read_bytes()))
+        profile = CandidateProfileView.model_validate(payload.get("profile", {}))
+        preferences = JobPreferencesView.model_validate(payload.get("preferences", {}))
+        previous = preferences.model_dump(mode="json")
+        self._project_preferences(preferences)
+        if preferences.model_dump(mode="json") == previous:
+            return False
+        preferences.version += 1
+        preferences.updated_at = datetime.now(UTC)
+        self._write(profile, preferences)
+        return True
 
     def read(self) -> CandidateStateView:
         profile, preferences = self._read_pair()
@@ -658,6 +687,9 @@ class CandidateStateStore:
         for name in list_fields:
             if name in update.model_fields_set:
                 values = getattr(update, name) or []
+                if name in {"target_roles", "search_keywords", "excluded_keywords", "work_modes"}:
+                    from ..core.filter_policy import project_keywords
+                    values = project_keywords(values)
                 setattr(preferences, name, PreferenceListField(
                     values=_clean_values(values), source="user_confirmed", confidence=1, updated_at=now
                 ))
@@ -744,6 +776,7 @@ class CandidateStateStore:
         return self.read()
 
     def _write(self, profile: CandidateProfileView, preferences: JobPreferencesView) -> None:
+        self._project_preferences(preferences, repairable=True)
         cipher = self._require_cipher()
         if self.path.exists():
             history = self.history_root / f"v{max(preferences.version - 1, 0):06d}.json.enc"

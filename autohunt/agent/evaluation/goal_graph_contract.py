@@ -17,7 +17,7 @@ from app.workflow.validation import PlanValidationError, preflight, preflight_wa
 from .condition_refresh_contract import alternatives
 
 TRACES = []
-MESSAGE = "更正条件：正式岗月薪至少15k，实习日薪至少300，两类不用同时满足。"
+MESSAGE = "更正条件：月薪至少15k，或者日薪至少300，两类不用同时满足。"
 STAMP = "synthetic-resume:synthetic-document:1"
 
 

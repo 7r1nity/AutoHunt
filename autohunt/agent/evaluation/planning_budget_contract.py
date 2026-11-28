@@ -77,12 +77,12 @@ def condition(text, **fields):
 
 def complex_filters():
     return {"op": "all", "children": [
-        {"op": "not", "children": [condition("外包或劳务派遣")]},
+        {"op": "not", "children": [condition("夜班或频繁出差")]},
         {"op": "any", "children": [
-            {"op": "all", "children": [condition("正式岗位"),
-                condition("月薪12k至15k", salary={"unit": "monthly", "minimum": 12000, "maximum": 15000})]},
-            {"op": "all", "children": [condition("实习岗位"),
-                condition("实习日薪不低于300", salary={"unit": "daily", "minimum": 300, "applies_to": "internship"})]},
+            {"op": "all", "children": [condition("提供五险一金"),
+                condition("月薪区间下限≥12,000元、上限≤15,000元", salary={"unit": "monthly", "minimum": 12000, "maximum": 15000, "applies_to": "all"})]},
+            {"op": "all", "children": [condition("提供餐补"),
+                condition("日薪区间下限≥300元", salary={"unit": "daily", "minimum": 300, "applies_to": "all"})]},
         ]},
     ]}
 
@@ -160,7 +160,7 @@ class CatalogContracts(unittest.TestCase):
                 self.assertIn("minimum", salary["properties"])
                 self.assertIn("maximum", salary["properties"])
         groups = named["job_search_start"]["parameters"]["properties"]["result_groups"]
-        self.assertEqual(groups["items"]["properties"]["filters"], filter_schema())
+        self.assertEqual(groups["items"]["properties"]["filters"], {"anyOf": [filter_schema(), {"type": "null"}]})
 
     def test_new_capability_is_included_without_a_second_tool_allowlist(self):
         tools = registry()
@@ -254,7 +254,7 @@ class PlannerBudgetContracts(unittest.IsolatedAsyncioTestCase):
         return plan, model
 
     async def test_empty_history_full_capability_request_fits_default_budget(self):
-        message = "帮我找20份深圳的算法工程师岗位，不要外包，月薪12k至15k。"
+        message = "帮我找20份深圳的算法工程师岗位，不要夜班，月薪12k至15k。"
         output = draft(message, [step("search", "job_search_start", {
             "queries": ["合成算法工程师"], "locations": ["深圳"], "result_limit": 20})])
         plan, model = await self.plan(message, output)
@@ -305,10 +305,10 @@ class PlannerBudgetContracts(unittest.IsolatedAsyncioTestCase):
                        "provider_calls": len(provider.requests)})
 
     async def test_complex_grouped_search_and_delivery_keep_all_conditions(self):
-        message = "深圳正式5份月薪12k至15k、实习5份日薪至少300；都不要外包，85分以上自动投递。"
+        message = "深圳五险一金5份月薪12k至15k、餐补5份日薪至少300；都不要夜班，85分以上自动投递。"
         filters = complex_filters()
-        groups = [{"label": "正式", "count": 5, "filters": condition("正式岗位")},
-                  {"label": "实习", "count": 5, "filters": condition("实习岗位")}]
+        groups = [{"label": "五险一金", "count": 5, "filters": condition("提供五险一金")},
+                  {"label": "餐补", "count": 5, "filters": condition("提供餐补")}]
         output = draft(message, [step("search", "job_search_start", {
             "queries": ["合成算法工程师"], "locations": ["深圳"], "result_limit": 10,
             "filters": filters, "result_groups": groups}),

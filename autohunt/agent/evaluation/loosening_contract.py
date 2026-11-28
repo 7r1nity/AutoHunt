@@ -83,7 +83,7 @@ class BooleanContracts(unittest.TestCase):
     def test_group_soft_conditions_not_silently_upgraded(self):
         for mode in ("allow", "prefer"):
             with self.subTest(mode=mode), self.assertRaises(ValueError):
-                normalize_groups([{"label": "允许实习", "count": 5, "filters": leaf("实习", mode)}])
+                normalize_groups([{"label": "允许远程", "count": 5, "filters": leaf("可远程", mode)}])
 
 
 # 162 independently named truth-table cases: all/any/NOT, unknown, mixed
@@ -145,7 +145,7 @@ class PlanningContracts(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("filters", value["verified_conditions"])
 
     async def test_soft_quota_waits_only_search_branch(self):
-        group = {"label": "实习", "count": 5, "filters": leaf("实习", "allow")}
+        group = {"label": "远程", "count": 5, "filters": leaf("可远程", "allow")}
         value = self.validate(draft([step("search", "job_search_start", {"result_groups": [group]}),
                                     step("read", "context_state_read")], ["search", "read"]))
         input_waits(value)
@@ -154,7 +154,7 @@ class PlanningContracts(unittest.IsolatedAsyncioTestCase):
 
     async def test_predicate_defect_gets_model_repair_before_user_question(self):
         payloads = [draft([step("search", "job_search_start", {"filters": {"op": "all", "children": []}})], ["search"]),
-                    draft([step("search", "job_search_start", {"filters": leaf("不要外包")})], ["search"])]
+                    draft([step("search", "job_search_start", {"filters": leaf("不倒班")})], ["search"])]
         calls = []
         async def generate(request):
             calls.append(request)
@@ -167,7 +167,7 @@ class PlanningContracts(unittest.IsolatedAsyncioTestCase):
                 dialogue={}, conditions=self.context.search_state, stamp=STAMP))
         self.assertEqual(len(calls), 2)
         self.assertFalse(plan["questions"])
-        self.assertEqual(plan["steps"][0]["arguments"]["filters"]["text"], "不要外包")
+        self.assertEqual(plan["steps"][0]["arguments"]["filters"]["text"], "不倒班")
 
     async def test_exhausted_predicate_repair_is_scoped_system_failure_not_user_input(self):
         payload = draft([step("search", "job_search_start", {"filters": {"op": "all", "children": []}}),
@@ -311,12 +311,12 @@ class ApprovalContracts(unittest.IsolatedAsyncioTestCase):
 
     async def test_confirmation_card_creates_no_provider_or_background_task(self):
         value = self.plan()
-        value["steps"][0]["arguments"]["filters"] = leaf("合成正式岗位")
+        value["steps"][0]["arguments"]["filters"] = leaf("合成岗位含五险一金")
         self.store.save_plan(self.run["id"], value)
         with patch("app.llm.deepseek_provider.DeepSeekProvider", side_effect=AssertionError("unexpected network provider")):
             await self.tick(value)
         self.assertEqual(value["steps"][0]["status"], "waiting_approval")
-        self.assertIn("合成正式岗位", value["steps"][0]["detail"])
+        self.assertIn("合成岗位含五险一金", value["steps"][0]["detail"])
         self.assertFalse(self.runtime.tasks)
 
     async def test_configured_strict_policy_still_applies_to_local_mutations(self):

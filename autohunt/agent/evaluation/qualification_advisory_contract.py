@@ -124,10 +124,15 @@ class MatchingAdvisory(unittest.IsolatedAsyncioTestCase):
             nonlocal called
             called = True
             return LLMResult(json.dumps(payload()), "scripted", "unused")
-        result = await match_job(generate, request(excluded_keywords=["劳务派遣"]))
+        result = await match_job(generate, request(excluded_keywords=["FastAPI"]))
         self.assertFalse(called)
         self.assertEqual((result.decision, result.score), ("SKIP", 0))
         self.assertIn("命中用户排除关键词", result.reasoning)
+
+    async def test_globally_retired_exclusions_do_not_block_model_matching(self):
+        result, calls = await self.generated(payload(), request(excluded_keywords=["劳务派遣", "实习", "应届"]))
+        self.assertEqual((result.decision, result.score), ("APPLY", 90))
+        self.assertEqual(json.loads(calls[0].context)["excluded_keywords"], [])
 
     async def test_project_evidence_does_not_inject_requirements_or_exclusions(self):
         item = request()

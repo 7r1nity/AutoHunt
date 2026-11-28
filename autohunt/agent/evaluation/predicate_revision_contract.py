@@ -112,7 +112,7 @@ class PredicateRevisionContracts(unittest.IsolatedAsyncioTestCase):
         broken["technical_issues"].append({"field": "result_groups", "code": "value_error"})
         with self.assertRaises(ValueError):
             self.edit(plan, {"filters": valid_filter()})
-        groups = [{"label": "正式", "count": 5, "filters": {"op": "condition", "text": "正式岗位"}}]
+        groups = [{"label": "五险一金", "count": 5, "filters": {"op": "condition", "text": "提供五险一金"}}]
         updated = self.edit(plan, {"filters": valid_filter(), "result_groups": groups})
         self.assertEqual(self.broken(updated)["status"], "pending")
         self.assertEqual(self.broken(updated)["arguments"]["result_groups"][0]["count"], 5)
@@ -133,8 +133,8 @@ class PredicateRevisionContracts(unittest.IsolatedAsyncioTestCase):
         broken["unresolved_arguments"] = {"result_groups": []}
         broken["technical_issues"] = [{"field": "result_groups", "code": "value_error"}]
         with self.assertRaises(ValueError):
-            self.edit(plan, {"result_groups": [{"label": "实习", "count": 5,
-                "filters": {"op": "condition", "text": "实习岗位", "mode": "allow"}}]})
+            self.edit(plan, {"result_groups": [{"label": "餐补", "count": 5,
+                "filters": {"op": "condition", "text": "提供餐补", "mode": "allow"}}]})
 
     async def test_null_or_empty_group_cannot_clear_failed_scope_as_format_repair(self):
         with self.assertRaises(ValueError):
@@ -241,7 +241,7 @@ class PredicateRevisionContracts(unittest.IsolatedAsyncioTestCase):
         updated = edited_plan(plan, RevisionDraft.model_validate(revised["revision"]), self.tools,
             stamp=STAMP, session_id="default", message=MESSAGE)
         self.assertEqual(self.broken(updated)["status"], "waiting_input")
-        self.assertIn("请确认本次修正的薪资范围。", self.broken(updated)["questions"])
+        self.assertIn("请确认本次修正的薪资范围", [question.rstrip("。") for question in self.broken(updated)["questions"]])
 
 
 def main():

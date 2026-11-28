@@ -12,6 +12,7 @@ from types import SimpleNamespace as NS
 
 from app.core.agent_tools import AgentToolRegistry, MissingDeliveryEvidence
 from app.core.job_filters import evaluate_filter, filter_digest, validate_filter
+from app.core.filter_policy import project_filter
 from app.core.models import BrowserTaskStatus
 from app.jobs.store import JobStore
 from app.llm.base import LLMResult
@@ -25,8 +26,7 @@ TRACES = []
 
 
 def salary(unit, amount=None):
-    return {"op": "condition", "text": "月薪至少15k" if unit == "monthly" else "薪资面议" if unit == "negotiable" else "实习日薪至少300元",
-            "salary": {"unit": unit, **({"minimum": amount} if amount is not None else {})}}
+    return project_filter({"op": "condition", "salary": {"unit": unit, **({"minimum": amount} if amount is not None else {})}})
 
 
 def alternatives():
@@ -57,14 +57,17 @@ class Conditions(unittest.IsolatedAsyncioTestCase):
             expression = {"op": "all", "children": [salary("monthly", 15000), {"op": "condition", "text": text, "mode": "allow"}]}
             result = await evaluate_filter(forbidden, expression, {"salary": "28-33K"})
             self.assertEqual(result["status"], "pass")
-            self.assertEqual(result["conditions"][1]["reason"], "用户允许包含的范围，不是岗位必须满足的事实")
+            if text in ("实习也可以", "接受校招"):
+                self.assertEqual(len(result["conditions"]),1)
+            else:
+                self.assertEqual(result["conditions"][1]["reason"], "用户允许包含的范围，不是岗位必须满足的事实")
             TRACES.append({"kind": "allowance", "text": text, "result": result})
 
     async def test_alternative_branch_salary_and_employment_grid(self):
         cases = [("社招", "28-33K", "pass"), ("应届/校招", "15-20K", "pass"),
                  ("社招", "12-20K", "fail"), ("社招", "面议", "pass"),
                  ("实习", "300-500元/天", "pass"), ("实习", "200-500元/天", "fail"),
-                 ("实习", "面议", "unknown"), ("实习", "15-20K", "fail"),
+                 ("实习", "面议", "pass"), ("实习", "15-20K", "pass"),
                  ("", "未披露", "unknown")]
         for industry in ("金融", "软件", "医疗", "外贸", "制造"):
             for employment, value, expected in cases:
@@ -73,12 +76,12 @@ class Conditions(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(result["status"], expected, (industry, employment, value))
                 TRACES.append({"kind": "alternative", "industry": industry, "employment": employment, "salary": value, "expected": expected, "actual": result["status"]})
 
-    async def test_intern_scope_cannot_bypass_daily_bound_with_monthly_salary(self):
+    async def test_removed_intern_scope_keeps_salary_alternatives_without_type_classification(self):
         expression = alternatives()
         expression["children"][1]["children"][1]["salary"]["applies_to"] = "internship"
-        for value in ("5-8K", "15-20K", "面议"):
+        for value, expected in (("5-8K","fail"), ("15-20K","pass"), ("面议","pass")):
             result = await evaluate_filter(category_model, expression, {"salary": value, "description": "招聘类型：实习"})
-            self.assertEqual(result["status"], "unknown")
+            self.assertEqual(result["status"], expected)
 
 
 class Refresh(unittest.IsolatedAsyncioTestCase):
@@ -90,8 +93,8 @@ class Refresh(unittest.IsolatedAsyncioTestCase):
         self.document = NS(id="synthetic-document", version=1)
         self.document.model_dump = lambda **_: {"id": self.document.id, "version": self.document.version}
         self.resume = NS(read_document=lambda: self.document)
-        self.old = {"op": "all", "children": [salary("monthly", 15000), {"op": "condition", "text": "接受实习岗位"}]}
-        self.new = {"op": "all", "children": [salary("monthly", 15000), {"op": "condition", "text": "实习也可", "mode": "allow"}]}
+        self.old = {"op": "all", "children": [salary("monthly", 15000), {"op": "condition", "text": "可远程工作"}]}
+        self.new = {"op": "all", "children": [salary("monthly", 15000), {"op": "condition", "text": "远程工作也可", "mode": "allow"}]}
         self.task_id = "search-1"
         self.jobs.create_task(self.task_id, "mock", "分析师", resume_id=self.profile.resume_id)
         self.jobs.save_search_request(self.task_id, {"conversation_id": "default", "filters": self.old})

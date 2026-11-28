@@ -102,6 +102,11 @@ from ..memory.stores import ALLOWED_LLM_MODELS
 async def lifespan(_: FastAPI):
     job_store.reconcile_incomplete_runs()
     delivery_service.reload_persisted_state()
+    from ..runtime.filter_policy_migration import migrate_filter_policy
+    from ..runtime.filter_policy_results import refresh_filter_policy_results
+    policy_migration = migrate_filter_policy(run_store, candidate_state_store)
+    await refresh_filter_policy_results(job_store, run_store, candidate_state_store, resume_workspace_store,
+                                        policy_migration["refilter_sources"])
     agent.restore_history(job_store.conversation_history(limit=8))
     await mock_workflow.start()
     await agent_runtime.start()

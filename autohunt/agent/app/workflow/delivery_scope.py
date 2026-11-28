@@ -23,7 +23,9 @@ def remember_selection_scope(step, arguments):
 
 
 def materialize_delivery_scope(arguments, previous, *, session_id, stamp, task_id=None, new_search=False):
-    args = copy.deepcopy(arguments)
+    from ..core.filter_policy import project_arguments
+    args = project_arguments(arguments)
+    previous = project_arguments(previous) if previous else previous
     selected = args.get("selector") or args.get("target_step_id")
     # Omitted mode means an independently selected job. An explicit inherit or
     # update applies equally to named sets (e.g. the remaining jobs); a selector

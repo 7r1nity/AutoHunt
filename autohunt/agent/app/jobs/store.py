@@ -812,8 +812,9 @@ class JobStore:
                 status = "not_admitted"
             group_index = None
             if status == "accepted" and groups:
-                group_index = next((item["index"] for item in job.get("result_group_evidence", [])
-                                    if item["status"] == "pass" and group_counts.get(item["index"], 0) < groups[item["index"]]["count"]), None)
+                eligible_groups = [item["index"] for item in job.get("result_group_evidence", [])
+                    if item["status"] == "pass" and group_counts.get(item["index"], 0) < groups[item["index"]]["count"]]
+                group_index = min(eligible_groups, key=lambda index: (groups[index].get("filters") is None, index), default=None)
                 if group_index is None:
                     status = "quota_full"
             if status == "accepted" and limit and len(admitted) >= limit:
@@ -932,10 +933,11 @@ class JobStore:
             rows = db.execute("SELECT DISTINCT j.* FROM jobs j JOIN browser_events e "
                 "ON j.id=json_extract(e.sample_json,'$.job_id') WHERE e.task_id=? "
                 "AND e.event_type IN ('job_stored','job_duplicate','candidate_recorded') ORDER BY j.id LIMIT ?",
-                (task_id, min(limit, 30))).fetchall()
+                (task_id, min(limit, 200))).fetchall()
         return [dict(row) for row in rows]
 
-    def save_refilter_results(self, task_id: str, candidates: list[dict], verdicts: list[dict], constraints: dict) -> None:
+    def save_refilter_results(self, task_id: str, candidates: list[dict], verdicts: list[dict], constraints: dict,
+                              *, frozen_analyses: dict[int, dict] | None = None) -> None:
         """Commit new evidence together; never leave a new status with an old receipt."""
         from ..runtime.context import effect_checkpoint
         from ..runtime.resilience import PreflightRefused
@@ -975,8 +977,9 @@ class JobStore:
                 group_index = None
                 admitted = verdict["status"] == "pass"
                 if admitted and groups:
-                    group_index = next((item["index"] for item in verdict.get("result_group_evidence", [])
-                                        if item["status"] == "pass" and group_counts.get(item["index"], 0) < groups[item["index"]]["count"]), None)
+                    eligible_groups = [item["index"] for item in verdict.get("result_group_evidence", [])
+                        if item["status"] == "pass" and group_counts.get(item["index"], 0) < groups[item["index"]]["count"]]
+                    group_index = min(eligible_groups, key=lambda index: (groups[index].get("filters") is None, index), default=None)
                     admitted = group_index is not None
                 current_row = db.execute("SELECT removed_at FROM jobs WHERE id=?", (candidate["id"],)).fetchone()
                 admitted = admitted and not current_row["removed_at"] and (not limit or admitted_count < limit)
@@ -984,9 +987,17 @@ class JobStore:
                     admitted_count += 1
                     group_counts[group_index] = group_counts.get(group_index, 0) + 1
                 encoded = json.dumps(verdict, ensure_ascii=False)
-                db.execute("UPDATE jobs SET filter_status=?,filter_evidence=? WHERE id=?",
-                    (verdict["status"], encoded, candidate["id"]))
-                updated = {**candidate, "filter_status": verdict["status"], "filter_evidence": encoded}
+                reasoning = candidate.get("reasoning") or ""
+                if verdict["status"] == "pass":
+                    reasoning = reasoning.removeprefix("筛选条件待核实，禁止自动投递。")
+                db.execute("UPDATE jobs SET filter_status=?,filter_evidence=?,reasoning=? WHERE id=?",
+                    (verdict["status"], encoded, reasoning, candidate["id"]))
+                updated = {**candidate, "filter_status": verdict["status"], "filter_evidence": encoded, "reasoning": reasoning}
+                if frozen_analyses and candidate["id"] in frozen_analyses:
+                    updated.update({key: value for key, value in frozen_analyses[candidate["id"]].items()
+                                    if key in {"score", "decision", "reasoning", "qualification_evidence"}})
+                    if verdict["status"] == "pass" and isinstance(updated.get("reasoning"), str):
+                        updated["reasoning"] = updated["reasoning"].removeprefix("筛选条件待核实，禁止自动投递。")
                 sample = {"job_id": candidate["id"], "filter_status": verdict["status"],
                     "filter_evidence": verdict, "filter_fingerprint": self.review_fingerprint(updated)}
                 sample.update(self._analysis_receipt(updated))

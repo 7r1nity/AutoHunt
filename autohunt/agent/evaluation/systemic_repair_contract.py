@@ -26,7 +26,7 @@ from evaluation.search_delivery_contract import job
 
 
 def monthly(value=15000):
-    return {"op":"condition","text":f"月薪至少{value}元","salary":{"unit":"monthly","minimum":value}}
+    return {"op":"condition","text":f"月薪区间下限≥{value:,}元","salary":{"unit":"monthly","minimum":value,"applies_to":"all"}}
 
 
 def negotiable():
@@ -48,8 +48,8 @@ class FilterContracts(unittest.TestCase):
         import jsonschema
         leaf=monthly()
         examples=[leaf,{"op":"all","text":"说明","children":[leaf]},
-            {"op":"not","text":"不要外包","children":[{"op":"condition","text":"外包"}]},
-            {"op":"any","label":"正式或实习","children":[leaf,negotiable()]},
+            {"op":"not","text":"不要夜班","children":[{"op":"condition","text":"夜班"}]},
+            {"op":"any","label":"月薪或面议","children":[leaf,negotiable()]},
             {"op":"not","children":[]},{"op":"not","children":[leaf,leaf]},
             {"op":"condition","text":""},{"op":"condition","text":"有效","children":[leaf]},
             {"op":"all","children":[leaf],"mode":"allow"},{"op":"all","children":[leaf],"salary":{"unit":"negotiable"}}]
@@ -67,9 +67,9 @@ class FilterContracts(unittest.TestCase):
                 self.assertEqual(registry,accepted)
 
     def test_group_annotation_is_retained_without_changing_truth(self):
-        tree={"op":"any","text":"正式或实习","children":[monthly(),negotiable()]}
+        tree={"op":"any","text":"月薪或面议","children":[monthly(),negotiable()]}
         expression=validate_filter(tree)
-        self.assertEqual(expression.label,"正式或实习")
+        self.assertEqual(expression.label,"月薪或面议")
         self.assertEqual(expression.text,"")
         self.assertEqual(len(expression.leaves()),2)
         for first in ("pass","fail","unknown"):
